@@ -142,3 +142,22 @@ async fn eod_pipeline_dry_run_ends_partial() {
         other => panic!("expected Completed, got {other:?}"),
     }
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn schedule_draw_persists_within_day() {
+    use getbloomdata_lib::{db, scheduler, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = db::connect(&url).await.unwrap();
+    let v = views::create_view(&pool, "t12-view", "").await.unwrap();
+    let sid: i64 = sqlx::query_scalar(
+        "INSERT INTO schedule (view_id) VALUES ($1) RETURNING id")
+        .bind(v.id).fetch_one(&pool).await.unwrap();
+    let today = chrono::Local::now().date_naive();
+    let first = scheduler::ensure_draw(&pool, sid, today).await.unwrap();
+    let second = scheduler::ensure_draw(&pool, sid, today).await.unwrap();
+    assert_eq!(first, second);  // restart must not re-roll
+    let win_s = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+    let win_e = chrono::NaiveTime::from_hms_opt(18, 0, 0).unwrap();
+    assert!(first >= win_s && first < win_e);
+}

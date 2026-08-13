@@ -1,0 +1,184 @@
+use crate::error::AppResult;
+use crate::orchestrator::{self, PipelineConfig, RunOutcome};
+use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Weekday};
+use rand::Rng;
+use sqlx::PgPool;
+use std::collections::HashSet;
+
+pub fn draw_time(window_start: NaiveTime, window_end: NaiveTime,
+                 rng: &mut impl Rng) -> NaiveTime {
+    let start_s = window_start.signed_duration_since(
+        NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_seconds();
+    let end_s = window_end.signed_duration_since(
+        NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_seconds();
+    let s = rng.gen_range(start_s..end_s);
+    NaiveTime::from_num_seconds_from_midnight_opt(s as u32, 0).unwrap()
+}
+
+pub fn is_due(now: NaiveTime, drawn_at: NaiveTime) -> bool {
+    now >= drawn_at
+}
+
+pub async fn ensure_draw(pool: &PgPool, schedule_id: i64, today: NaiveDate)
+    -> AppResult<NaiveTime> {
+    let row: (Option<NaiveDate>, Option<NaiveTime>, NaiveTime, NaiveTime) =
+        sqlx::query_as(
+            "SELECT drawn_for, drawn_at, window_start, window_end
+             FROM schedule WHERE id = $1")
+        .bind(schedule_id).fetch_one(pool).await?;
+    if let (Some(df), Some(da)) = (row.0, row.1) {
+        if df == today {
+            return Ok(da);  // never re-roll within a day
+        }
+    }
+    let t = draw_time(row.2, row.3, &mut rand::thread_rng());
+    sqlx::query("UPDATE schedule SET drawn_for = $2, drawn_at = $3 WHERE id = $1")
+        .bind(schedule_id).bind(today).bind(t).execute(pool).await?;
+    Ok(t)
+}
+
+pub async fn already_ran_today(pool: &PgPool, view_id: i64, today: NaiveDate)
+    -> AppResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM run
+         WHERE view_id = $1 AND kind = 'eod' AND trigger_kind = 'scheduled'
+           AND status <> 'failed' AND started_at::date = $2")
+        .bind(view_id).bind(today).fetch_one(pool).await?;
+    Ok(n > 0)
+}
+
+pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
+                  now: chrono::DateTime<chrono::Local>) -> AppResult<Vec<i64>> {
+    let today = now.date_naive();
+    let schedules: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, view_id FROM schedule WHERE active")
+        .fetch_all(pool).await?;
+    let mut launched = Vec::new();
+    for (sid, view_id) in schedules {
+        let drawn = ensure_draw(pool, sid, today).await?;
+        if !is_due(now.time(), drawn) || already_ran_today(pool, view_id, today).await? {
+            continue;
+        }
+        let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", today, false).await;
+        let msg = match &result {
+            Ok(RunOutcome::Completed { run_id, summary }) =>
+                format!("ok run={run_id} upserted={} issues={}",
+                        summary.upserted, summary.issues),
+            Ok(RunOutcome::NeedsConfirmation { estimated, .. }) =>
+                format!("blocked: needs confirmation for {estimated} estimated hits"),
+            Err(e) => format!("failed: {e}"),
+        };
+        sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
+            .bind(sid).bind(&msg).execute(pool).await?;
+        if matches!(result, Ok(RunOutcome::Completed { .. })) {
+            launched.push(view_id);
+        }
+    }
+    Ok(launched)
+}
+
+pub fn missing_weekdays(present: &HashSet<NaiveDate>,
+                        start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let mut out = Vec::new();
+    let mut d = start;
+    while d <= end {
+        if !matches!(d.weekday(), Weekday::Sat | Weekday::Sun) && !present.contains(&d) {
+            out.push(d);
+        }
+        d += Duration::days(1);
+    }
+    out
+}
+
+fn next_weekday(d: NaiveDate) -> NaiveDate {
+    let mut n = d + Duration::days(1);
+    while matches!(n.weekday(), Weekday::Sat | Weekday::Sun) {
+        n += Duration::days(1);
+    }
+    n
+}
+
+pub fn group_ranges(dates: &[NaiveDate], cap_days: i64) -> Vec<(NaiveDate, NaiveDate)> {
+    let mut out: Vec<(NaiveDate, NaiveDate)> = Vec::new();
+    for &d in dates {
+        match out.last_mut() {
+            Some((s, e)) if next_weekday(*e) == d && (d - *s).num_days() < cap_days =>
+                *e = d,
+            _ => out.push((d, d)),
+        }
+    }
+    out
+}
+
+pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
+                         today: NaiveDate) -> AppResult<Vec<(NaiveDate, NaiveDate)>> {
+    let start = today - Duration::days(lookback_days);
+    let end = today - Duration::days(1);
+    let rows: Vec<(NaiveDate,)> = sqlx::query_as(
+        "SELECT DISTINCT o.obs_date FROM observation o
+         JOIN view_asset va ON va.asset_id = o.asset_id
+         WHERE va.view_id = $1 AND o.obs_date BETWEEN $2 AND $3")
+        .bind(view_id).bind(start).bind(end).fetch_all(pool).await?;
+    let present: HashSet<NaiveDate> = rows.into_iter().map(|r| r.0).collect();
+    Ok(group_ranges(&missing_weekdays(&present, start, end),
+                    orchestrator::BACKFILL_CAP_DAYS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, NaiveTime};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use std::collections::HashSet;
+
+    #[test]
+    fn draw_stays_inside_window_and_varies() {
+        let s = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let e = NaiveTime::from_hms_opt(18, 0, 0).unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut seen = HashSet::new();
+        for _ in 0..200 {
+            let t = draw_time(s, e, &mut rng);
+            assert!(t >= s && t < e, "drew {t} outside window");
+            seen.insert(t);
+        }
+        assert!(seen.len() > 150, "draws should vary, got {} distinct", seen.len());
+    }
+
+    #[test]
+    fn due_logic_covers_catchup() {
+        let drawn = NaiveTime::from_hms_opt(11, 30, 0).unwrap();
+        assert!(!is_due(NaiveTime::from_hms_opt(9, 0, 0).unwrap(), drawn));
+        assert!(is_due(NaiveTime::from_hms_opt(11, 30, 0).unwrap(), drawn));
+        assert!(is_due(NaiveTime::from_hms_opt(17, 59, 0).unwrap(), drawn)); // late launch
+    }
+
+    #[test]
+    fn missing_weekdays_ignores_weekends() {
+        let mut present = HashSet::new();
+        present.insert(NaiveDate::from_ymd_opt(2026, 8, 10).unwrap()); // Mon
+        present.insert(NaiveDate::from_ymd_opt(2026, 8, 12).unwrap()); // Wed
+        let start = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();  // Sat
+        let end = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();   // Wed
+        let missing = missing_weekdays(&present, start, end);
+        assert_eq!(missing, vec![NaiveDate::from_ymd_opt(2026, 8, 11).unwrap()]); // Tue only
+    }
+
+    #[test]
+    fn ranges_group_contiguous_weekdays_and_respect_cap() {
+        let d = |m: u32, day: u32| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+        // Thu 8/6, Fri 8/7, Mon 8/10 are weekday-contiguous; Wed 8/19 is separate
+        let ranges = group_ranges(&[d(8,6), d(8,7), d(8,10), d(8,19)], 30);
+        assert_eq!(ranges, vec![(d(8,6), d(8,10)), (d(8,19), d(8,19))]);
+        // cap splits long runs
+        let long: Vec<_> = (0..40)
+            .map(|i| d(6, 1) + chrono::Duration::days(i))
+            .filter(|x| !matches!(x.weekday(),
+                chrono::Weekday::Sat | chrono::Weekday::Sun))
+            .collect();
+        for (s, e) in group_ranges(&long, 30) {
+            assert!((e - s).num_days() < 30);
+        }
+    }
+}

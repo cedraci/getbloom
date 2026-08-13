@@ -9,6 +9,7 @@ pub mod excel_read;
 pub mod ingest;
 pub mod budget;
 pub mod orchestrator;
+pub mod scheduler;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
