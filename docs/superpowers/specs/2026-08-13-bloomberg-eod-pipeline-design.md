@@ -324,3 +324,31 @@ estimator and treats it as a soft signal, not a guarantee:
 - Multi-machine or server deployment — the Desktop API license binds the
   tool to the Terminal machine.
 - Intraday data — EOD only.
+
+## Amendment A1 (2026-08-14): Daily runs fetch the PREVIOUS trading day
+
+Approved by user. The original design's daily "EOD" run snapshotted live
+BDP values at the randomized run time and stored them under today's date.
+The user clarified the intent: the daily run must extract the previous
+day's end-of-day data, never the current day's live values. No
+market-close timing constraints apply to the schedule window.
+
+Changes:
+
+- **Semantics:** a daily run (scheduled or "Run now") targets
+  `obs_date = previous weekday of today` (Monday fetches Friday). The
+  scheduler's weekend skip stays: Friday's data arrives with Monday's run.
+- **Mechanism:** BDP cannot return "as of yesterday", so the daily
+  workbook becomes mixed, still ONE file per run (META kind stays `eod`):
+  - numeric and date fields: per-asset BDH sheets (`A<asset_id>`), single
+    day `start = end = obs_date` — the official close for that date;
+  - text fields (no history in BDH, e.g. NAME): per-class BDP sheets
+    carrying text fields only; their live values are stored under the same
+    previous-day `obs_date` (reference data changes rarely — accepted).
+- **Holidays:** if the previous weekday was a non-trading day, the BDH
+  sheets come back empty; the run ingests the text fields, records
+  "no data" issues for the BDH side, and ends `partial`. The date remains
+  a gap in `missing_weekdays` (consistent with the no-holiday-calendar
+  design; Bloomberg's calendar remains the source of truth).
+- **Hit cost:** unchanged — securities × fields × 1 day; the estimator
+  formula stays valid.
