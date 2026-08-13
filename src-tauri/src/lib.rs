@@ -6,6 +6,7 @@ pub mod views;
 pub mod excel_gen;
 pub mod refresh_driver;
 pub mod excel_read;
+pub mod ingest;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
