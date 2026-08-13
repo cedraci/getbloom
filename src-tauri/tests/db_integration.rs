@@ -39,3 +39,21 @@ async fn asset_crud_round_trip() {
     }).await.unwrap();
     assert_eq!(asset.bdp_security, "AAPL US Equity");
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn view_fields_falls_back_to_class_fields() {
+    use getbloomdata_lib::{db, fields, registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = db::connect(&url).await.unwrap();
+    let class = registry::create_asset_class(&pool, "EquityT4", "t").await.unwrap();
+    let f = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
+    let a = registry::create_asset(&pool, registry::NewAsset {
+        asset_class_id: class.id, label: "MC".into(), id_kind: "isin".into(),
+        ticker: None, isin: Some("FR0000121014".into()), yellow_key: "Equity".into(),
+    }).await.unwrap();
+    let v = views::create_view(&pool, "lux-t4", "").await.unwrap();
+    views::set_view_assets(&pool, v.id, &[a.id]).await.unwrap();
+    let fs = views::view_fields(&pool, v.id).await.unwrap();  // no explicit fields
+    assert!(fs.iter().any(|x| x.id == f.id));
+}
