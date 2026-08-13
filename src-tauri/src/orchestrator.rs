@@ -92,18 +92,6 @@ async fn refresh_with_retry(cfg: &PipelineConfig, wb: &Path) -> AppResult<()> {
     }
 }
 
-/// Record budget hits if the fetcher's result implies Bloomberg was actually hit:
-/// either the pipeline succeeded, or it failed specifically during the refresh stage
-/// (`AppError::Refresh`) — Bloomberg was hit either way in both cases.
-async fn record_hits_for_result(
-    pool: &PgPool, run_id: i64, estimated: i64, result: &AppResult<excel_read::ReadOutcome>,
-) -> AppResult<()> {
-    match result {
-        Ok(_) | Err(AppError::Refresh { .. }) => budget::record_hits(pool, run_id, estimated).await,
-        Err(_) => Ok(()),
-    }
-}
-
 async fn finish(pool: &PgPool, cfg: &PipelineConfig, run_id: i64, view_name: &str,
                 date: NaiveDate, wb: &Path, summary: IngestSummary) -> AppResult<RunOutcome> {
     let dest = archive_path(&cfg.data_dir, run_id, view_name, date);
@@ -143,7 +131,9 @@ pub async fn run_eod(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
     let fetcher = ExcelComFetcher { cfg };
     let result = fetcher.fetch_eod(&wb, &meta, &loaded.assets, &loaded.gen_fields,
                                    &loaded.field_specs, obs_date).await;
-    record_hits_for_result(pool, run_id, estimated, &result).await?;
+    // Hits are recorded for every fetch attempt, even on failure — over-counting is
+    // safer than under-counting for a budget guard.
+    budget::record_hits(pool, run_id, estimated).await?;
     let outcome = match result {
         Ok(o) => o,
         Err(e) => { fail_run(pool, run_id, &e).await?; return Err(e); }
@@ -191,7 +181,9 @@ pub async fn run_backfill(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
     let fetcher = ExcelComFetcher { cfg };
     let result = fetcher.fetch_history(&wb, &meta, &loaded.assets, &loaded.gen_fields,
                                        &loaded.field_specs, start, end).await;
-    record_hits_for_result(pool, run_id, estimated, &result).await?;
+    // Hits are recorded for every fetch attempt, even on failure — over-counting is
+    // safer than under-counting for a budget guard.
+    budget::record_hits(pool, run_id, estimated).await?;
     let outcome = match result {
         Ok(o) => o,
         Err(e) => { fail_run(pool, run_id, &e).await?; return Err(e); }
