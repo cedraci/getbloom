@@ -11,6 +11,10 @@ pub fn draw_time(window_start: NaiveTime, window_end: NaiveTime,
         NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_seconds();
     let end_s = window_end.signed_duration_since(
         NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_seconds();
+    // Guard misconfigured schedule rows (start >= end) to prevent panic on empty range
+    if start_s >= end_s {
+        return window_start;
+    }
     let s = rng.gen_range(start_s..end_s);
     NaiveTime::from_num_seconds_from_midnight_opt(s as u32, 0).unwrap()
 }
@@ -55,8 +59,28 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
         .fetch_all(pool).await?;
     let mut launched = Vec::new();
     for (sid, view_id) in schedules {
-        let drawn = ensure_draw(pool, sid, today).await?;
-        if !is_due(now.time(), drawn) || already_ran_today(pool, view_id, today).await? {
+        // Isolate per-schedule errors: one schedule's failure never blocks the others
+        let drawn = match ensure_draw(pool, sid, today).await {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("draw error: {e}");
+                let _ = sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
+                    .bind(sid).bind(&msg).execute(pool).await;
+                continue;
+            }
+        };
+
+        let already_ran = match already_ran_today(pool, view_id, today).await {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("check error: {e}");
+                let _ = sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
+                    .bind(sid).bind(&msg).execute(pool).await;
+                continue;
+            }
+        };
+
+        if !is_due(now.time(), drawn) || already_ran {
             continue;
         }
         let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", today, false).await;
@@ -68,8 +92,8 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
                 format!("blocked: needs confirmation for {estimated} estimated hits"),
             Err(e) => format!("failed: {e}"),
         };
-        sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
-            .bind(sid).bind(&msg).execute(pool).await?;
+        let _ = sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
+            .bind(sid).bind(&msg).execute(pool).await;
         if matches!(result, Ok(RunOutcome::Completed { .. })) {
             launched.push(view_id);
         }
@@ -144,6 +168,16 @@ mod tests {
             seen.insert(t);
         }
         assert!(seen.len() > 150, "draws should vary, got {} distinct", seen.len());
+    }
+
+    #[test]
+    fn draw_time_guards_misconfigured_bounds() {
+        let t = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
+        let mut rng = StdRng::seed_from_u64(99);
+        // Equal bounds should not panic and should return start time
+        assert_eq!(draw_time(t, t, &mut rng), t);
+        // Inverted bounds should not panic and should return start time
+        assert_eq!(draw_time(t, NaiveTime::from_hms_opt(9, 0, 0).unwrap(), &mut rng), t);
     }
 
     #[test]
