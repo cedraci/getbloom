@@ -11,6 +11,8 @@ Before running this checklist, ensure:
 - **`bloomdata` database** is created (`createdb bloomdata`)
 - **`BLOOM_DATABASE_URL`** environment variable is set (or defaults to PostgreSQL connection string)
 
+**Note**: an EOD run scheduled inside 09:00–18:00 snapshots LIVE BDP values during market hours and stores them under today's date — schedule the window after your market's close (or accept snapshot semantics) if downstream statistics assume closing prices.
+
 ## Smoke Test Steps
 
 - [ ] **Step 1: Seed** — in the UI: class `Equity`; fields `PX_LAST` (numeric), `PX_VOLUME` (numeric), `NAME` (text); assets `AAPL US` (ticker) and one ISIN-based asset (e.g. `FR0000120271` / yellow key `Equity`); view `smoke` with both assets.
@@ -40,3 +42,4 @@ Before running this checklist, ensure:
 **Task 7 verification items**:
 - Verify the exit-2 timeout path is correctly implemented in the shutdown sequence
 - Confirm that `$excel.Hwnd` is populated with `Visible=$false` on the real machine during Excel automation
+- Verify the refresh poll loop in `refresh.ps1` actually WAITS (does not exit on the first poll) while cells still show "Requesting Data" — a fresh COM instance without explicit `Find()` LookIn/LookAt args can search formulas instead of values and exit the loop instantly

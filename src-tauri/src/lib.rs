@@ -14,6 +14,8 @@ pub mod views;
 
 use commands::{AppConfig, AppState};
 
+// Config lives at the fixed default location (C:\bloomdata\config.json) so that
+// changing data_dir can't orphan it; data_dir only governs pending/archive workbooks.
 fn load_config() -> AppConfig {
     let default = AppConfig::default();
     let path = std::path::PathBuf::from(&default.data_dir).join("config.json");

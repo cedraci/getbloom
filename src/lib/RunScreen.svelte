@@ -9,6 +9,10 @@
   let selectedRun = $state<RunRow | null>(null);
   let issues = $state<IssueRow[]>([]);
   let error = $state("");
+  // Prevents a double-click from starting two concurrent pipelines (two Excel
+  // instances hitting the same pending path, double Bloomberg hits) while a
+  // multi-minute run/backfill await is in flight.
+  let inFlight = $state(false);
 
   type PendingConfirm =
     | { kind: "eod"; estimated: number; today_total: number }
@@ -45,6 +49,7 @@
 
   async function runNow() {
     if (selectedViewId === null) return;
+    inFlight = true;
     try {
       const outcome = await api.runEodNow(selectedViewId, false);
       if ("NeedsConfirmation" in outcome) {
@@ -54,10 +59,12 @@
         await Promise.all([loadViewData(), refreshRuns()]);
       }
     } catch (e) { error = String(e); }
+    finally { inFlight = false; }
   }
 
   async function backfillRange(start: string, end: string) {
     if (selectedViewId === null) return;
+    inFlight = true;
     try {
       const outcome = await api.runBackfillNow(selectedViewId, start, end, false);
       if ("NeedsConfirmation" in outcome) {
@@ -67,10 +74,12 @@
         await Promise.all([loadViewData(), refreshRuns()]);
       }
     } catch (e) { error = String(e); }
+    finally { inFlight = false; }
   }
 
   async function confirmPending() {
     if (selectedViewId === null || pending === null) return;
+    inFlight = true;
     try {
       if (pending.kind === "eod") {
         await api.runEodNow(selectedViewId, true);
@@ -80,6 +89,7 @@
       pending = null;
       await Promise.all([loadViewData(), refreshRuns()]);
     } catch (e) { error = String(e); }
+    finally { inFlight = false; }
   }
 
   async function selectRun(run: RunRow) {
@@ -102,7 +112,7 @@
     </p>
   {/if}
 
-  <button onclick={runNow} disabled={selectedViewId === null}>Run now</button>
+  <button onclick={runNow} disabled={inFlight || selectedViewId === null}>Run now</button>
 
   {#if pending}
     <div class="confirm">
@@ -110,7 +120,7 @@
         This {pending.kind === "backfill" ? "backfill" : "run"} is estimated at
         {pending.estimated} hits (today so far: {pending.today_total}). Confirm to proceed.
       </p>
-      <button onclick={confirmPending}>Confirm run</button>
+      <button onclick={confirmPending} disabled={inFlight}>Confirm run</button>
       <button onclick={() => (pending = null)}>Cancel</button>
     </div>
   {/if}
@@ -122,7 +132,7 @@
       {#each gaps as [start, end]}
         <tr>
           <td>{start}</td><td>{end}</td>
-          <td><button onclick={() => backfillRange(start, end)}>Backfill</button></td>
+          <td><button onclick={() => backfillRange(start, end)} disabled={inFlight}>Backfill</button></td>
         </tr>
       {/each}
     </tbody>

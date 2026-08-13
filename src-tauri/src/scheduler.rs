@@ -51,14 +51,39 @@ pub async fn already_ran_today(pool: &PgPool, view_id: i64, today: NaiveDate)
     Ok(n > 0)
 }
 
+// Policy (controller-ruled): a view gets at most this many FAILED scheduled attempts
+// per day; beyond that, tick skips it until tomorrow's re-draw rather than retrying
+// every heartbeat for the rest of the day and burning more Bloomberg hits.
+const MAX_FAILED_SCHEDULED_ATTEMPTS_PER_DAY: i64 = 3;
+const GIVE_UP_MSG: &str = "giving up for today after 3 failed attempts";
+
+pub async fn failed_attempts_today(pool: &PgPool, view_id: i64, today: NaiveDate)
+    -> AppResult<i64> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM run
+         WHERE view_id = $1 AND kind = 'eod' AND trigger_kind = 'scheduled'
+           AND status = 'failed' AND started_at::date = $2")
+        .bind(view_id).bind(today).fetch_one(pool).await?;
+    Ok(n)
+}
+
+// EOD data exists only for trading days; a weekend run would store misleading
+// weekend-dated snapshots and waste Bloomberg hits for no reason.
+pub fn is_weekend(d: NaiveDate) -> bool {
+    matches!(d.weekday(), Weekday::Sat | Weekday::Sun)
+}
+
 pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
                   now: chrono::DateTime<chrono::Local>) -> AppResult<Vec<i64>> {
     let today = now.date_naive();
-    let schedules: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT id, view_id FROM schedule WHERE active")
+    if is_weekend(today) {
+        return Ok(vec![]);
+    }
+    let schedules: Vec<(i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, view_id, last_result FROM schedule WHERE active")
         .fetch_all(pool).await?;
     let mut launched = Vec::new();
-    for (sid, view_id) in schedules {
+    for (sid, view_id, last_result) in schedules {
         // Isolate per-schedule errors: one schedule's failure never blocks the others
         let drawn = match ensure_draw(pool, sid, today).await {
             Ok(t) => t,
@@ -83,6 +108,26 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
         if !is_due(now.time(), drawn) || already_ran {
             continue;
         }
+
+        // Cap retries: after MAX_FAILED_SCHEDULED_ATTEMPTS_PER_DAY failures today,
+        // skip this view until tomorrow instead of retrying every heartbeat.
+        let failed_count = match failed_attempts_today(pool, view_id, today).await {
+            Ok(n) => n,
+            Err(e) => {
+                let msg = format!("check error: {e}");
+                let _ = sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
+                    .bind(sid).bind(&msg).execute(pool).await;
+                continue;
+            }
+        };
+        if failed_count >= MAX_FAILED_SCHEDULED_ATTEMPTS_PER_DAY {
+            if last_result.as_deref() != Some(GIVE_UP_MSG) {
+                let _ = sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
+                    .bind(sid).bind(GIVE_UP_MSG).execute(pool).await;
+            }
+            continue;
+        }
+
         let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", today, false).await;
         let msg = match &result {
             Ok(RunOutcome::Completed { run_id, summary }) =>
@@ -186,6 +231,14 @@ mod tests {
         assert!(!is_due(NaiveTime::from_hms_opt(9, 0, 0).unwrap(), drawn));
         assert!(is_due(NaiveTime::from_hms_opt(11, 30, 0).unwrap(), drawn));
         assert!(is_due(NaiveTime::from_hms_opt(17, 59, 0).unwrap(), drawn)); // late launch
+    }
+
+    #[test]
+    fn is_weekend_flags_sat_and_sun_only() {
+        assert!(is_weekend(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap())); // Sat
+        assert!(is_weekend(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap())); // Sun
+        assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap())); // Fri
+        assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap())); // Mon
     }
 
     #[test]

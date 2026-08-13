@@ -19,10 +19,14 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $exit = 3; $status = 'excel-error'; $detail = ''
 
 function Test-StillRequesting($wb) {
+    # Find() relies on Excel's session-persisted LookIn/LookAt UI defaults when those
+    # args are omitted; a fresh COM instance may default to searching formulas instead
+    # of displayed values, making this loop exit instantly. Pass them explicitly:
+    # LookIn=xlValues (-4163), LookAt=xlPart (2), After=[Type]::Missing.
     foreach ($sheet in $wb.Worksheets) {
         $used = $sheet.UsedRange
         if ($null -ne $used) {
-            $hit = $used.Find('Requesting Data')
+            $hit = $used.Find('Requesting Data', [Type]::Missing, -4163, 2)
             if ($null -ne $hit) { return $true }
         }
     }

@@ -279,8 +279,11 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<AppConfig, AppEr
 #[tauri::command]
 pub async fn save_settings(state: State<'_, AppState>, cfg: AppConfig)
     -> Result<(), AppError> {
-    let path = PathBuf::from(&cfg.data_dir).join("config.json");
-    std::fs::create_dir_all(&cfg.data_dir)?;
+    // Config lives at the fixed default location (C:\bloomdata\config.json) so that
+    // changing data_dir can't orphan it; data_dir only governs pending/archive workbooks.
+    let default_data_dir = &AppConfig::default().data_dir;
+    let path = PathBuf::from(default_data_dir).join("config.json");
+    std::fs::create_dir_all(default_data_dir)?;
     std::fs::write(&path, serde_json::to_string_pretty(&cfg)
         .map_err(|e| AppError::Validation(e.to_string()))?)?;
     *state.cfg.write().await = cfg;
