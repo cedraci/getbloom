@@ -125,6 +125,19 @@ async fn eod_pipeline_dry_run_ends_partial() {
             let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id=$1")
                 .bind(run_id).fetch_one(&pool).await.unwrap();
             assert_eq!(status, "partial");
+
+            // Finding 3: assert the every-fetch-attempt ledger rule and the
+            // pending/ -> archive/ workbook lifecycle actually happened end to end.
+            let ledger_count: i64 = sqlx::query_scalar(
+                "SELECT count(*)::bigint FROM hit_ledger WHERE run_id=$1")
+                .bind(run_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(ledger_count, 1);
+
+            let archive = orchestrator::archive_path(&cfg.data_dir, run_id, "t11-view", d);
+            assert!(archive.exists(), "expected archived workbook at {archive:?}");
+
+            let pending = orchestrator::pending_path(&cfg.data_dir, "t11-view", d);
+            assert!(!pending.exists(), "pending workbook should have moved to archive/");
         }
         other => panic!("expected Completed, got {other:?}"),
     }

@@ -92,15 +92,26 @@ async fn refresh_with_retry(cfg: &PipelineConfig, wb: &Path) -> AppResult<()> {
     }
 }
 
+// Invariant: the run row must reach a terminal status (`ok`/`partial`) even if
+// archiving the workbook fails afterward — ingest already committed, so the pipeline
+// outcome is final regardless of whether the file move succeeds.
 async fn finish(pool: &PgPool, cfg: &PipelineConfig, run_id: i64, view_name: &str,
                 date: NaiveDate, wb: &Path, summary: IngestSummary) -> AppResult<RunOutcome> {
     let dest = archive_path(&cfg.data_dir, run_id, view_name, date);
-    std::fs::create_dir_all(dest.parent().unwrap())?;
-    std::fs::rename(wb, &dest)?;
     let status = if summary.issues > 0 { "partial" } else { "ok" };
     sqlx::query("UPDATE run SET status=$2, finished_at=now(), workbook_path=$3 WHERE id=$1")
         .bind(run_id).bind(status).bind(dest.to_string_lossy().as_ref())
         .execute(pool).await?;
+
+    let move_result = std::fs::create_dir_all(dest.parent().unwrap())
+        .and_then(|_| std::fs::rename(wb, &dest));
+    if let Err(e) = move_result {
+        // Best-effort note only — the run is already terminal above; a failure here
+        // must not change that status or surface as an error to the caller.
+        let note = format!("archive move failed: {e}; workbook left in pending/");
+        let _ = sqlx::query("UPDATE run SET error_summary=$2 WHERE id=$1")
+            .bind(run_id).bind(note).execute(pool).await;
+    }
     Ok(RunOutcome::Completed { run_id, summary })
 }
 
@@ -132,18 +143,31 @@ pub async fn run_eod(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
     let result = fetcher.fetch_eod(&wb, &meta, &loaded.assets, &loaded.gen_fields,
                                    &loaded.field_specs, obs_date).await;
     // Hits are recorded for every fetch attempt, even on failure — over-counting is
-    // safer than under-counting for a budget guard.
-    budget::record_hits(pool, run_id, estimated).await?;
+    // safer than under-counting for a budget guard. Losing this one advisory ledger
+    // row must not abort or mask the pipeline result, so failures here are non-fatal.
+    if let Err(e) = budget::record_hits(pool, run_id, estimated).await {
+        eprintln!("warning: failed to record budget hit for run {run_id}: {e}");
+    }
     let outcome = match result {
         Ok(o) => o,
-        Err(e) => { fail_run(pool, run_id, &e).await?; return Err(e); }
+        Err(e) => {
+            // Best-effort status write; the original error is the diagnosis to return
+            // regardless of whether this UPDATE itself succeeds.
+            let _ = fail_run(pool, run_id, &e).await;
+            return Err(e);
+        }
     };
 
     set_status(pool, run_id, "reading").await?;
     set_status(pool, run_id, "ingesting").await?;
     let summary = match ingest::ingest_outcome(pool, run_id, &outcome).await {
         Ok(s) => s,
-        Err(e) => { fail_run(pool, run_id, &e).await?; return Err(e); }
+        Err(e) => {
+            // Best-effort status write; the original error is the diagnosis to return
+            // regardless of whether this UPDATE itself succeeds.
+            let _ = fail_run(pool, run_id, &e).await;
+            return Err(e);
+        }
     };
     finish(pool, cfg, run_id, &loaded.view_name, obs_date, &wb, summary).await
 }
@@ -182,18 +206,31 @@ pub async fn run_backfill(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
     let result = fetcher.fetch_history(&wb, &meta, &loaded.assets, &loaded.gen_fields,
                                        &loaded.field_specs, start, end).await;
     // Hits are recorded for every fetch attempt, even on failure — over-counting is
-    // safer than under-counting for a budget guard.
-    budget::record_hits(pool, run_id, estimated).await?;
+    // safer than under-counting for a budget guard. Losing this one advisory ledger
+    // row must not abort or mask the pipeline result, so failures here are non-fatal.
+    if let Err(e) = budget::record_hits(pool, run_id, estimated).await {
+        eprintln!("warning: failed to record budget hit for run {run_id}: {e}");
+    }
     let outcome = match result {
         Ok(o) => o,
-        Err(e) => { fail_run(pool, run_id, &e).await?; return Err(e); }
+        Err(e) => {
+            // Best-effort status write; the original error is the diagnosis to return
+            // regardless of whether this UPDATE itself succeeds.
+            let _ = fail_run(pool, run_id, &e).await;
+            return Err(e);
+        }
     };
 
     set_status(pool, run_id, "reading").await?;
     set_status(pool, run_id, "ingesting").await?;
     let summary = match ingest::ingest_outcome(pool, run_id, &outcome).await {
         Ok(s) => s,
-        Err(e) => { fail_run(pool, run_id, &e).await?; return Err(e); }
+        Err(e) => {
+            // Best-effort status write; the original error is the diagnosis to return
+            // regardless of whether this UPDATE itself succeeds.
+            let _ = fail_run(pool, run_id, &e).await;
+            return Err(e);
+        }
     };
     finish(pool, cfg, run_id, &loaded.view_name, end, &wb, summary).await
 }
