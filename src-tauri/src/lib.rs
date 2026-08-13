@@ -32,6 +32,13 @@ pub fn run() {
 
     let state = AppState { pool: pool.clone(), cfg: tokio::sync::RwLock::new(cfg.clone()) };
 
+    // Tell Tauri to dispatch #[tauri::command] async fns onto this same runtime — the
+    // one that owns the sqlx pool's connections and the heartbeat task below — rather
+    // than spinning up its own internally-managed runtime. Must be called before any
+    // tauri::async_runtime use and before the Builder is constructed/run. `rt` is a
+    // local that lives for the rest of `run()`, so it outlives the Tauri event loop.
+    tauri::async_runtime::set(rt.handle().clone());
+
     // scheduler heartbeat: every 60 s, fire any schedule whose drawn time has passed
     rt.spawn({
         let pool = pool.clone();
