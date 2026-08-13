@@ -102,6 +102,54 @@ pub fn generate_eod_workbook(
     Ok(())
 }
 
+pub fn bdh_sheet_name(asset_id: i64) -> String {
+    format!("A{asset_id}")
+}
+
+pub fn generate_backfill_workbook(
+    path: &Path, meta: &WbMeta, assets: &[GenAsset], fields: &[GenField],
+    start: chrono::NaiveDate, end: chrono::NaiveDate,
+) -> AppResult<()> {
+    if assets.is_empty() {
+        return Err(AppError::Validation("view has no active assets".into()));
+    }
+    if start > end {
+        return Err(AppError::Validation("backfill start date after end date".into()));
+    }
+    let (s, e) = (start.format("%Y%m%d").to_string(), end.format("%Y%m%d").to_string());
+    let mut wb = Workbook::new();
+
+    for a in assets {
+        let mnemonics: Vec<&str> = fields.iter()
+            .filter(|f| f.asset_class_id == a.asset_class_id)
+            .map(|f| f.mnemonic.as_str())
+            .collect();
+        if mnemonics.is_empty() {
+            return Err(AppError::Validation(
+                format!("no fields configured for asset '{}'", a.label)));
+        }
+        let joined = mnemonics.join(",");
+        let sheet = wb.add_worksheet()
+            .set_name(bdh_sheet_name(a.asset_id))
+            .map_err(|er| AppError::Excel(er.to_string()))?;
+        sheet.write_string(0, 0, "asset_id").map_err(|er| AppError::Excel(er.to_string()))?;
+        sheet.write_string(0, 1, a.asset_id.to_string()).map_err(|er| AppError::Excel(er.to_string()))?;
+        sheet.write_string(1, 0, "security").map_err(|er| AppError::Excel(er.to_string()))?;
+        sheet.write_string(1, 1, &a.bdp_security).map_err(|er| AppError::Excel(er.to_string()))?;
+        sheet.write_string(2, 0, "fields").map_err(|er| AppError::Excel(er.to_string()))?;
+        sheet.write_string(2, 1, &joined).map_err(|er| AppError::Excel(er.to_string()))?;
+        let formula = format!(
+            "=BDH(\"{}\",\"{}\",\"{}\",\"{}\",\"Dates=S\")",
+            a.bdp_security, joined, s, e);
+        sheet.write_formula(4, 0, Formula::new(formula))
+            .map_err(|er| AppError::Excel(er.to_string()))?;
+    }
+
+    write_meta(&mut wb, meta)?;
+    wb.save(path).map_err(|er| AppError::Excel(er.to_string()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +211,46 @@ mod tests {
         assert_eq!(m.get_value((0, 1)).unwrap().to_string(), "7");
         assert_eq!(m.get_value((4, 0)).unwrap().to_string(), "layout_version");
         assert_eq!(m.get_value((4, 1)).unwrap().to_string(), "1");
+    }
+
+    #[test]
+    fn backfill_workbook_one_sheet_per_asset_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bf.xlsx");
+        let (assets, fields) = sample();
+        let meta = WbMeta { run_id: 8, view_id: 3, kind: "backfill".into(),
+                            generated_at: "2026-08-13T10:00:00".into() };
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
+        generate_backfill_workbook(&path, &meta, &assets, &fields, start, end).unwrap();
+
+        let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let names = wb.sheet_names().to_vec();
+        // one sheet per asset + META — all inside the single workbook
+        assert!(names.contains(&"A1".to_string()));
+        assert!(names.contains(&"A2".to_string()));
+        assert!(names.contains(&"A3".to_string()));
+        assert!(names.contains(&"META".to_string()));
+
+        let r = wb.worksheet_range("A1").unwrap();
+        assert_eq!(r.get_value((1, 1)).unwrap().to_string(), "AAPL US Equity");
+        assert_eq!(r.get_value((2, 1)).unwrap().to_string(), "PX_LAST,PX_VOLUME");
+
+        let f = wb.worksheet_formula("A1").unwrap();
+        let cell = f.get_value((4, 0)).unwrap().to_string();
+        assert!(cell.contains("BDH(\"AAPL US Equity\",\"PX_LAST,PX_VOLUME\",\"20260701\",\"20260731\",\"Dates=S\")"),
+                "got formula: {cell}");
+    }
+
+    #[test]
+    fn backfill_rejects_reversed_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let (assets, fields) = sample();
+        let meta = WbMeta { run_id: 8, view_id: 3, kind: "backfill".into(),
+                            generated_at: "t".into() };
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        assert!(generate_backfill_workbook(&dir.path().join("x.xlsx"),
+                &meta, &assets, &fields, start, end).is_err());
     }
 }
