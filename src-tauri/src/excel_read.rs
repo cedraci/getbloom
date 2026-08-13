@@ -277,6 +277,22 @@ mod tests {
                    NaiveDate::from_ymd_opt(2026, 7, 1).unwrap());
     }
 
+    #[test]
+    fn classify_na_and_data_error() {
+        // Bare #N/A string → "na" code
+        assert_eq!(classify_cell(&Data::String("#N/A".into()), "numeric")
+                   .unwrap_err().0, "na");
+        // #NAME? string → "na" code
+        assert_eq!(classify_cell(&Data::String("#NAME?".into()), "numeric")
+                   .unwrap_err().0, "na");
+        // #VALUE error → "na" code
+        assert_eq!(classify_cell(&Data::String("#VALUE!".into()), "numeric")
+                   .unwrap_err().0, "na");
+        // calamine Data::Error variant → "na" code
+        assert_eq!(classify_cell(&Data::Error(calamine::CellErrorType::NA), "numeric")
+                   .unwrap_err().0, "na");
+    }
+
     fn fixture_assets() -> (Vec<GenAsset>, Vec<FieldSpec>) {
         let assets = vec![GenAsset {
             asset_id: 1, asset_class_id: 10, class_name: "Equity".into(),
@@ -291,10 +307,14 @@ mod tests {
     }
 
     fn write_meta_fixture(wb: &mut Workbook, run_id: i64) {
+        write_meta_fixture_with_layout(wb, run_id, "1");
+    }
+
+    fn write_meta_fixture_with_layout(wb: &mut Workbook, run_id: i64, layout_version: &str) {
         let s = wb.add_worksheet().set_name("META").unwrap();
         for (i, (k, v)) in [("run_id", run_id.to_string()), ("view_id", "3".into()),
                             ("kind", "eod".into()), ("generated_at", "t".into()),
-                            ("layout_version", "1".into())].iter().enumerate() {
+                            ("layout_version", layout_version.into())].iter().enumerate() {
             s.write_string(i as u32, 0, *k).unwrap();
             s.write_string(i as u32, 1, v).unwrap();
         }
@@ -343,6 +363,22 @@ mod tests {
     }
 
     #[test]
+    fn eod_read_rejects_wrong_layout_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_layout.xlsx");
+        let mut wb = Workbook::new();
+        let s = wb.add_worksheet().set_name("Equity").unwrap();
+        s.write_string(0, 0, "SECURITY").unwrap();
+        write_meta_fixture_with_layout(&mut wb, 7, "99");
+        wb.save(&path).unwrap();
+        let (assets, fields) = fixture_assets();
+        let d = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        let err = read_eod_workbook(&path, 7, &assets, &fields, d);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("layout_version"));
+    }
+
+    #[test]
     fn backfill_read_walks_bdh_spill() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bf.xlsx");
@@ -371,5 +407,45 @@ mod tests {
         let d1 = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
         assert!(out.cells.iter().any(|c|
             c.obs_date == d1 && c.field_id == 100 && c.value == CellValue::Num(230.0)));
+    }
+
+    #[test]
+    fn backfill_read_handles_error_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bf_errors.xlsx");
+        let mut wb = Workbook::new();
+        let s = wb.add_worksheet().set_name("A1").unwrap();
+        s.write_string(0, 0, "asset_id").unwrap();
+        s.write_string(0, 1, "1").unwrap();
+        s.write_string(1, 0, "security").unwrap();
+        s.write_string(1, 1, "AAPL US Equity").unwrap();
+        s.write_string(2, 0, "fields").unwrap();
+        s.write_string(2, 1, "PX_LAST,PX_VOLUME").unwrap();
+        // Row 4: bad date in column A (not a number)
+        s.write_string(4, 0, "not a date").unwrap();
+        s.write_number(4, 1, 230.0).unwrap();
+        s.write_number(4, 2, 1000.0).unwrap();
+        // Row 5: valid date, but PX_VOLUME has "#N/A Requesting Data..." error
+        s.write_number(5, 0, 46205.0).unwrap();  // 2026-07-02
+        s.write_number(5, 1, 231.0).unwrap();
+        s.write_string(5, 2, "#N/A Requesting Data...").unwrap();
+        write_meta_fixture(&mut wb, 8);
+        wb.save(&path).unwrap();
+
+        let (assets, fields) = fixture_assets();
+        let out = read_backfill_workbook(&path, 8, &assets, &fields).unwrap();
+        // Row 4: bad date → 1 problem ("bad_date")
+        let bad_date_problems: Vec<_> = out.problems.iter()
+            .filter(|p| p.code == "bad_date").collect();
+        assert_eq!(bad_date_problems.len(), 1);
+        // Row 5: valid date, 1 valid obs (PX_LAST), 1 problem (PX_VOLUME "requesting")
+        let requesting_problems: Vec<_> = out.problems.iter()
+            .filter(|p| p.code == "requesting").collect();
+        assert_eq!(requesting_problems.len(), 1);
+        assert_eq!(requesting_problems[0].field_id, Some(101));
+        // 1 valid observation from row 5
+        let d2 = NaiveDate::from_ymd_opt(2026, 7, 2).unwrap();
+        assert!(out.cells.iter().any(|c|
+            c.obs_date == d2 && c.field_id == 100 && c.value == CellValue::Num(231.0)));
     }
 }
