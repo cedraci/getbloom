@@ -1,0 +1,288 @@
+use crate::error::AppError;
+use crate::orchestrator::{self, PipelineConfig, RunOutcome};
+use crate::{budget, fields, registry, scheduler, views};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use std::path::PathBuf;
+use tauri::State;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub data_dir: String,
+    pub soft_limit: i64,
+    pub refresh_timeout_s: u32,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self { data_dir: "C:\\bloomdata".into(),
+               soft_limit: budget::DEFAULT_SOFT_LIMIT,
+               refresh_timeout_s: 600 }
+    }
+}
+
+pub struct AppState {
+    pub pool: PgPool,
+    pub cfg: tokio::sync::RwLock<AppConfig>,
+}
+
+pub fn script_path() -> PathBuf {
+    // scripts/refresh.ps1 ships next to the executable (bundled as a Tauri resource);
+    // in dev it resolves relative to src-tauri/.
+    let exe_dir = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_default();
+    let bundled = exe_dir.join("scripts").join("refresh.ps1");
+    if bundled.exists() { bundled } else { PathBuf::from("scripts/refresh.ps1") }
+}
+
+pub async fn pipeline_cfg(state: &AppState) -> PipelineConfig {
+    let c = state.cfg.read().await.clone();
+    PipelineConfig {
+        data_dir: PathBuf::from(c.data_dir),
+        script_path: script_path(),
+        refresh_timeout_s: c.refresh_timeout_s,
+        soft_limit: c.soft_limit,
+        dry_run_refresh: false,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EstimateOut {
+    pub estimated: i64,
+    pub today_total: i64,
+    pub level: budget::BudgetLevel,
+}
+
+// ---------------------------------------------------------------------------
+// Asset classes
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_asset_classes(state: State<'_, AppState>)
+    -> Result<Vec<registry::AssetClass>, AppError> {
+    registry::list_asset_classes(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn create_asset_class(state: State<'_, AppState>, name: String, description: String)
+    -> Result<registry::AssetClass, AppError> {
+    registry::create_asset_class(&state.pool, &name, &description).await
+}
+
+// ---------------------------------------------------------------------------
+// Assets
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_assets(state: State<'_, AppState>) -> Result<Vec<registry::Asset>, AppError> {
+    registry::list_assets(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn create_asset(state: State<'_, AppState>, new: registry::NewAsset)
+    -> Result<registry::Asset, AppError> {
+    registry::create_asset(&state.pool, new).await
+}
+
+#[tauri::command]
+pub async fn set_asset_active(state: State<'_, AppState>, asset_id: i64, active: bool)
+    -> Result<(), AppError> {
+    registry::set_asset_active(&state.pool, asset_id, active).await
+}
+
+// ---------------------------------------------------------------------------
+// Fields
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_fields(state: State<'_, AppState>) -> Result<Vec<fields::FieldDef>, AppError> {
+    fields::list_fields(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn create_field(state: State<'_, AppState>, asset_class_id: i64,
+                          mnemonic: String, label: String, value_kind: String)
+    -> Result<fields::FieldDef, AppError> {
+    fields::create_field(&state.pool, asset_class_id, &mnemonic, &label, &value_kind).await
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_views(state: State<'_, AppState>) -> Result<Vec<views::View>, AppError> {
+    views::list_views(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn create_view(state: State<'_, AppState>, name: String, description: String)
+    -> Result<views::View, AppError> {
+    views::create_view(&state.pool, &name, &description).await
+}
+
+#[tauri::command]
+pub async fn set_view_assets(state: State<'_, AppState>, view_id: i64, asset_ids: Vec<i64>)
+    -> Result<(), AppError> {
+    views::set_view_assets(&state.pool, view_id, &asset_ids).await
+}
+
+#[tauri::command]
+pub async fn set_view_fields(state: State<'_, AppState>, view_id: i64, field_ids: Vec<i64>)
+    -> Result<(), AppError> {
+    views::set_view_fields(&state.pool, view_id, &field_ids).await
+}
+
+#[tauri::command]
+pub async fn get_view_assets(state: State<'_, AppState>, view_id: i64)
+    -> Result<Vec<registry::Asset>, AppError> {
+    views::view_assets(&state.pool, view_id).await
+}
+
+#[tauri::command]
+pub async fn get_view_fields(state: State<'_, AppState>, view_id: i64)
+    -> Result<Vec<fields::FieldDef>, AppError> {
+    views::view_fields(&state.pool, view_id).await
+}
+
+#[tauri::command]
+pub async fn estimate_view(state: State<'_, AppState>, view_id: i64)
+    -> Result<EstimateOut, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let assets = views::view_assets(&state.pool, view_id).await?;
+    let fields_db = views::view_fields(&state.pool, view_id).await?;
+    let gen: Vec<_> = assets.iter().map(|a| crate::excel_gen::GenAsset {
+        asset_id: a.id, asset_class_id: a.asset_class_id,
+        class_name: String::new(), label: a.label.clone(),
+        bdp_security: a.bdp_security.clone() }).collect();
+    let specs: Vec<_> = fields_db.iter().map(|f| crate::excel_read::FieldSpec {
+        field_id: f.id, asset_class_id: f.asset_class_id,
+        mnemonic: f.mnemonic.clone(), value_kind: f.value_kind.clone() }).collect();
+    let estimated = budget::estimate_eod_hits(&gen, &specs);
+    let today_total = budget::today_hits(&state.pool).await?;
+    let level = budget::check_level(estimated, today_total, cfg.soft_limit);
+    Ok(EstimateOut { estimated, today_total, level })
+}
+
+// ---------------------------------------------------------------------------
+// Runs
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn run_eod_now(state: State<'_, AppState>, view_id: i64, confirmed: bool)
+    -> Result<RunOutcome, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let today = chrono::Local::now().date_naive();
+    orchestrator::run_eod(&state.pool, &cfg, view_id, "manual", today, confirmed).await
+}
+
+#[tauri::command]
+pub async fn run_backfill_now(state: State<'_, AppState>, view_id: i64,
+                              start: String, end: String, confirmed: bool)
+    -> Result<RunOutcome, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let s = start.parse().map_err(|_| AppError::Validation("bad start date".into()))?;
+    let e = end.parse().map_err(|_| AppError::Validation("bad end date".into()))?;
+    orchestrator::run_backfill(&state.pool, &cfg, view_id, s, e, confirmed).await
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct RunRow {
+    pub id: i64, pub view_id: i64, pub kind: String, pub trigger_kind: String,
+    pub status: String, pub started_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub estimated_hits: i64, pub error_summary: Option<String>,
+}
+
+#[tauri::command]
+pub async fn list_runs(state: State<'_, AppState>, limit: i64)
+    -> Result<Vec<RunRow>, AppError> {
+    Ok(sqlx::query_as::<_, RunRow>(
+        "SELECT id, view_id, kind, trigger_kind, status, started_at,
+                finished_at, estimated_hits, error_summary
+         FROM run ORDER BY id DESC LIMIT $1")
+        .bind(limit).fetch_all(&state.pool).await?)
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct IssueRow {
+    pub id: i64, pub run_id: i64, pub asset_id: Option<i64>, pub field_id: Option<i64>,
+    pub obs_date: Option<chrono::NaiveDate>, pub severity: String,
+    pub code: String, pub detail: String,
+}
+
+#[tauri::command]
+pub async fn list_issues(state: State<'_, AppState>, run_id: i64)
+    -> Result<Vec<IssueRow>, AppError> {
+    Ok(sqlx::query_as::<_, IssueRow>(
+        "SELECT id, run_id, asset_id, field_id, obs_date, severity, code, detail
+         FROM ingest_issue WHERE run_id = $1 ORDER BY id")
+        .bind(run_id).fetch_all(&state.pool).await?)
+}
+
+#[tauri::command]
+pub async fn detect_view_gaps(state: State<'_, AppState>, view_id: i64)
+    -> Result<Vec<(String, String)>, AppError> {
+    let today = chrono::Local::now().date_naive();
+    Ok(scheduler::detect_gaps(&state.pool, view_id, 30, today).await?
+        .into_iter().map(|(s, e)| (s.to_string(), e.to_string())).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Schedules
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ScheduleRow {
+    pub id: i64, pub view_id: i64, pub active: bool,
+    pub window_start: chrono::NaiveTime, pub window_end: chrono::NaiveTime,
+    pub drawn_for: Option<chrono::NaiveDate>, pub drawn_at: Option<chrono::NaiveTime>,
+    pub last_result: Option<String>,
+}
+
+#[tauri::command]
+pub async fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleRow>, AppError> {
+    Ok(sqlx::query_as::<_, ScheduleRow>(
+        "SELECT id, view_id, active, window_start, window_end,
+                drawn_for, drawn_at, last_result
+         FROM schedule ORDER BY view_id")
+        .fetch_all(&state.pool).await?)
+}
+
+#[tauri::command]
+pub async fn upsert_schedule(state: State<'_, AppState>, view_id: i64,
+                             window_start: String, window_end: String, active: bool)
+    -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, $2::time, $3::time, $4)
+         ON CONFLICT (view_id) DO UPDATE
+           SET window_start = EXCLUDED.window_start,
+               window_end = EXCLUDED.window_end,
+               active = EXCLUDED.active,
+               drawn_for = NULL, drawn_at = NULL")  // window changed: force a fresh draw
+        .bind(view_id).bind(window_start).bind(window_end).bind(active)
+        .execute(&state.pool).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn get_settings(state: State<'_, AppState>) -> Result<AppConfig, AppError> {
+    Ok(state.cfg.read().await.clone())
+}
+
+#[tauri::command]
+pub async fn save_settings(state: State<'_, AppState>, cfg: AppConfig)
+    -> Result<(), AppError> {
+    let path = PathBuf::from(&cfg.data_dir).join("config.json");
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    std::fs::write(&path, serde_json::to_string_pretty(&cfg)
+        .map_err(|e| AppError::Validation(e.to_string()))?)?;
+    *state.cfg.write().await = cfg;
+    Ok(())
+}
