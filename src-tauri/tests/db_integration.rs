@@ -93,3 +93,39 @@ async fn ingest_twice_converges_no_duplicates() {
     assert_eq!(count, 1);
     assert_eq!(val, 101.5);
 }
+
+#[tokio::test]
+#[ignore = "requires postgres and excel"]
+async fn eod_pipeline_dry_run_ends_partial() {
+    use getbloomdata_lib::{db, fields, orchestrator, registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = db::connect(&url).await.unwrap();
+    let class = registry::create_asset_class(&pool, "EquityT11", "t").await.unwrap();
+    fields::create_field(&pool, class.id, "PX_LAST_T11", "px", "numeric").await.unwrap();
+    let a = registry::create_asset(&pool, registry::NewAsset {
+        asset_class_id: class.id, label: "T11".into(), id_kind: "ticker".into(),
+        ticker: Some("AAPL US".into()), isin: None, yellow_key: "Equity".into(),
+    }).await.unwrap();
+    let v = views::create_view(&pool, "t11-view", "").await.unwrap();
+    views::set_view_assets(&pool, v.id, &[a.id]).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = orchestrator::PipelineConfig {
+        data_dir: dir.path().to_path_buf(),
+        script_path: std::path::PathBuf::from("scripts/refresh.ps1"),
+        refresh_timeout_s: 60,
+        soft_limit: 100_000,
+        dry_run_refresh: true,
+    };
+    let d = chrono::Local::now().date_naive();
+    let out = orchestrator::run_eod(&pool, &cfg, v.id, "manual", d, false).await.unwrap();
+    match out {
+        orchestrator::RunOutcome::Completed { run_id, summary } => {
+            assert!(summary.issues > 0);  // BDP can't evaluate without the add-in
+            let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id=$1")
+                .bind(run_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(status, "partial");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
