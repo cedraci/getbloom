@@ -162,15 +162,37 @@ fn read_bdh_sheet<RS: std::io::Read + std::io::Seek>(
     for row in rows.iter().skip(4) {
         let date_cell = row.first().unwrap_or(&Data::Empty);
         if matches!(date_cell, Data::Empty) { continue; }  // past end of spill
-        data_rows += 1;
+        // A row only counts as a data row once its date cell classifies as an actual
+        // date. Bloomberg represents "no trading days in this range" (the shape a
+        // single-day BDH returns on a holiday) as a #N/A-family string in the date
+        // cell, not as an empty cell — so those must NOT be counted here, or the
+        // holiday sheet looks like it has one real (broken) row instead of zero.
         let obs_date = match classify_cell(date_cell, "date") {
-            Ok(CellValue::Text(d)) =>
-                NaiveDate::parse_from_str(&d, "%Y-%m-%d").unwrap(),
-            _ => {
+            Ok(CellValue::Text(d)) => {
+                data_rows += 1;
+                NaiveDate::parse_from_str(&d, "%Y-%m-%d").unwrap()
+            }
+            Err((code, _)) if code != "type_mismatch" => {
+                // #N/A-family (na / invalid_security / field_not_applicable /
+                // requesting) or an empty string: not a data row, and not a per-cell
+                // defect worth its own problem — an all-#N/A sheet is reported once,
+                // at the asset level, via the caller's "no_data" problem instead.
+                continue;
+            }
+            other => {
+                // type_mismatch (non-empty, non-#N/A text that still doesn't parse as
+                // a date) is a genuine data-quality defect, distinct from "no data
+                // returned". `Ok(CellValue::Num(_))` is unreachable in practice —
+                // classify_cell never returns a number for value_kind "date" — but is
+                // handled the same way for exhaustiveness.
+                let detail = match other {
+                    Err((_, d)) => d,
+                    Ok(v) => format!("expected a date, got {v:?}"),
+                };
                 out.problems.push(CellProblem {
                     asset_id: Some(asset.asset_id), field_id: None, obs_date: None,
                     code: "bad_date".into(),
-                    detail: format!("unparseable BDH date cell {date_cell:?}") });
+                    detail: format!("unparseable BDH date cell: {detail}") });
                 continue;
             }
         };
@@ -371,10 +393,23 @@ mod tests {
         }
     }
 
-    // Builds a mixed EOD workbook: an "A1" BDH sheet (single-day spill row) plus,
-    // when `with_bdh_data` is true, values in that row; otherwise the spill area is
-    // left empty (holiday case). Always writes the "Equity" BDP sheet with NAME.
-    fn write_mixed_eod_fixture(wb: &mut Workbook, obs_date: NaiveDate, with_bdh_data: bool) {
+    // How the BDH spill area (row 5+) is populated by `write_mixed_eod_fixture`.
+    #[derive(Clone, Copy)]
+    enum BdhSpill {
+        /// A normal single-day data row: valid date, PX_LAST value, PX_VOLUME error.
+        Data,
+        /// The spill area is left completely empty (no cells written at all) —
+        /// one shape calamine can return for "no trading days in range".
+        Empty,
+        /// The spill's one row has a #N/A date cell — the shape Bloomberg actually
+        /// returns for a single-day BDH over a non-trading day.
+        NaRow,
+    }
+
+    // Builds a mixed EOD workbook: an "A1" BDH sheet (single-day spill row) shaped
+    // per `spill`, plus the "Equity" BDP sheet with a NAME value (text fields are
+    // unaffected by whatever happened on the BDH side).
+    fn write_mixed_eod_fixture(wb: &mut Workbook, obs_date: NaiveDate, spill: BdhSpill) {
         let bdh = wb.add_worksheet().set_name("A1").unwrap();
         bdh.write_string(0, 0, "asset_id").unwrap();
         bdh.write_string(0, 1, "1").unwrap();
@@ -382,10 +417,18 @@ mod tests {
         bdh.write_string(1, 1, "AAPL US Equity").unwrap();
         bdh.write_string(2, 0, "fields").unwrap();
         bdh.write_string(2, 1, "PX_LAST,PX_VOLUME").unwrap();
-        if with_bdh_data {
-            bdh.write_number(4, 0, excel_serial(obs_date)).unwrap();
-            bdh.write_number(4, 1, 231.4).unwrap();
-            bdh.write_string(4, 2, "#N/A Invalid Security").unwrap();
+        match spill {
+            BdhSpill::Data => {
+                bdh.write_number(4, 0, excel_serial(obs_date)).unwrap();
+                bdh.write_number(4, 1, 231.4).unwrap();
+                bdh.write_string(4, 2, "#N/A Invalid Security").unwrap();
+            }
+            BdhSpill::Empty => {}
+            BdhSpill::NaRow => {
+                bdh.write_string(4, 0, "#N/A N/A").unwrap();
+                bdh.write_string(4, 1, "#N/A N/A").unwrap();
+                bdh.write_string(4, 2, "#N/A N/A").unwrap();
+            }
         }
         let bdp = wb.add_worksheet().set_name("Equity").unwrap();
         bdp.write_string(0, 0, "SECURITY").unwrap();
@@ -400,7 +443,7 @@ mod tests {
         let path = dir.path().join("refreshed.xlsx");
         let mut wb = Workbook::new();
         let d = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
-        write_mixed_eod_fixture(&mut wb, d, true);
+        write_mixed_eod_fixture(&mut wb, d, BdhSpill::Data);
         write_meta_fixture(&mut wb, 7);
         wb.save(&path).unwrap();
 
@@ -432,7 +475,7 @@ mod tests {
         let path = dir.path().join("holiday.xlsx");
         let mut wb = Workbook::new();
         let d = NaiveDate::from_ymd_opt(2026, 12, 25).unwrap(); // e.g. Christmas
-        write_mixed_eod_fixture(&mut wb, d, false); // empty BDH spill
+        write_mixed_eod_fixture(&mut wb, d, BdhSpill::Empty); // empty BDH spill
         write_meta_fixture(&mut wb, 7);
         wb.save(&path).unwrap();
 
@@ -441,6 +484,38 @@ mod tests {
 
         // No BDH observations, but exactly one no_data problem for the asset
         assert!(out.cells.iter().all(|c| c.field_id != 100 && c.field_id != 101));
+        let no_data: Vec<_> = out.problems.iter().filter(|p| p.code == "no_data").collect();
+        assert_eq!(no_data.len(), 1);
+        assert_eq!(no_data[0].asset_id, Some(1));
+        assert_eq!(no_data[0].obs_date, Some(d));
+
+        // Text field is unaffected by the holiday — still ingested under obs_date
+        let name = out.cells.iter().find(|c| c.field_id == 102).unwrap();
+        assert_eq!(name.value, CellValue::Text("Apple Inc".into()));
+        assert_eq!(name.obs_date, d);
+        assert_eq!(out.cells.len(), 1);
+    }
+
+    // Bloomberg's actual shape for "no trading days in this single-day BDH range" is
+    // not an empty spill but a #N/A date cell in the spill's one row. This must be
+    // treated the same as the fully-empty case: zero BDH observations, exactly one
+    // no_data problem for the asset (not a bad_date problem), text fields unaffected.
+    #[test]
+    fn eod_read_holiday_na_bdh_row_still_ingests_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holiday_na.xlsx");
+        let mut wb = Workbook::new();
+        let d = NaiveDate::from_ymd_opt(2026, 12, 25).unwrap(); // e.g. Christmas
+        write_mixed_eod_fixture(&mut wb, d, BdhSpill::NaRow);
+        write_meta_fixture(&mut wb, 7);
+        wb.save(&path).unwrap();
+
+        let (assets, fields) = fixture_assets_mixed();
+        let out = read_eod_workbook(&path, 7, &assets, &fields, d).unwrap();
+
+        // No BDH observations and no bad_date noise — exactly one no_data problem
+        assert!(out.cells.iter().all(|c| c.field_id != 100 && c.field_id != 101));
+        assert!(out.problems.iter().all(|p| p.code != "bad_date"));
         let no_data: Vec<_> = out.problems.iter().filter(|p| p.code == "no_data").collect();
         assert_eq!(no_data.len(), 1);
         assert_eq!(no_data[0].asset_id, Some(1));
