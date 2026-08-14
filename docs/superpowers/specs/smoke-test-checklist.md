@@ -23,7 +23,7 @@ Before running this checklist, ensure:
 
 - [ ] **Step 4: Verify DB** —
   `psql bloomdata -c "SELECT a.label, f.mnemonic, o.obs_date, o.value_num, o.value_text FROM observation o JOIN asset a ON a.id=o.asset_id JOIN field_def f ON f.id=o.field_id ORDER BY a.label, f.mnemonic;"`
-  Expected: 6 rows, today's date, plausible values; run status `ok` in the history table; workbook moved into `archive/<YYYY>/<MM>/`.
+  Expected: 6 rows, plausible values; run status `ok` in the history table; workbook moved into `archive/<YYYY>/<MM>/`. **Amendment A1**: `obs_date` is the PREVIOUS trading day, not today's date (a Monday run reports Friday's close).
 
 - [ ] **Step 5: Idempotency in anger** — press **Run now** again; row count in `observation` unchanged (still 6), `hit_ledger` shows two entries totaling ~12.
 

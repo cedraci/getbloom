@@ -73,6 +73,16 @@ pub fn is_weekend(d: NaiveDate) -> bool {
     matches!(d.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
+// Amendment A1: daily runs fetch the PREVIOUS trading day, never live/today values.
+// Monday's run targets Friday; any other weekday targets the day before.
+pub fn previous_weekday(d: NaiveDate) -> NaiveDate {
+    let mut p = d - Duration::days(1);
+    while matches!(p.weekday(), Weekday::Sat | Weekday::Sun) {
+        p -= Duration::days(1);
+    }
+    p
+}
+
 pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
                   now: chrono::DateTime<chrono::Local>) -> AppResult<Vec<i64>> {
     let today = now.date_naive();
@@ -128,7 +138,10 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
             continue;
         }
 
-        let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", today, false).await;
+        // Amendment A1: the daily run targets the previous trading day's close, never
+        // today's live values. The weekend guard above stays: Monday's run covers Friday.
+        let obs_date = previous_weekday(today);
+        let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", obs_date, false).await;
         let msg = match &result {
             Ok(RunOutcome::Completed { run_id, summary }) =>
                 format!("ok run={run_id} upserted={} issues={}",
@@ -239,6 +252,34 @@ mod tests {
         assert!(is_weekend(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap())); // Sun
         assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap())); // Fri
         assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap())); // Mon
+    }
+
+    #[test]
+    fn previous_weekday_mid_week_is_prior_day() {
+        // Tuesday 2026-08-18 -> Monday 2026-08-17
+        assert_eq!(previous_weekday(NaiveDate::from_ymd_opt(2026, 8, 18).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 17).unwrap());
+        // Friday 2026-08-14 -> Thursday 2026-08-13
+        assert_eq!(previous_weekday(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 13).unwrap());
+    }
+
+    #[test]
+    fn previous_weekday_monday_is_prior_friday() {
+        assert_eq!(previous_weekday(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 14).unwrap());
+    }
+
+    #[test]
+    fn previous_weekday_saturday_is_friday() {
+        assert_eq!(previous_weekday(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 14).unwrap());
+    }
+
+    #[test]
+    fn previous_weekday_sunday_is_friday() {
+        assert_eq!(previous_weekday(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 14).unwrap());
     }
 
     #[test]

@@ -60,6 +60,7 @@ async fn load_view(pool: &PgPool, view_id: i64) -> AppResult<Loaded> {
     }).collect();
     let gen_fields = fields_db.iter().map(|f| GenField {
         field_id: f.id, asset_class_id: f.asset_class_id, mnemonic: f.mnemonic.clone(),
+        value_kind: f.value_kind.clone(),
     }).collect();
     let field_specs = fields_db.iter().map(|f| FieldSpec {
         field_id: f.id, asset_class_id: f.asset_class_id,
@@ -254,7 +255,7 @@ impl DataFetcher for ExcelComFetcher<'_> {
     async fn fetch_eod(&self, wb: &Path, meta: &WbMeta, assets: &[GenAsset],
                        gen_fields: &[GenField], field_specs: &[FieldSpec],
                        obs_date: NaiveDate) -> AppResult<excel_read::ReadOutcome> {
-        excel_gen::generate_eod_workbook(wb, meta, assets, gen_fields)?;
+        excel_gen::generate_eod_workbook(wb, meta, assets, gen_fields, obs_date)?;
         refresh_with_retry(self.cfg, wb).await?;
         excel_read::read_eod_workbook(wb, meta.run_id, assets, field_specs, obs_date)
     }

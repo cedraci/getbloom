@@ -141,22 +141,96 @@ fn check_meta(path: &Path, expected_run_id: i64) -> AppResult<()> {
     Ok(())
 }
 
+/// Reads one asset's `A<asset_id>` BDH sheet (rows 1-3 metadata, spill from row 5)
+/// and appends observations/problems to `out`. Returns the number of data rows found
+/// in the spill — 0 means an empty spill (e.g. `obs_date` was a non-trading day).
+/// Shared by the EOD reader (single-day sheet) and the backfill reader (multi-day).
+fn read_bdh_sheet<RS: std::io::Read + std::io::Seek>(
+    wb: &mut Xlsx<RS>, asset: &GenAsset, fields: &[FieldSpec], out: &mut ReadOutcome,
+) -> AppResult<usize> {
+    let sheet = bdh_sheet_name(asset.asset_id);
+    let r = wb.worksheet_range(&sheet)
+        .map_err(|e| AppError::Validation(format!("sheet '{sheet}' missing: {e}")))?;
+    let rows: Vec<_> = r.rows().collect();
+    let joined = rows.get(2).and_then(|row| row.get(1))
+        .map(|c| c.to_string()).unwrap_or_default();
+    let col_fields: Vec<Option<&FieldSpec>> = joined.split(',')
+        .map(|m| fields.iter()
+            .find(|f| f.asset_class_id == asset.asset_class_id && f.mnemonic == m.trim()))
+        .collect();
+    let mut data_rows = 0usize;
+    for row in rows.iter().skip(4) {
+        let date_cell = row.first().unwrap_or(&Data::Empty);
+        if matches!(date_cell, Data::Empty) { continue; }  // past end of spill
+        data_rows += 1;
+        let obs_date = match classify_cell(date_cell, "date") {
+            Ok(CellValue::Text(d)) =>
+                NaiveDate::parse_from_str(&d, "%Y-%m-%d").unwrap(),
+            _ => {
+                out.problems.push(CellProblem {
+                    asset_id: Some(asset.asset_id), field_id: None, obs_date: None,
+                    code: "bad_date".into(),
+                    detail: format!("unparseable BDH date cell {date_cell:?}") });
+                continue;
+            }
+        };
+        for (ci, fspec) in col_fields.iter().enumerate() {
+            let Some(f) = fspec else { continue };
+            let cell = row.get(ci + 1).unwrap_or(&Data::Empty);
+            match classify_cell(cell, &f.value_kind) {
+                Ok(v) => out.cells.push(ObsCell {
+                    asset_id: asset.asset_id, field_id: f.field_id,
+                    obs_date, value: v }),
+                Err((code, detail)) => out.problems.push(CellProblem {
+                    asset_id: Some(asset.asset_id), field_id: Some(f.field_id),
+                    obs_date: Some(obs_date), code, detail }),
+            }
+        }
+    }
+    Ok(data_rows)
+}
+
+/// Amendment A1: the EOD workbook is mixed. Numeric/date fields live on each asset's
+/// single-day `A<asset_id>` BDH sheet (dates come from the sheet itself); text fields
+/// live on per-class BDP sheets and are assigned the run's `obs_date` directly (their
+/// live value is stored under the previous-day date — reference data changes rarely).
+/// A class/asset with no fields of a given kind simply has no sheet of that kind.
+/// An empty BDH spill (holiday: `obs_date` was a non-trading day) yields zero
+/// observations for that asset plus one `no_data` `CellProblem`.
 pub fn read_eod_workbook(
     path: &Path, expected_run_id: i64, assets: &[GenAsset],
     fields: &[FieldSpec], obs_date: NaiveDate,
 ) -> AppResult<ReadOutcome> {
     check_meta(path, expected_run_id)?;
     let mut wb: Xlsx<_> = open_workbook(path).map_err(|e: calamine::XlsxError| AppError::Excel(e.to_string()))?;
-    let by_security: HashMap<&str, &GenAsset> =
-        assets.iter().map(|a| (a.bdp_security.as_str(), a)).collect();
     let mut out = ReadOutcome::default();
 
+    // BDH side: per-asset single-day sheet, numeric/date fields only.
+    for a in assets {
+        let has_bdh_fields = fields.iter()
+            .any(|f| f.asset_class_id == a.asset_class_id && f.value_kind != "text");
+        if !has_bdh_fields { continue; }
+        let data_rows = read_bdh_sheet(&mut wb, a, fields, &mut out)?;
+        if data_rows == 0 {
+            out.problems.push(CellProblem {
+                asset_id: Some(a.asset_id), field_id: None, obs_date: Some(obs_date),
+                code: "no_data".into(),
+                detail: "BDH sheet returned no rows (likely a non-trading day)".into() });
+        }
+    }
+
+    // BDP side: per-class sheet, text fields only; values are stamped with obs_date.
+    let by_security: HashMap<&str, &GenAsset> =
+        assets.iter().map(|a| (a.bdp_security.as_str(), a)).collect();
     let mut classes: Vec<(i64, String)> = assets.iter()
         .map(|a| (a.asset_class_id, a.class_name.clone())).collect();
     classes.sort();
     classes.dedup();
 
     for (class_id, class_name) in classes {
+        let has_text_fields = fields.iter()
+            .any(|f| f.asset_class_id == class_id && f.value_kind == "text");
+        if !has_text_fields { continue; }
         let sheet = sanitize_sheet_name(&class_name);
         let r = wb.worksheet_range(&sheet)
             .map_err(|e| AppError::Validation(format!("sheet '{sheet}' missing: {e}")))?;
@@ -202,43 +276,7 @@ pub fn read_backfill_workbook(
     let mut out = ReadOutcome::default();
 
     for a in assets {
-        let sheet = bdh_sheet_name(a.asset_id);
-        let r = wb.worksheet_range(&sheet)
-            .map_err(|e| AppError::Validation(format!("sheet '{sheet}' missing: {e}")))?;
-        let rows: Vec<_> = r.rows().collect();
-        let joined = rows.get(2).and_then(|row| row.get(1))
-            .map(|c| c.to_string()).unwrap_or_default();
-        let col_fields: Vec<Option<&FieldSpec>> = joined.split(',')
-            .map(|m| fields.iter()
-                .find(|f| f.asset_class_id == a.asset_class_id && f.mnemonic == m.trim()))
-            .collect();
-        for row in rows.iter().skip(4) {
-            let date_cell = row.first().unwrap_or(&Data::Empty);
-            if matches!(date_cell, Data::Empty) { continue; }  // past end of spill
-            let obs_date = match classify_cell(date_cell, "date") {
-                Ok(CellValue::Text(d)) =>
-                    NaiveDate::parse_from_str(&d, "%Y-%m-%d").unwrap(),
-                _ => {
-                    out.problems.push(CellProblem {
-                        asset_id: Some(a.asset_id), field_id: None, obs_date: None,
-                        code: "bad_date".into(),
-                        detail: format!("unparseable BDH date cell {date_cell:?}") });
-                    continue;
-                }
-            };
-            for (ci, fspec) in col_fields.iter().enumerate() {
-                let Some(f) = fspec else { continue };
-                let cell = row.get(ci + 1).unwrap_or(&Data::Empty);
-                match classify_cell(cell, &f.value_kind) {
-                    Ok(v) => out.cells.push(ObsCell {
-                        asset_id: a.asset_id, field_id: f.field_id,
-                        obs_date, value: v }),
-                    Err((code, detail)) => out.problems.push(CellProblem {
-                        asset_id: Some(a.asset_id), field_id: Some(f.field_id),
-                        obs_date: Some(obs_date), code, detail }),
-                }
-            }
-        }
+        read_bdh_sheet(&mut wb, a, fields, &mut out)?;
     }
     Ok(out)
 }
@@ -306,6 +344,19 @@ mod tests {
         (assets, fields)
     }
 
+    // Same shape as `fixture_assets()`, plus a text field (NAME) — exercises the
+    // Amendment A1 mixed EOD workbook (BDH numeric sheet + BDP text sheet).
+    fn fixture_assets_mixed() -> (Vec<GenAsset>, Vec<FieldSpec>) {
+        let (assets, mut fields) = fixture_assets();
+        fields.push(FieldSpec { field_id: 102, asset_class_id: 10,
+                                mnemonic: "NAME".into(), value_kind: "text".into() });
+        (assets, fields)
+    }
+
+    fn excel_serial(d: NaiveDate) -> f64 {
+        (d - NaiveDate::from_ymd_opt(1899, 12, 30).unwrap()).num_days() as f64
+    }
+
     fn write_meta_fixture(wb: &mut Workbook, run_id: i64) {
         write_meta_fixture_with_layout(wb, run_id, "1");
     }
@@ -320,32 +371,86 @@ mod tests {
         }
     }
 
+    // Builds a mixed EOD workbook: an "A1" BDH sheet (single-day spill row) plus,
+    // when `with_bdh_data` is true, values in that row; otherwise the spill area is
+    // left empty (holiday case). Always writes the "Equity" BDP sheet with NAME.
+    fn write_mixed_eod_fixture(wb: &mut Workbook, obs_date: NaiveDate, with_bdh_data: bool) {
+        let bdh = wb.add_worksheet().set_name("A1").unwrap();
+        bdh.write_string(0, 0, "asset_id").unwrap();
+        bdh.write_string(0, 1, "1").unwrap();
+        bdh.write_string(1, 0, "security").unwrap();
+        bdh.write_string(1, 1, "AAPL US Equity").unwrap();
+        bdh.write_string(2, 0, "fields").unwrap();
+        bdh.write_string(2, 1, "PX_LAST,PX_VOLUME").unwrap();
+        if with_bdh_data {
+            bdh.write_number(4, 0, excel_serial(obs_date)).unwrap();
+            bdh.write_number(4, 1, 231.4).unwrap();
+            bdh.write_string(4, 2, "#N/A Invalid Security").unwrap();
+        }
+        let bdp = wb.add_worksheet().set_name("Equity").unwrap();
+        bdp.write_string(0, 0, "SECURITY").unwrap();
+        bdp.write_string(0, 1, "NAME").unwrap();
+        bdp.write_string(1, 0, "AAPL US Equity").unwrap();
+        bdp.write_string(1, 1, "Apple Inc").unwrap();
+    }
+
     #[test]
-    fn eod_read_mixes_values_and_problems() {
+    fn eod_read_mixes_bdh_values_and_bdp_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("refreshed.xlsx");
         let mut wb = Workbook::new();
-        let s = wb.add_worksheet().set_name("Equity").unwrap();
-        s.write_string(0, 0, "SECURITY").unwrap();
-        s.write_string(0, 1, "PX_LAST").unwrap();
-        s.write_string(0, 2, "PX_VOLUME").unwrap();
-        s.write_string(1, 0, "AAPL US Equity").unwrap();
-        s.write_number(1, 1, 231.4).unwrap();
-        s.write_string(1, 2, "#N/A Invalid Security").unwrap();
+        let d = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        write_mixed_eod_fixture(&mut wb, d, true);
         write_meta_fixture(&mut wb, 7);
         wb.save(&path).unwrap();
 
-        let (assets, fields) = fixture_assets();
-        let d = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
+        let (assets, fields) = fixture_assets_mixed();
         let out = read_eod_workbook(&path, 7, &assets, &fields, d).unwrap();
-        assert_eq!(out.cells.len(), 1);
-        assert_eq!(out.cells[0].asset_id, 1);
-        assert_eq!(out.cells[0].field_id, 100);
-        assert_eq!(out.cells[0].obs_date, d);
-        assert_eq!(out.cells[0].value, CellValue::Num(231.4));
+
+        // BDH side: PX_LAST valid, dated from the sheet's own date column
+        let px_last = out.cells.iter().find(|c| c.field_id == 100).unwrap();
+        assert_eq!(px_last.asset_id, 1);
+        assert_eq!(px_last.obs_date, d);
+        assert_eq!(px_last.value, CellValue::Num(231.4));
+        // BDH side: PX_VOLUME errored -> problem, not a cell
+        assert!(out.problems.iter()
+            .any(|p| p.code == "invalid_security" && p.field_id == Some(101)));
+
+        // BDP side: NAME text value, stamped with the run's obs_date
+        let name = out.cells.iter().find(|c| c.field_id == 102).unwrap();
+        assert_eq!(name.asset_id, 1);
+        assert_eq!(name.obs_date, d);
+        assert_eq!(name.value, CellValue::Text("Apple Inc".into()));
+
+        assert_eq!(out.cells.len(), 2);
         assert_eq!(out.problems.len(), 1);
-        assert_eq!(out.problems[0].code, "invalid_security");
-        assert_eq!(out.problems[0].field_id, Some(101));
+    }
+
+    #[test]
+    fn eod_read_holiday_empty_bdh_still_ingests_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holiday.xlsx");
+        let mut wb = Workbook::new();
+        let d = NaiveDate::from_ymd_opt(2026, 12, 25).unwrap(); // e.g. Christmas
+        write_mixed_eod_fixture(&mut wb, d, false); // empty BDH spill
+        write_meta_fixture(&mut wb, 7);
+        wb.save(&path).unwrap();
+
+        let (assets, fields) = fixture_assets_mixed();
+        let out = read_eod_workbook(&path, 7, &assets, &fields, d).unwrap();
+
+        // No BDH observations, but exactly one no_data problem for the asset
+        assert!(out.cells.iter().all(|c| c.field_id != 100 && c.field_id != 101));
+        let no_data: Vec<_> = out.problems.iter().filter(|p| p.code == "no_data").collect();
+        assert_eq!(no_data.len(), 1);
+        assert_eq!(no_data[0].asset_id, Some(1));
+        assert_eq!(no_data[0].obs_date, Some(d));
+
+        // Text field is unaffected by the holiday — still ingested under obs_date
+        let name = out.cells.iter().find(|c| c.field_id == 102).unwrap();
+        assert_eq!(name.value, CellValue::Text("Apple Inc".into()));
+        assert_eq!(name.obs_date, d);
+        assert_eq!(out.cells.len(), 1);
     }
 
     #[test]

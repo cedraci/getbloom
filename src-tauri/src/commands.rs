@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use crate::orchestrator::{self, PipelineConfig, RunOutcome};
+use crate::scheduler::previous_weekday;
 use crate::{budget, fields, registry, scheduler, views};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -173,8 +174,10 @@ pub async fn estimate_view(state: State<'_, AppState>, view_id: i64)
 pub async fn run_eod_now(state: State<'_, AppState>, view_id: i64, confirmed: bool)
     -> Result<RunOutcome, AppError> {
     let cfg = pipeline_cfg(&state).await;
-    let today = chrono::Local::now().date_naive();
-    orchestrator::run_eod(&state.pool, &cfg, view_id, "manual", today, confirmed).await
+    // Amendment A1: "Run now" fetches the previous trading day's close, not today's
+    // live values (BDP cannot return "as of yesterday").
+    let obs_date = previous_weekday(chrono::Local::now().date_naive());
+    orchestrator::run_eod(&state.pool, &cfg, view_id, "manual", obs_date, confirmed).await
 }
 
 #[tauri::command]

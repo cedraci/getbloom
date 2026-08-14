@@ -27,6 +27,7 @@ pub struct GenField {
     pub field_id: i64,
     pub asset_class_id: i64,
     pub mnemonic: String,
+    pub value_kind: String,
 }
 
 pub fn sanitize_sheet_name(raw: &str) -> String {
@@ -54,8 +55,73 @@ fn write_meta(wb: &mut Workbook, meta: &WbMeta) -> AppResult<()> {
     Ok(())
 }
 
+pub fn bdh_sheet_name(asset_id: i64) -> String {
+    format!("A{asset_id}")
+}
+
+/// Writes one per-asset BDH sheet: rows 1-3 carry asset_id/security/fields metadata,
+/// row 5 (index 4) carries the `=BDH(...)` formula whose spill fills the rows below.
+/// Shared by the EOD workbook (single-day range, `start == end`) and the backfill
+/// workbook (multi-day range).
+fn write_bdh_sheet(
+    wb: &mut Workbook, asset: &GenAsset, mnemonics: &[&str],
+    start: chrono::NaiveDate, end: chrono::NaiveDate,
+) -> AppResult<()> {
+    let joined = mnemonics.join(",");
+    let sheet = wb.add_worksheet()
+        .set_name(bdh_sheet_name(asset.asset_id))
+        .map_err(|er| AppError::Excel(er.to_string()))?;
+    sheet.write_string(0, 0, "asset_id").map_err(|er| AppError::Excel(er.to_string()))?;
+    sheet.write_string(0, 1, asset.asset_id.to_string()).map_err(|er| AppError::Excel(er.to_string()))?;
+    sheet.write_string(1, 0, "security").map_err(|er| AppError::Excel(er.to_string()))?;
+    sheet.write_string(1, 1, &asset.bdp_security).map_err(|er| AppError::Excel(er.to_string()))?;
+    sheet.write_string(2, 0, "fields").map_err(|er| AppError::Excel(er.to_string()))?;
+    sheet.write_string(2, 1, &joined).map_err(|er| AppError::Excel(er.to_string()))?;
+    let (s, e) = (start.format("%Y%m%d").to_string(), end.format("%Y%m%d").to_string());
+    let formula = format!(
+        "=BDH(\"{}\",\"{}\",\"{}\",\"{}\",\"Dates=S\")",
+        asset.bdp_security, joined, s, e);
+    sheet.write_formula(4, 0, Formula::new(formula))
+        .map_err(|er| AppError::Excel(er.to_string()))?;
+    Ok(())
+}
+
+/// Writes one per-class BDP sheet for `text_fields` only (SECURITY column + one
+/// column per text mnemonic, `=BDP(...)` formula per cell). Caller guarantees
+/// `text_fields` is non-empty.
+fn write_bdp_sheet(
+    wb: &mut Workbook, class_name: &str, class_assets: &[&GenAsset], text_fields: &[&GenField],
+) -> AppResult<()> {
+    let sheet = wb.add_worksheet()
+        .set_name(sanitize_sheet_name(class_name))
+        .map_err(|e| AppError::Excel(e.to_string()))?;
+    sheet.write_string(0, 0, "SECURITY").map_err(|e| AppError::Excel(e.to_string()))?;
+    for (ci, f) in text_fields.iter().enumerate() {
+        sheet.write_string(0, (ci + 1) as u16, &f.mnemonic)
+            .map_err(|e| AppError::Excel(e.to_string()))?;
+    }
+    for (ri, a) in class_assets.iter().enumerate() {
+        let row = (ri + 1) as u32;
+        sheet.write_string(row, 0, &a.bdp_security)
+            .map_err(|e| AppError::Excel(e.to_string()))?;
+        for (ci, f) in text_fields.iter().enumerate() {
+            let formula = format!("=BDP($A{},\"{}\")", row + 1, f.mnemonic);
+            sheet.write_formula(row, (ci + 1) as u16, Formula::new(formula))
+                .map_err(|e| AppError::Excel(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Amendment A1: the EOD workbook is mixed. BDP cannot return "as of yesterday", so
+/// numeric/date fields are fetched via a per-asset single-day BDH sheet (`A<asset_id>`,
+/// `start == end == obs_date`, the official close for that date) while text fields
+/// (no BDH history, e.g. NAME) stay on a per-class BDP sheet carrying their live value
+/// under the same previous-day `obs_date` (reference data changes rarely — accepted).
+/// Still exactly one workbook per run; META `kind` stays "eod".
 pub fn generate_eod_workbook(
     path: &Path, meta: &WbMeta, assets: &[GenAsset], fields: &[GenField],
+    obs_date: chrono::NaiveDate,
 ) -> AppResult<()> {
     if assets.is_empty() {
         return Err(AppError::Validation("view has no active assets".into()));
@@ -77,33 +143,31 @@ pub fn generate_eod_workbook(
             return Err(AppError::Validation(
                 format!("no fields configured for asset class '{class_name}'")));
         }
-        let sheet = wb.add_worksheet()
-            .set_name(sanitize_sheet_name(class_name))
-            .map_err(|e| AppError::Excel(e.to_string()))?;
-        sheet.write_string(0, 0, "SECURITY").map_err(|e| AppError::Excel(e.to_string()))?;
-        for (ci, f) in class_fields.iter().enumerate() {
-            sheet.write_string(0, (ci + 1) as u16, &f.mnemonic)
-                .map_err(|e| AppError::Excel(e.to_string()))?;
-        }
-        for (ri, a) in class_assets.iter().enumerate() {
-            let row = (ri + 1) as u32;
-            sheet.write_string(row, 0, &a.bdp_security)
-                .map_err(|e| AppError::Excel(e.to_string()))?;
-            for (ci, f) in class_fields.iter().enumerate() {
-                let formula = format!("=BDP($A{},\"{}\")", row + 1, f.mnemonic);
-                sheet.write_formula(row, (ci + 1) as u16, Formula::new(formula))
-                    .map_err(|e| AppError::Excel(e.to_string()))?;
+
+        // Numeric/date fields -> one BDH sheet per asset in the class, single day.
+        // An asset whose class has no numeric/date fields simply gets no BDH sheet.
+        let bdh_mnemonics: Vec<&str> = class_fields.iter()
+            .filter(|f| f.value_kind != "text")
+            .map(|f| f.mnemonic.as_str())
+            .collect();
+        if !bdh_mnemonics.is_empty() {
+            for a in class_assets {
+                write_bdh_sheet(&mut wb, a, &bdh_mnemonics, obs_date, obs_date)?;
             }
+        }
+
+        // Text fields -> one BDP sheet per class. Classes with no text fields (and a
+        // run where no fields are text at all) get no BDP sheet.
+        let text_fields: Vec<&GenField> = class_fields.iter()
+            .filter(|f| f.value_kind == "text").copied().collect();
+        if !text_fields.is_empty() {
+            write_bdp_sheet(&mut wb, class_name, class_assets, &text_fields)?;
         }
     }
 
     write_meta(&mut wb, meta)?;
     wb.save(path).map_err(|e| AppError::Excel(e.to_string()))?;
     Ok(())
-}
-
-pub fn bdh_sheet_name(asset_id: i64) -> String {
-    format!("A{asset_id}")
 }
 
 pub fn generate_backfill_workbook(
@@ -116,7 +180,6 @@ pub fn generate_backfill_workbook(
     if start > end {
         return Err(AppError::Validation("backfill start date after end date".into()));
     }
-    let (s, e) = (start.format("%Y%m%d").to_string(), end.format("%Y%m%d").to_string());
     let mut wb = Workbook::new();
 
     for a in assets {
@@ -128,21 +191,7 @@ pub fn generate_backfill_workbook(
             return Err(AppError::Validation(
                 format!("no fields configured for asset '{}'", a.label)));
         }
-        let joined = mnemonics.join(",");
-        let sheet = wb.add_worksheet()
-            .set_name(bdh_sheet_name(a.asset_id))
-            .map_err(|er| AppError::Excel(er.to_string()))?;
-        sheet.write_string(0, 0, "asset_id").map_err(|er| AppError::Excel(er.to_string()))?;
-        sheet.write_string(0, 1, a.asset_id.to_string()).map_err(|er| AppError::Excel(er.to_string()))?;
-        sheet.write_string(1, 0, "security").map_err(|er| AppError::Excel(er.to_string()))?;
-        sheet.write_string(1, 1, &a.bdp_security).map_err(|er| AppError::Excel(er.to_string()))?;
-        sheet.write_string(2, 0, "fields").map_err(|er| AppError::Excel(er.to_string()))?;
-        sheet.write_string(2, 1, &joined).map_err(|er| AppError::Excel(er.to_string()))?;
-        let formula = format!(
-            "=BDH(\"{}\",\"{}\",\"{}\",\"{}\",\"Dates=S\")",
-            a.bdp_security, joined, s, e);
-        sheet.write_formula(4, 0, Formula::new(formula))
-            .map_err(|er| AppError::Excel(er.to_string()))?;
+        write_bdh_sheet(&mut wb, a, &mnemonics, start, end)?;
     }
 
     write_meta(&mut wb, meta)?;
@@ -165,10 +214,22 @@ mod tests {
                        label: "EuroStoxx".into(), bdp_security: "SX5E Index".into() },
         ];
         let fields = vec![
-            GenField { field_id: 100, asset_class_id: 10, mnemonic: "PX_LAST".into() },
-            GenField { field_id: 101, asset_class_id: 10, mnemonic: "PX_VOLUME".into() },
-            GenField { field_id: 200, asset_class_id: 20, mnemonic: "PX_LAST".into() },
+            GenField { field_id: 100, asset_class_id: 10, mnemonic: "PX_LAST".into(),
+                       value_kind: "numeric".into() },
+            GenField { field_id: 101, asset_class_id: 10, mnemonic: "PX_VOLUME".into(),
+                       value_kind: "numeric".into() },
+            GenField { field_id: 200, asset_class_id: 20, mnemonic: "PX_LAST".into(),
+                       value_kind: "numeric".into() },
         ];
+        (assets, fields)
+    }
+
+    // Same shape as `sample()`, plus a text field (NAME) on the Equity class only —
+    // Index keeps purely numeric fields so it exercises the "no BDP sheet" edge.
+    fn sample_mixed() -> (Vec<GenAsset>, Vec<GenField>) {
+        let (assets, mut fields) = sample();
+        fields.push(GenField { field_id: 102, asset_class_id: 10, mnemonic: "NAME".into(),
+                               value_kind: "text".into() });
         (assets, fields)
     }
 
@@ -180,37 +241,93 @@ mod tests {
     }
 
     #[test]
-    fn eod_workbook_has_one_sheet_per_class_plus_meta() {
+    fn eod_workbook_mixed_bdh_and_bdp_sheets() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wb.xlsx");
-        let (assets, fields) = sample();
+        let (assets, fields) = sample_mixed();
         let meta = WbMeta { run_id: 7, view_id: 3, kind: "eod".into(),
                             generated_at: "2026-08-13T10:00:00".into() };
-        generate_eod_workbook(&path, &meta, &assets, &fields).unwrap();
+        let obs_date = chrono::NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
+        generate_eod_workbook(&path, &meta, &assets, &fields, obs_date).unwrap();
 
         let mut wb: Xlsx<_> = open_workbook(&path).unwrap();
         let names = wb.sheet_names().to_vec();
+        // one BDH sheet per asset (numeric fields) ...
+        assert!(names.contains(&"A1".to_string()));
+        assert!(names.contains(&"A2".to_string()));
+        assert!(names.contains(&"A3".to_string()));
+        // ... one BDP sheet for Equity only (it has the text field NAME) ...
         assert!(names.contains(&"Equity".to_string()));
-        assert!(names.contains(&"Index".to_string()));
+        assert!(!names.contains(&"Index".to_string()));
+        // ... and META, all inside the single workbook.
         assert!(names.contains(&"META".to_string()));
 
-        // header row + securities in column A
-        let r = wb.worksheet_range("Equity").unwrap();
-        assert_eq!(r.get_value((0, 0)).unwrap().to_string(), "SECURITY");
-        assert_eq!(r.get_value((0, 1)).unwrap().to_string(), "PX_LAST");
-        assert_eq!(r.get_value((1, 0)).unwrap().to_string(), "AAPL US Equity");
+        // BDH sheet: single-day range (start == end == obs_date), numeric mnemonics only
+        let r = wb.worksheet_range("A1").unwrap();
+        assert_eq!(r.get_value((1, 1)).unwrap().to_string(), "AAPL US Equity");
+        assert_eq!(r.get_value((2, 1)).unwrap().to_string(), "PX_LAST,PX_VOLUME");
+        let f = wb.worksheet_formula("A1").unwrap();
+        let cell = f.get_value((4, 0)).unwrap().to_string();
+        assert!(cell.contains(
+            "BDH(\"AAPL US Equity\",\"PX_LAST,PX_VOLUME\",\"20260813\",\"20260813\",\"Dates=S\")"),
+            "got formula: {cell}");
 
-        // BDP formulas present
-        let f = wb.worksheet_formula("Equity").unwrap();
-        let cell = f.get_value((1, 1)).unwrap().to_string();
-        assert!(cell.contains("BDP($A2,\"PX_LAST\")"), "got formula: {cell}");
+        // BDP sheet: text mnemonic only (NAME), not the numeric fields
+        let r2 = wb.worksheet_range("Equity").unwrap();
+        assert_eq!(r2.get_value((0, 0)).unwrap().to_string(), "SECURITY");
+        assert_eq!(r2.get_value((0, 1)).unwrap().to_string(), "NAME");
+        assert_eq!(r2.get_size(), (3, 2)); // header + 2 Equity assets, 2 columns (no PX_* mixed in)
+        let f2 = wb.worksheet_formula("Equity").unwrap();
+        let cell2 = f2.get_value((1, 1)).unwrap().to_string();
+        assert!(cell2.contains("BDP($A2,\"NAME\")"), "got formula: {cell2}");
 
-        // META carries run identity
+        // META carries run identity, kind stays "eod"
         let m = wb.worksheet_range("META").unwrap();
         assert_eq!(m.get_value((0, 0)).unwrap().to_string(), "run_id");
         assert_eq!(m.get_value((0, 1)).unwrap().to_string(), "7");
+        assert_eq!(m.get_value((2, 0)).unwrap().to_string(), "kind");
+        assert_eq!(m.get_value((2, 1)).unwrap().to_string(), "eod");
         assert_eq!(m.get_value((4, 0)).unwrap().to_string(), "layout_version");
         assert_eq!(m.get_value((4, 1)).unwrap().to_string(), "1");
+    }
+
+    #[test]
+    fn eod_workbook_no_bdp_sheets_when_no_text_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wb.xlsx");
+        let (assets, fields) = sample(); // all-numeric, no text fields anywhere
+        let meta = WbMeta { run_id: 9, view_id: 3, kind: "eod".into(),
+                            generated_at: "t".into() };
+        let obs_date = chrono::NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
+        generate_eod_workbook(&path, &meta, &assets, &fields, obs_date).unwrap();
+
+        let wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let names = wb.sheet_names().to_vec();
+        assert!(names.contains(&"A1".to_string()));
+        assert!(names.contains(&"A2".to_string()));
+        assert!(names.contains(&"A3".to_string()));
+        assert!(!names.contains(&"Equity".to_string()));
+        assert!(!names.contains(&"Index".to_string()));
+        assert!(names.contains(&"META".to_string()));
+    }
+
+    #[test]
+    fn eod_workbook_no_bdh_sheet_when_class_is_all_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wb.xlsx");
+        let assets = vec![GenAsset { asset_id: 5, asset_class_id: 30, class_name: "Fund".into(),
+                                     label: "MyFund".into(), bdp_security: "FUND1 Equity".into() }];
+        let fields = vec![GenField { field_id: 300, asset_class_id: 30, mnemonic: "NAME".into(),
+                                     value_kind: "text".into() }];
+        let meta = WbMeta { run_id: 10, view_id: 3, kind: "eod".into(), generated_at: "t".into() };
+        let obs_date = chrono::NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
+        generate_eod_workbook(&path, &meta, &assets, &fields, obs_date).unwrap();
+
+        let wb: Xlsx<_> = open_workbook(&path).unwrap();
+        let names = wb.sheet_names().to_vec();
+        assert!(!names.contains(&"A5".to_string())); // no numeric/date fields -> no BDH sheet
+        assert!(names.contains(&"Fund".to_string()));
+        assert!(names.contains(&"META".to_string()));
     }
 
     #[test]
