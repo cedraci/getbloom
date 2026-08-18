@@ -645,3 +645,87 @@ async fn purging_a_field_clears_its_observations_and_memberships() {
         assert_eq!(n, 0, "{table} should have no rows for the purged field");
     }
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_view_with_runs_refuses_to_purge_but_still_retires() {
+    use getbloomdata_lib::deletion::{delete_view, DeleteMode};
+    use getbloomdata_lib::error::AppError;
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("HistoricView"), "").await.unwrap();
+    sqlx::query(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
+         VALUES ($1, 'eod', 'manual', 'ok', 1)")
+        .bind(view.id).execute(&pool).await.unwrap();
+
+    let err = delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap_err();
+    assert!(matches!(err, AppError::DeleteBlocked { .. }), "got {err:?}");
+
+    delete_view(&pool, view.id, DeleteMode::Retire).await.unwrap();
+    let (active,): (bool,) = sqlx::query_as("SELECT active FROM view WHERE id = $1")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+    assert!(!active);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn purging_a_never_run_view_takes_its_schedule_and_memberships_with_it() {
+    use getbloomdata_lib::deletion::{delete_view, DeleteMode};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("VPurgeCls"), "test").await.unwrap();
+    let asset = getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Member".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("MEM"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("FreshView"), "").await.unwrap();
+    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, TIME '18:00', TIME '19:00', true)")
+        .bind(view.id).execute(&pool).await.unwrap();
+
+    delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap();
+
+    for table in ["schedule", "view_asset", "view_field"] {
+        let (n,): (i64,) = sqlx::query_as(
+            &format!("SELECT COUNT(*) FROM {table} WHERE view_id = $1"))
+            .bind(view.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "{table} should be empty for the purged view");
+    }
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM view WHERE id = $1")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+    // The asset itself is untouched: a view is a selection, not an owner.
+    let (a,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
+        .bind(asset.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(a, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn scheduler_skips_schedules_whose_view_is_retired() {
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("RetiredSched"), "").await.unwrap();
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, TIME '00:01', TIME '00:02', true)")
+        .bind(view.id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE view SET active = false WHERE id = $1")
+        .bind(view.id).execute(&pool).await.unwrap();
+
+    let due = getbloomdata_lib::scheduler::due_schedules(&pool).await.unwrap();
+    assert!(!due.iter().any(|(_, vid, _)| *vid == view.id),
+            "a retired view must not appear in the due list");
+}

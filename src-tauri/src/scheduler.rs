@@ -83,15 +83,24 @@ pub fn previous_weekday(d: NaiveDate) -> NaiveDate {
     p
 }
 
+/// Schedules eligible to fire. A schedule is due only when BOTH it and its view
+/// are active -- retiring a view has to stop its scheduled runs, or "retire"
+/// would mean nothing for the one entity that drives collection.
+pub async fn due_schedules(pool: &PgPool) -> AppResult<Vec<(i64, i64, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT s.id, s.view_id, s.last_result
+         FROM schedule s JOIN view v ON v.id = s.view_id
+         WHERE s.active AND v.active")
+        .fetch_all(pool).await?)
+}
+
 pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
                   now: chrono::DateTime<chrono::Local>) -> AppResult<Vec<i64>> {
     let today = now.date_naive();
     if is_weekend(today) {
         return Ok(vec![]);
     }
-    let schedules: Vec<(i64, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, view_id, last_result FROM schedule WHERE active")
-        .fetch_all(pool).await?;
+    let schedules = due_schedules(pool).await?;
     let mut launched = Vec::new();
     for (sid, view_id, last_result) in schedules {
         // Isolate per-schedule errors: one schedule's failure never blocks the others

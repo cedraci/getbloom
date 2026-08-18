@@ -264,3 +264,42 @@ pub async fn delete_field(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult
         }
     }
 }
+
+/// A view with runs behind it cannot honestly be purged: `run.view_id` would
+/// dangle, and runs are never rewritten (design §3.4). Retire is always
+/// available, and -- once the scheduler filters on `view.active` -- retiring
+/// genuinely stops collection.
+///
+/// `view_asset` and `view_field` are the only cascading foreign keys in the
+/// schema, so they go with the view without an explicit statement.
+pub async fn delete_view(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult<()> {
+    match mode {
+        DeleteMode::Retire => {
+            let n = sqlx::query("UPDATE view SET active = false WHERE id = $1")
+                .bind(id).execute(pool).await?.rows_affected();
+            if n == 0 {
+                return Err(AppError::Validation(format!("no such view: id {id}")));
+            }
+            Ok(())
+        }
+        DeleteMode::Purge => {
+            let runs = scalar(pool, "SELECT COUNT(*) FROM run WHERE view_id = $1", id).await?;
+            if runs > 0 {
+                return Err(AppError::DeleteBlocked {
+                    reason: "this view has been run; retire it instead of purging".into(),
+                    counts: vec![("run(s)".into(), runs)],
+                });
+            }
+            let mut tx = pool.begin().await?;
+            sqlx::query("DELETE FROM schedule WHERE view_id = $1")
+                .bind(id).execute(&mut *tx).await?;
+            let n = sqlx::query("DELETE FROM view WHERE id = $1")
+                .bind(id).execute(&mut *tx).await?.rows_affected();
+            if n == 0 {
+                return Err(AppError::Validation(format!("no such view: id {id}")));
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+    }
+}
