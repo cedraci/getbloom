@@ -1,10 +1,17 @@
 <script lang="ts">
-  import { api, type AppConfig, type ScheduleRow, type View } from "./api";
+  import { api, type AppConfig, type EntityKind, type ScheduleRow, type View } from "./api";
+  import DeleteDialog from "./DeleteDialog.svelte";
 
   let cfg = $state<AppConfig>({ data_dir: "", soft_limit: 0, request_timeout_s: 0, python_path: "" });
   let schedules = $state<ScheduleRow[]>([]);
   let views = $state<View[]>([]);
   let error = $state("");
+  let pending = $state<{ kind: EntityKind; id: number } | null>(null);
+
+  function afterDelete(changed: boolean) {
+    pending = null;
+    if (changed) reload();
+  }
 
   let newSchedule = $state({ view_id: 0, window_start: "09:00", window_end: "18:00", active: true });
 
@@ -68,7 +75,7 @@
   <h2>Schedules</h2>
   <table>
     <thead>
-      <tr><th>View</th><th>Window start</th><th>Window end</th><th>Drawn at</th><th>Last result</th><th>Active</th></tr>
+      <tr><th>View</th><th>Window start</th><th>Window end</th><th>Drawn at</th><th>Last result</th><th>Active</th><th></th></tr>
     </thead>
     <tbody>
       {#each schedules as s}
@@ -79,6 +86,8 @@
           <td>{s.drawn_at ?? ""}</td>
           <td>{s.last_result ?? ""}</td>
           <td><input type="checkbox" checked={s.active} onchange={() => toggleScheduleActive(s)} /></td>
+          <td><button class="x" title="Remove schedule"
+                      onclick={() => (pending = { kind: "schedule", id: s.id })}>&times;</button></td>
         </tr>
       {/each}
     </tbody>
@@ -96,8 +105,14 @@
   </form>
 </section>
 
+{#if pending}
+  <DeleteDialog kind={pending.kind} id={pending.id} onclose={afterDelete} />
+{/if}
+
 <style>
   .error { color: #c00; }
+  .x { border: none; background: none; color: #c00; cursor: pointer;
+       font-size: 1rem; line-height: 1; padding: 0 0.3rem; }
   section { padding: 1rem; }
   h2 { margin-top: 1.5rem; }
   h3 { margin-top: 1rem; }
