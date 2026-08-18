@@ -1,9 +1,15 @@
+//! The run pipeline (spec A2 §4): plan → fetch → ingest.
+//!
+//! Three stages instead of four. There is no generate stage (no workbook to
+//! build) and reading is no longer separate from fetching, so `run_eod` and
+//! `run_backfill` now differ only in their date range, their budget estimate,
+//! and their confirmation rule — everything else runs through `execute`.
+
+use crate::blp_driver;
 use crate::budget::{self, BudgetLevel};
 use crate::error::{AppError, AppResult};
-use crate::excel_gen::{self, GenAsset, GenField, WbMeta};
-use crate::excel_read::{self, FieldSpec};
+use crate::fetch::{self, FetchAsset, FetchField, FetchOutcome, FetchRequest, SidecarPayload};
 use crate::ingest::{self, IngestSummary};
-use crate::refresh_driver;
 use crate::views;
 use chrono::NaiveDate;
 use serde::Serialize;
@@ -15,10 +21,10 @@ pub const BACKFILL_CAP_DAYS: i64 = 30;
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub data_dir: PathBuf,
+    pub python_path: PathBuf,
     pub script_path: PathBuf,
-    pub refresh_timeout_s: u32,
+    pub request_timeout_s: u32,
     pub soft_limit: i64,
-    pub dry_run_refresh: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,261 +33,323 @@ pub enum RunOutcome {
     NeedsConfirmation { estimated: i64, today_total: i64 },
 }
 
-pub fn pending_path(data_dir: &Path, view_name: &str, date: NaiveDate) -> PathBuf {
-    data_dir.join("pending").join(format!("{view_name}_{date}.xlsx"))
-}
-
-pub fn archive_path(data_dir: &Path, run_id: i64, view_name: &str, date: NaiveDate) -> PathBuf {
-    data_dir.join("archive")
+/// Where a run's raw sidecar response is archived (spec A2 §4.4). Same
+/// convention the workbooks used, so the audit trail keeps its shape.
+pub fn payload_path(data_dir: &Path, run_id: i64, view_name: &str, date: NaiveDate) -> PathBuf {
+    data_dir
+        .join("archive")
         .join(date.format("%Y").to_string())
         .join(date.format("%m").to_string())
-        .join(format!("run_{run_id}_{view_name}_{date}.xlsx"))
+        .join(format!("run_{run_id}_{view_name}_{date}.json"))
 }
+
+// ---------------------------------------------------------------- the seam
+
+/// Spec A2 §2.4. One method: an EOD run is a history request whose range is a
+/// single day, which is exactly what Amendment A1 established.
+///
+/// `audit_path` is where the implementation should persist the raw upstream
+/// response, if it has one; it is advisory and a fetcher may ignore it.
+pub trait DataFetcher {
+    fn fetch(
+        &self,
+        req: &FetchRequest,
+        audit_path: Option<&Path>,
+    ) -> impl std::future::Future<Output = AppResult<FetchOutcome>> + Send;
+}
+
+pub struct BlpapiFetcher<'a> {
+    pub cfg: &'a PipelineConfig,
+}
+
+impl DataFetcher for BlpapiFetcher<'_> {
+    async fn fetch(
+        &self,
+        req: &FetchRequest,
+        audit_path: Option<&Path>,
+    ) -> AppResult<FetchOutcome> {
+        let payload = SidecarPayload {
+            run_id: req.run_id,
+            timeout_s: self.cfg.request_timeout_s,
+            requests: fetch::plan_requests(req)?,
+        };
+        let resp = blp_driver::run_fetch(
+            &self.cfg.python_path,
+            &self.cfg.script_path,
+            &payload,
+            audit_path,
+        )
+        .await?;
+        Ok(fetch::map_response(req, &resp))
+    }
+}
+
+// ---------------------------------------------------------------- view load
 
 struct Loaded {
     view_name: String,
-    assets: Vec<GenAsset>,
-    gen_fields: Vec<GenField>,
-    field_specs: Vec<FieldSpec>,
+    assets: Vec<FetchAsset>,
+    fields: Vec<FetchField>,
 }
 
 async fn load_view(pool: &PgPool, view_id: i64) -> AppResult<Loaded> {
     let view = sqlx::query_as::<_, views::View>("SELECT * FROM view WHERE id = $1")
-        .bind(view_id).fetch_one(pool).await?;
+        .bind(view_id)
+        .fetch_one(pool)
+        .await?;
     let assets_db = views::view_assets(pool, view_id).await?;
     let fields_db = views::view_fields(pool, view_id).await?;
     let classes = crate::registry::list_asset_classes(pool).await?;
-    let class_name = |id: i64| classes.iter().find(|c| c.id == id)
-        .map(|c| c.name.clone()).unwrap_or_else(|| format!("Class{id}"));
-    let assets = assets_db.iter().map(|a| GenAsset {
-        asset_id: a.id, asset_class_id: a.asset_class_id,
-        class_name: class_name(a.asset_class_id),
-        label: a.label.clone(), bdp_security: a.bdp_security.clone(),
-    }).collect();
-    let gen_fields = fields_db.iter().map(|f| GenField {
-        field_id: f.id, asset_class_id: f.asset_class_id, mnemonic: f.mnemonic.clone(),
-        value_kind: f.value_kind.clone(),
-    }).collect();
-    let field_specs = fields_db.iter().map(|f| FieldSpec {
-        field_id: f.id, asset_class_id: f.asset_class_id,
-        mnemonic: f.mnemonic.clone(), value_kind: f.value_kind.clone(),
-    }).collect();
-    Ok(Loaded { view_name: view.name, assets, gen_fields, field_specs })
+    let class_name = |id: i64| {
+        classes
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("Class{id}"))
+    };
+    Ok(Loaded {
+        view_name: view.name,
+        assets: assets_db
+            .iter()
+            .map(|a| FetchAsset {
+                asset_id: a.id,
+                asset_class_id: a.asset_class_id,
+                class_name: class_name(a.asset_class_id),
+                label: a.label.clone(),
+                bdp_security: a.bdp_security.clone(),
+            })
+            .collect(),
+        fields: fields_db
+            .iter()
+            .map(|f| FetchField {
+                field_id: f.id,
+                asset_class_id: f.asset_class_id,
+                mnemonic: f.mnemonic.clone(),
+                value_kind: f.value_kind.clone(),
+            })
+            .collect(),
+    })
 }
 
 async fn set_status(pool: &PgPool, run_id: i64, status: &str) -> AppResult<()> {
     sqlx::query("UPDATE run SET status = $2 WHERE id = $1")
-        .bind(run_id).bind(status).execute(pool).await?;
+        .bind(run_id)
+        .bind(status)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
 async fn fail_run(pool: &PgPool, run_id: i64, err: &AppError) -> AppResult<()> {
     sqlx::query("UPDATE run SET status='failed', finished_at=now(), error_summary=$2 WHERE id=$1")
-        .bind(run_id).bind(err.to_string()).execute(pool).await?;
+        .bind(run_id)
+        .bind(err.to_string())
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
-async fn refresh_with_retry(cfg: &PipelineConfig, wb: &Path) -> AppResult<()> {
-    match refresh_driver::run_refresh(&cfg.script_path, wb,
-                                      cfg.refresh_timeout_s, cfg.dry_run_refresh).await {
-        Err(AppError::Refresh { code: 2, .. }) => {
-            refresh_driver::run_refresh(&cfg.script_path, wb,
-                                        cfg.refresh_timeout_s * 2, cfg.dry_run_refresh)
-                .await.map(|_| ())
-        }
-        other => other.map(|_| ()),
-    }
-}
+// ---------------------------------------------------------------- the pipeline
 
-// Invariant: the run row must reach a terminal status (`ok`/`partial`) even if
-// archiving the workbook fails afterward — ingest already committed, so the pipeline
-// outcome is final regardless of whether the file move succeeds.
-async fn finish(pool: &PgPool, cfg: &PipelineConfig, run_id: i64, view_name: &str,
-                date: NaiveDate, wb: &Path, summary: IngestSummary) -> AppResult<RunOutcome> {
-    let dest = archive_path(&cfg.data_dir, run_id, view_name, date);
-    let status = if summary.issues > 0 { "partial" } else { "ok" };
-    sqlx::query("UPDATE run SET status=$2, finished_at=now(), workbook_path=$3 WHERE id=$1")
-        .bind(run_id).bind(status).bind(dest.to_string_lossy().as_ref())
-        .execute(pool).await?;
-
-    let move_result = std::fs::create_dir_all(dest.parent().unwrap())
-        .and_then(|_| std::fs::rename(wb, &dest));
-    if let Err(e) = move_result {
-        // Best-effort note only — the run is already terminal above; a failure here
-        // must not change that status or surface as an error to the caller.
-        let note = format!("archive move failed: {e}; workbook left in pending/");
-        let _ = sqlx::query("UPDATE run SET error_summary=$2 WHERE id=$1")
-            .bind(run_id).bind(note).execute(pool).await;
-    }
-    Ok(RunOutcome::Completed { run_id, summary })
-}
-
-pub async fn run_eod(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
-                     trigger: &str, obs_date: NaiveDate, confirmed: bool)
-    -> AppResult<RunOutcome> {
-    let loaded = load_view(pool, view_id).await?;
-    let estimated = budget::estimate_eod_hits(&loaded.assets, &loaded.field_specs);
-    let today_total = budget::today_hits(pool).await?;
-    if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm
-        && !confirmed {
-        return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
-    }
-
-    let wb = pending_path(&cfg.data_dir, &loaded.view_name, obs_date);
-    std::fs::create_dir_all(wb.parent().unwrap())?;
+#[allow(clippy::too_many_arguments)]
+async fn execute<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    loaded: &Loaded,
+    view_id: i64,
+    kind: &str,
+    trigger: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    estimated: i64,
+) -> AppResult<RunOutcome> {
     let run_id: i64 = sqlx::query_scalar(
-        "INSERT INTO run (view_id, kind, trigger_kind, status, workbook_path, estimated_hits)
-         VALUES ($1,'eod',$2,'generating',$3,$4) RETURNING id")
-        .bind(view_id).bind(trigger)
-        .bind(wb.to_string_lossy().as_ref()).bind(estimated)
-        .fetch_one(pool).await?;
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
+         VALUES ($1,$2,$3,'fetching',$4) RETURNING id",
+    )
+    .bind(view_id)
+    .bind(kind)
+    .bind(trigger)
+    .bind(estimated)
+    .fetch_one(pool)
+    .await?;
 
-    let meta = WbMeta { run_id, view_id, kind: "eod".into(),
-                        generated_at: chrono::Local::now().to_rfc3339() };
+    let audit = payload_path(&cfg.data_dir, run_id, &loaded.view_name, end);
+    if let Some(parent) = audit.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
-    set_status(pool, run_id, "refreshing").await?;
-    let fetcher = ExcelComFetcher { cfg };
-    let result = fetcher.fetch_eod(&wb, &meta, &loaded.assets, &loaded.gen_fields,
-                                   &loaded.field_specs, obs_date).await;
-    // Hits are recorded for every fetch attempt, even on failure — over-counting is
-    // safer than under-counting for a budget guard. Losing this one advisory ledger
-    // row must not abort or mask the pipeline result, so failures here are non-fatal.
+    let req = FetchRequest {
+        run_id,
+        assets: loaded.assets.clone(),
+        fields: loaded.fields.clone(),
+        start,
+        end,
+    };
+    let result = fetcher.fetch(&req, Some(&audit)).await;
+
+    // Hits are recorded for every fetch attempt, even on failure — over-counting
+    // is the safe direction for a budget guard. Losing this advisory ledger row
+    // must not abort or mask the pipeline result.
     if let Err(e) = budget::record_hits(pool, run_id, estimated).await {
         eprintln!("warning: failed to record budget hit for run {run_id}: {e}");
     }
+
     let outcome = match result {
         Ok(o) => o,
         Err(e) => {
-            // Best-effort status write; the original error is the diagnosis to return
-            // regardless of whether this UPDATE itself succeeds.
             let _ = fail_run(pool, run_id, &e).await;
             return Err(e);
         }
     };
 
-    set_status(pool, run_id, "reading").await?;
     set_status(pool, run_id, "ingesting").await?;
     let summary = match ingest::ingest_outcome(pool, run_id, &outcome).await {
         Ok(s) => s,
         Err(e) => {
-            // Best-effort status write; the original error is the diagnosis to return
-            // regardless of whether this UPDATE itself succeeds.
             let _ = fail_run(pool, run_id, &e).await;
             return Err(e);
         }
     };
-    finish(pool, cfg, run_id, &loaded.view_name, obs_date, &wb, summary).await
+
+    let status = if summary.issues > 0 { "partial" } else { "ok" };
+    let stored = audit.exists().then(|| audit.to_string_lossy().into_owned());
+    sqlx::query("UPDATE run SET status=$2, finished_at=now(), payload_path=$3 WHERE id=$1")
+        .bind(run_id)
+        .bind(status)
+        .bind(stored)
+        .execute(pool)
+        .await?;
+
+    Ok(RunOutcome::Completed { run_id, summary })
 }
 
-pub async fn run_backfill(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
-                          start: NaiveDate, end: NaiveDate, confirmed: bool)
-    -> AppResult<RunOutcome> {
+// ---------------------------------------------------------------- entry points
+
+pub async fn run_eod(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    view_id: i64,
+    trigger: &str,
+    obs_date: NaiveDate,
+    confirmed: bool,
+) -> AppResult<RunOutcome> {
+    run_eod_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, trigger, obs_date, confirmed).await
+}
+
+pub async fn run_eod_with<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    view_id: i64,
+    trigger: &str,
+    obs_date: NaiveDate,
+    confirmed: bool,
+) -> AppResult<RunOutcome> {
+    let loaded = load_view(pool, view_id).await?;
+    let estimated = budget::estimate_eod_hits(&loaded.assets, &loaded.fields);
+    let today_total = budget::today_hits(pool).await?;
+    if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm
+        && !confirmed
+    {
+        return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
+    }
+    execute(pool, cfg, fetcher, &loaded, view_id, "eod", trigger,
+            obs_date, obs_date, estimated).await
+}
+
+pub async fn run_backfill(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    view_id: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+    confirmed: bool,
+) -> AppResult<RunOutcome> {
+    run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end, confirmed).await
+}
+
+pub async fn run_backfill_with<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    view_id: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+    confirmed: bool,
+) -> AppResult<RunOutcome> {
     if start > end {
         return Err(AppError::Validation("start after end".into()));
     }
     if (end - start).num_days() + 1 > BACKFILL_CAP_DAYS {
-        return Err(AppError::Validation(
-            format!("backfill range exceeds {BACKFILL_CAP_DAYS}-day cap")));
+        return Err(AppError::Validation(format!(
+            "backfill range exceeds {BACKFILL_CAP_DAYS}-day cap"
+        )));
     }
     let loaded = load_view(pool, view_id).await?;
-    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.field_specs, start, end);
+    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end);
     let today_total = budget::today_hits(pool).await?;
     // Spec §5.3: every backfill shows its cost and requires explicit confirmation.
     if !confirmed {
         return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
     }
-
-    let wb = pending_path(&cfg.data_dir, &loaded.view_name, end);
-    std::fs::create_dir_all(wb.parent().unwrap())?;
-    let run_id: i64 = sqlx::query_scalar(
-        "INSERT INTO run (view_id, kind, trigger_kind, status, workbook_path, estimated_hits)
-         VALUES ($1,'backfill','manual','generating',$2,$3) RETURNING id")
-        .bind(view_id).bind(wb.to_string_lossy().as_ref()).bind(estimated)
-        .fetch_one(pool).await?;
-
-    let meta = WbMeta { run_id, view_id, kind: "backfill".into(),
-                        generated_at: chrono::Local::now().to_rfc3339() };
-
-    set_status(pool, run_id, "refreshing").await?;
-    let fetcher = ExcelComFetcher { cfg };
-    let result = fetcher.fetch_history(&wb, &meta, &loaded.assets, &loaded.gen_fields,
-                                       &loaded.field_specs, start, end).await;
-    // Hits are recorded for every fetch attempt, even on failure — over-counting is
-    // safer than under-counting for a budget guard. Losing this one advisory ledger
-    // row must not abort or mask the pipeline result, so failures here are non-fatal.
-    if let Err(e) = budget::record_hits(pool, run_id, estimated).await {
-        eprintln!("warning: failed to record budget hit for run {run_id}: {e}");
-    }
-    let outcome = match result {
-        Ok(o) => o,
-        Err(e) => {
-            // Best-effort status write; the original error is the diagnosis to return
-            // regardless of whether this UPDATE itself succeeds.
-            let _ = fail_run(pool, run_id, &e).await;
-            return Err(e);
-        }
-    };
-
-    set_status(pool, run_id, "reading").await?;
-    set_status(pool, run_id, "ingesting").await?;
-    let summary = match ingest::ingest_outcome(pool, run_id, &outcome).await {
-        Ok(s) => s,
-        Err(e) => {
-            // Best-effort status write; the original error is the diagnosis to return
-            // regardless of whether this UPDATE itself succeeds.
-            let _ = fail_run(pool, run_id, &e).await;
-            return Err(e);
-        }
-    };
-    finish(pool, cfg, run_id, &loaded.view_name, end, &wb, summary).await
-}
-
-/// Seam for swapping the Excel/COM fetch path for direct BLPAPI later (spec §2.4).
-/// The trait covers stages 1–3 (generate → refresh → read); ingest is fetcher-agnostic.
-pub trait DataFetcher {
-    fn fetch_eod(&self, wb: &Path, meta: &WbMeta, assets: &[GenAsset],
-                 gen_fields: &[GenField], field_specs: &[FieldSpec],
-                 obs_date: NaiveDate)
-        -> impl std::future::Future<Output = AppResult<excel_read::ReadOutcome>> + Send;
-    fn fetch_history(&self, wb: &Path, meta: &WbMeta, assets: &[GenAsset],
-                     gen_fields: &[GenField], field_specs: &[FieldSpec],
-                     start: NaiveDate, end: NaiveDate)
-        -> impl std::future::Future<Output = AppResult<excel_read::ReadOutcome>> + Send;
-}
-
-pub struct ExcelComFetcher<'a> { pub cfg: &'a PipelineConfig }
-
-impl DataFetcher for ExcelComFetcher<'_> {
-    async fn fetch_eod(&self, wb: &Path, meta: &WbMeta, assets: &[GenAsset],
-                       gen_fields: &[GenField], field_specs: &[FieldSpec],
-                       obs_date: NaiveDate) -> AppResult<excel_read::ReadOutcome> {
-        excel_gen::generate_eod_workbook(wb, meta, assets, gen_fields, obs_date)?;
-        refresh_with_retry(self.cfg, wb).await?;
-        excel_read::read_eod_workbook(wb, meta.run_id, assets, field_specs, obs_date)
-    }
-    async fn fetch_history(&self, wb: &Path, meta: &WbMeta, assets: &[GenAsset],
-                           gen_fields: &[GenField], field_specs: &[FieldSpec],
-                           start: NaiveDate, end: NaiveDate)
-        -> AppResult<excel_read::ReadOutcome> {
-        excel_gen::generate_backfill_workbook(wb, meta, assets, gen_fields, start, end)?;
-        refresh_with_retry(self.cfg, wb).await?;
-        excel_read::read_backfill_workbook(wb, meta.run_id, assets, field_specs)
-    }
+    execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "manual",
+            start, end, estimated).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetch::{CellProblem, CellValue, ObsCell};
     use chrono::NaiveDate;
     use std::path::Path;
 
     #[test]
-    fn pending_and_archive_paths_follow_spec_naming() {
+    fn payload_path_follows_the_archive_convention() {
         let d = NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
-        let p = pending_path(Path::new("C:\\bloomdata"), "core-eq", d);
-        assert!(p.ends_with(Path::new("pending").join("core-eq_2026-08-13.xlsx")));
-        let a = archive_path(Path::new("C:\\bloomdata"), 42, "core-eq", d);
-        assert!(a.ends_with(Path::new("archive").join("2026").join("08")
-            .join("run_42_core-eq_2026-08-13.xlsx")));
+        let p = payload_path(Path::new("C:\\bloomdata"), 42, "core-eq", d);
+        assert!(p.ends_with(
+            Path::new("archive").join("2026").join("08").join("run_42_core-eq_2026-08-13.json")
+        ));
+    }
+
+    /// Returns canned data without touching Bloomberg — the whole point of the
+    /// reshaped trait. Impossible with the Excel-era signature, which demanded
+    /// a workbook path and a `WbMeta`.
+    pub struct MockFetcher {
+        pub cells: Vec<ObsCell>,
+        pub problems: Vec<CellProblem>,
+        pub fail: Option<&'static str>,
+    }
+
+    impl DataFetcher for MockFetcher {
+        async fn fetch(&self, _req: &FetchRequest, _audit: Option<&Path>)
+            -> AppResult<FetchOutcome> {
+            if let Some(msg) = self.fail {
+                return Err(AppError::Blp { code: 3, detail: msg.into() });
+            }
+            Ok(FetchOutcome {
+                cells: self.cells.clone(),
+                problems: self.problems.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_fetcher_satisfies_the_trait() {
+        let d = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let m = MockFetcher {
+            cells: vec![ObsCell { asset_id: 1, field_id: 2, obs_date: d,
+                                  value: CellValue::Num(1.5) }],
+            problems: vec![],
+            fail: None,
+        };
+        let req = FetchRequest { run_id: 1, assets: vec![], fields: vec![], start: d, end: d };
+        let out = m.fetch(&req, None).await.unwrap();
+        assert_eq!(out.cells.len(), 1);
+
+        let bad = MockFetcher { cells: vec![], problems: vec![], fail: Some("no session") };
+        assert!(bad.fetch(&req, None).await.is_err());
     }
 }

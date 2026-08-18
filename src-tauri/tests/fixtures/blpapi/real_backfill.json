@@ -1,0 +1,50 @@
+{
+ "run_id": 5,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "AAPL US Equity"
+    ],
+    "fields": [
+     "PX_LAST"
+    ],
+    "start": "20260810",
+    "end": "20260814"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "AAPL US Equity",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-08-10",
+        "PX_LAST": 308.26
+       },
+       {
+        "date": "2026-08-11",
+        "PX_LAST": 304.91
+       },
+       {
+        "date": "2026-08-12",
+        "PX_LAST": 302.25
+       },
+       {
+        "date": "2026-08-13",
+        "PX_LAST": 305.26
+       },
+       {
+        "date": "2026-08-14",
+        "PX_LAST": 305.93
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

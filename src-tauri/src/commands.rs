@@ -11,14 +11,19 @@ use tauri::State;
 pub struct AppConfig {
     pub data_dir: String,
     pub soft_limit: i64,
-    pub refresh_timeout_s: u32,
+    pub request_timeout_s: u32,
+    /// Interpreter used to run the BLPAPI sidecar. Bare "python" resolves via
+    /// PATH; set an absolute path when several interpreters are installed and
+    /// only one has the `blpapi` package.
+    pub python_path: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self { data_dir: "C:\\bloomdata".into(),
                soft_limit: budget::DEFAULT_SOFT_LIMIT,
-               refresh_timeout_s: 600 }
+               request_timeout_s: 120,   // BLPAPI answers in seconds, not the minutes Excel needed
+               python_path: "python".into() }
     }
 }
 
@@ -28,23 +33,23 @@ pub struct AppState {
 }
 
 pub fn script_path() -> PathBuf {
-    // scripts/refresh.ps1 ships next to the executable (bundled as a Tauri resource);
-    // in dev it resolves relative to src-tauri/.
+    // scripts/blp_fetch.py ships next to the executable (bundled as a Tauri
+    // resource); in dev it resolves relative to src-tauri/.
     let exe_dir = std::env::current_exe().ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_default();
-    let bundled = exe_dir.join("scripts").join("refresh.ps1");
-    if bundled.exists() { bundled } else { PathBuf::from("scripts/refresh.ps1") }
+    let bundled = exe_dir.join("scripts").join("blp_fetch.py");
+    if bundled.exists() { bundled } else { PathBuf::from("scripts/blp_fetch.py") }
 }
 
 pub async fn pipeline_cfg(state: &AppState) -> PipelineConfig {
     let c = state.cfg.read().await.clone();
     PipelineConfig {
         data_dir: PathBuf::from(c.data_dir),
+        python_path: PathBuf::from(c.python_path),
         script_path: script_path(),
-        refresh_timeout_s: c.refresh_timeout_s,
+        request_timeout_s: c.request_timeout_s,
         soft_limit: c.soft_limit,
-        dry_run_refresh: false,
     }
 }
 
@@ -153,11 +158,11 @@ pub async fn estimate_view(state: State<'_, AppState>, view_id: i64)
     let cfg = pipeline_cfg(&state).await;
     let assets = views::view_assets(&state.pool, view_id).await?;
     let fields_db = views::view_fields(&state.pool, view_id).await?;
-    let gen: Vec<_> = assets.iter().map(|a| crate::excel_gen::GenAsset {
+    let gen: Vec<_> = assets.iter().map(|a| crate::fetch::FetchAsset {
         asset_id: a.id, asset_class_id: a.asset_class_id,
         class_name: String::new(), label: a.label.clone(),
         bdp_security: a.bdp_security.clone() }).collect();
-    let specs: Vec<_> = fields_db.iter().map(|f| crate::excel_read::FieldSpec {
+    let specs: Vec<_> = fields_db.iter().map(|f| crate::fetch::FetchField {
         field_id: f.id, asset_class_id: f.asset_class_id,
         mnemonic: f.mnemonic.clone(), value_kind: f.value_kind.clone() }).collect();
     let estimated = budget::estimate_eod_hits(&gen, &specs);

@@ -1,0 +1,29 @@
+{
+ "run_id": 4,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "AAPL US Equity"
+    ],
+    "fields": [
+     "PX_LAST"
+    ],
+    "start": "20261301",
+    "end": "20261301"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "AAPL US Equity",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "fieldExceptions": [],
+      "fieldData": []
+     }
+    }
+   ]
+  }
+ ]
+}

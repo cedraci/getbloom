@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use crate::excel_read::{CellValue, ReadOutcome};
+use crate::fetch::{CellValue, FetchOutcome};
 use serde::Serialize;
 use sqlx::PgPool;
 
@@ -9,7 +9,7 @@ pub struct IngestSummary {
     pub issues: u64,
 }
 
-pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &ReadOutcome)
+pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
     -> AppResult<IngestSummary> {
     let mut tx = pool.begin().await?;
     let mut upserted = 0u64;

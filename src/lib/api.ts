@@ -35,7 +35,7 @@ export interface ScheduleRow {
   window_end: string; drawn_for: string | null; drawn_at: string | null;
   last_result: string | null;
 }
-export interface AppConfig { data_dir: string; soft_limit: number; refresh_timeout_s: number; }
+export interface AppConfig { data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string; }
 
 export const api = {
   listAssetClasses: () => invoke<AssetClass[]>("list_asset_classes"),

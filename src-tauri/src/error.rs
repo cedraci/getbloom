@@ -8,10 +8,8 @@ pub enum AppError {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("excel error: {0}")]
-    Excel(String),
-    #[error("refresh driver failed (exit {code}): {detail}")]
-    Refresh { code: i32, detail: String },
+    #[error("bloomberg fetch failed (exit {code}): {detail}")]
+    Blp { code: i32, detail: String },
     #[error("validation error: {0}")]
     Validation(String),
 }

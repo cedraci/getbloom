@@ -1,0 +1,89 @@
+{
+ "run_id": 1,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "AAPL US Equity",
+     "SX5E Index"
+    ],
+    "fields": [
+     "PX_LAST",
+     "PX_VOLUME"
+    ],
+    "start": "20260817",
+    "end": "20260817"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "AAPL US Equity",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-08-17",
+        "PX_LAST": 305.59,
+        "PX_VOLUME": 38169263.0
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "SX5E Index",
+      "eidData": [],
+      "sequenceNumber": 1,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-08-17",
+        "PX_LAST": 6530.45,
+        "PX_VOLUME": 127567058.0
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "request": {
+    "kind": "reference",
+    "securities": [
+     "AAPL US Equity",
+     "SX5E Index"
+    ],
+    "fields": [
+     "NAME"
+    ],
+    "obs_date": "2026-08-17"
+   },
+   "messages": [
+    {
+     "securityData": [
+      {
+       "security": "AAPL US Equity",
+       "eidData": [],
+       "fieldExceptions": [],
+       "sequenceNumber": 0,
+       "fieldData": {
+        "NAME": "APPLE INC"
+       }
+      },
+      {
+       "security": "SX5E Index",
+       "eidData": [],
+       "fieldExceptions": [],
+       "sequenceNumber": 1,
+       "fieldData": {
+        "NAME": "Euro Stoxx 50 Pr"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

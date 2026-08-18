@@ -1,0 +1,30 @@
+{
+ "run_id": 44,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "AAPL US Equity"
+    ],
+    "fields": [
+     "PX_LAST"
+    ],
+    "start": "20260814",
+    "end": "20260814"
+   },
+   "messages": [
+    {
+     "responseError": {
+      "source": "bbdbh4",
+      "code": 6,
+      "category": "BAD_ARGS",
+      "message": "Invalid start date specified",
+      "subcategory": "INVALID_START_DATE"
+     }
+    }
+   ]
+  }
+ ],
+ "_note": "SYNTHETIC. A request-level responseError could not be provoked on demand: Bloomberg answers a malformed date with an empty result instead. Shape follows the BLPAPI schema."
+}

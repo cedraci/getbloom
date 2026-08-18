@@ -1,13 +1,12 @@
+pub mod blp_driver;
 pub mod budget;
 pub mod commands;
 pub mod db;
 pub mod error;
-pub mod excel_gen;
-pub mod excel_read;
+pub mod fetch;
 pub mod fields;
 pub mod ingest;
 pub mod orchestrator;
-pub mod refresh_driver;
 pub mod registry;
 pub mod scheduler;
 pub mod views;
@@ -51,10 +50,10 @@ pub fn run() {
                 let cfg = load_config(); // reload persisted config each tick so settings edits apply
                 let pc = orchestrator::PipelineConfig {
                     data_dir: std::path::PathBuf::from(&cfg.data_dir),
+                    python_path: std::path::PathBuf::from(&cfg.python_path),
                     script_path: commands::script_path(),
-                    refresh_timeout_s: cfg.refresh_timeout_s,
+                    request_timeout_s: cfg.request_timeout_s,
                     soft_limit: cfg.soft_limit,
-                    dry_run_refresh: false,
                 };
                 if let Err(e) = scheduler::tick(&pool, &pc, chrono::Local::now()).await {
                     eprintln!("scheduler tick failed: {e}");

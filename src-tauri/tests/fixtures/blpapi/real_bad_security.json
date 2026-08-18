@@ -1,0 +1,68 @@
+{
+ "run_id": 3,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "ZQZQZQ99 US Equity"
+    ],
+    "fields": [
+     "PX_LAST"
+    ],
+    "start": "20260817",
+    "end": "20260817"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "ZQZQZQ99 US Equity",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "securityError": {
+       "source": "53201:rsfhdsvc5",
+       "code": 15,
+       "category": "BAD_SEC",
+       "message": "Unknown/Invalid securityInvalid Security [nid:53201]",
+       "subcategory": "INVALID_SECURITY"
+      },
+      "fieldExceptions": [],
+      "fieldData": []
+     }
+    }
+   ]
+  },
+  {
+   "request": {
+    "kind": "reference",
+    "securities": [
+     "ZQZQZQ99 US Equity"
+    ],
+    "fields": [
+     "NAME"
+    ],
+    "obs_date": "2026-08-17"
+   },
+   "messages": [
+    {
+     "securityData": [
+      {
+       "security": "ZQZQZQ99 US Equity",
+       "eidData": [],
+       "securityError": {
+        "source": "21931:rsfrdsvc3",
+        "code": 43,
+        "category": "BAD_SEC",
+        "message": "Unknown/Invalid Security  [nid:21931]",
+        "subcategory": "INVALID_SECURITY"
+       },
+       "fieldExceptions": [],
+       "sequenceNumber": 0,
+       "fieldData": null
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

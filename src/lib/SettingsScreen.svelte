@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, type AppConfig, type ScheduleRow, type View } from "./api";
 
-  let cfg = $state<AppConfig>({ data_dir: "", soft_limit: 0, refresh_timeout_s: 0 });
+  let cfg = $state<AppConfig>({ data_dir: "", soft_limit: 0, request_timeout_s: 0, python_path: "" });
   let schedules = $state<ScheduleRow[]>([]);
   let views = $state<View[]>([]);
   let error = $state("");
@@ -55,8 +55,12 @@
       <input type="number" bind:value={cfg.soft_limit} min="0" required />
     </label>
     <label>
-      Refresh timeout (s)
-      <input type="number" bind:value={cfg.refresh_timeout_s} min="0" required />
+      Request timeout (s)
+      <input type="number" bind:value={cfg.request_timeout_s} min="0" required />
+    </label>
+    <label>
+      Python (BLPAPI sidecar)
+      <input bind:value={cfg.python_path} placeholder="python" required />
     </label>
     <button type="submit">Save settings</button>
   </form>

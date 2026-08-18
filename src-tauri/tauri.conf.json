@@ -31,6 +31,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["scripts/refresh.ps1"]
+    "resources": ["scripts/blp_fetch.py"]
   }
 }

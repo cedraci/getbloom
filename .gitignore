@@ -16,3 +16,9 @@ src-tauri/target/
 dist/
 pending/
 archive/
+
+# Python sidecar bytecode
+__pycache__/
+
+# Loose run artifacts dropped at the repo root for debugging
+/run_*.json

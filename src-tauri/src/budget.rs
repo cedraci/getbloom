@@ -1,6 +1,5 @@
 use crate::error::AppResult;
-use crate::excel_gen::GenAsset;
-use crate::excel_read::FieldSpec;
+use crate::fetch::{FetchAsset, FetchField};
 use chrono::{Datelike, NaiveDate, Weekday};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -22,14 +21,14 @@ pub fn weekdays_between(start: NaiveDate, end: NaiveDate) -> i64 {
     n
 }
 
-pub fn estimate_eod_hits(assets: &[GenAsset], fields: &[FieldSpec]) -> i64 {
+pub fn estimate_eod_hits(assets: &[FetchAsset], fields: &[FetchField]) -> i64 {
     assets.iter().map(|a|
         fields.iter().filter(|f| f.asset_class_id == a.asset_class_id).count() as i64
     ).sum()
 }
 
 pub fn estimate_backfill_hits(
-    assets: &[GenAsset], fields: &[FieldSpec], start: NaiveDate, end: NaiveDate,
+    assets: &[FetchAsset], fields: &[FetchField], start: NaiveDate, end: NaiveDate,
 ) -> i64 {
     estimate_eod_hits(assets, fields) * weekdays_between(start, end)
 }
@@ -61,15 +60,13 @@ pub async fn record_hits(pool: &PgPool, run_id: i64, estimated: i64) -> AppResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::excel_gen::GenAsset;
-    use crate::excel_read::FieldSpec;
     use chrono::NaiveDate;
 
-    fn fixture() -> (Vec<GenAsset>, Vec<FieldSpec>) {
-        let mk_a = |id, class| GenAsset {
+    fn fixture() -> (Vec<FetchAsset>, Vec<FetchField>) {
+        let mk_a = |id, class| FetchAsset {
             asset_id: id, asset_class_id: class, class_name: format!("C{class}"),
             label: format!("A{id}"), bdp_security: format!("S{id} Equity") };
-        let mk_f = |id, class, m: &str| FieldSpec {
+        let mk_f = |id, class, m: &str| FetchField {
             field_id: id, asset_class_id: class,
             mnemonic: m.into(), value_kind: "numeric".into() };
         // 2 equity assets x 3 equity fields + 1 index asset x 1 index field = 7

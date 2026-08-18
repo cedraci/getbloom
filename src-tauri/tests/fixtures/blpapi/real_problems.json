@@ -1,0 +1,85 @@
+{
+ "run_id": 2,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "XXXX US Equity",
+     "SX5E Index"
+    ],
+    "fields": [
+     "PX_LAST",
+     "PX_VOLUME"
+    ],
+    "start": "20260817",
+    "end": "20260817"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "XXXX US Equity",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "fieldExceptions": [],
+      "fieldData": []
+     }
+    },
+    {
+     "securityData": {
+      "security": "SX5E Index",
+      "eidData": [],
+      "sequenceNumber": 1,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-08-17",
+        "PX_LAST": 6530.45,
+        "PX_VOLUME": 127567058.0
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "request": {
+    "kind": "reference",
+    "securities": [
+     "AAPL US Equity"
+    ],
+    "fields": [
+     "NAME",
+     "BOGUS_FIELD_XYZ"
+    ],
+    "obs_date": "2026-08-17"
+   },
+   "messages": [
+    {
+     "securityData": [
+      {
+       "security": "AAPL US Equity",
+       "eidData": [],
+       "fieldExceptions": [
+        {
+         "fieldId": "BOGUS_FIELD_XYZ",
+         "errorInfo": {
+          "source": "19390:rsfrdsvc3",
+          "code": 9,
+          "category": "BAD_FLD",
+          "message": "Field not valid",
+          "subcategory": "INVALID_FIELD"
+         }
+        }
+       ],
+       "sequenceNumber": 0,
+       "fieldData": {
+        "NAME": "APPLE INC"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
