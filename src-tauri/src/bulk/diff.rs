@@ -150,25 +150,11 @@ pub fn diff(
     let mut present_ids: HashSet<i64> = HashSet::new();
 
     for r in &sheet.rows {
-        if r.label.is_empty() {
-            plan.invalid_rows.push(InvalidRow {
-                row_number: r.row_number,
-                reason: "label is empty".into(),
-            });
-            continue;
-        }
-        if !classes.contains(r.class.as_str()) {
-            plan.invalid_rows.push(InvalidRow {
-                row_number: r.row_number,
-                reason: format!("class '{}' does not exist", r.class),
-            });
-            continue;
-        }
-
-        // Identity problems -- a repeated id, or one the database has never
-        // heard of -- are resolved before security is even computed. Otherwise
-        // a bogus id that happens to reuse another asset's ticker gets
-        // misreported as a security collision instead of what it actually is.
+        // Identity comes before every other check, including label and class.
+        // A row carrying a real id must register as "still present" no matter
+        // what else is wrong with it, or a validation failure elsewhere (a
+        // class typo) gets misread by the removal pass below as "the user
+        // deleted this asset" -- exactly what guardrail 1 exists to prevent.
         let existing = match r.id {
             None => None,
             Some(id) => {
@@ -191,6 +177,21 @@ pub fn diff(
             }
         };
 
+        if r.label.is_empty() {
+            plan.invalid_rows.push(InvalidRow {
+                row_number: r.row_number,
+                reason: "label is empty".into(),
+            });
+            continue;
+        }
+        if !classes.contains(r.class.as_str()) {
+            plan.invalid_rows.push(InvalidRow {
+                row_number: r.row_number,
+                reason: format!("class '{}' does not exist", r.class),
+            });
+            continue;
+        }
+
         let ticker = (!r.ticker.is_empty()).then_some(r.ticker.as_str());
         let isin = (!r.isin.is_empty()).then_some(r.isin.as_str());
         let security = match resolve_bdp_security(&r.id_kind, ticker, isin, &r.yellow_key) {
@@ -210,7 +211,6 @@ pub fn diff(
             });
             continue;
         }
-        claimed.insert(security.clone(), r.row_number);
 
         // A security that belongs to a DIFFERENT asset would violate the unique
         // index. The same asset keeping its own security is fine.
@@ -224,6 +224,11 @@ pub fn diff(
                 continue;
             }
         }
+
+        // Only claim the security once the row has fully passed every check --
+        // a rejected row's claim must not survive to wrongly indict a later,
+        // valid row that happens to resolve to the same security.
+        claimed.insert(security.clone(), r.row_number);
 
         let views_now = sorted(r.views.clone());
 
@@ -522,5 +527,96 @@ mod tests {
         assert_eq!(p.invalid_rows.len(), 1);
         assert_eq!(p.invalid_rows[0].row_number, 1, "header problems belong to row 1");
         assert!(p.invalid_rows[0].reason.contains("Ghost"));
+    }
+
+    /// Regression: a class typo on a row carrying a real id must not also read
+    /// as "the user deleted this asset" -- exactly what guardrail 1 exists to
+    /// prevent, and the one place the previous fix (Task 9's first pass) did
+    /// not go far enough.
+    #[test]
+    fn an_invalid_class_on_an_existing_row_is_not_also_a_removal() {
+        let db = vec![db_apple()];
+        let mut bad_class = row_from(&db[0]);
+        bad_class.class = "Nonexistent".into();
+        let p = diff(&sheet(vec![bad_class], true), &db, &classes(), &views(), "h");
+        assert_eq!(p.invalid_rows.len(), 1);
+        assert!(p.removals.is_empty(),
+                "a broken row must not also be proposed for deletion, got {:?}", p.removals);
+    }
+
+    /// Same shape, for the other validation that runs ahead of identity.
+    #[test]
+    fn an_empty_label_on_an_existing_row_is_not_also_a_removal() {
+        let db = vec![db_apple()];
+        let mut bad_label = row_from(&db[0]);
+        bad_label.label = String::new();
+        let p = diff(&sheet(vec![bad_label], true), &db, &classes(), &views(), "h");
+        assert_eq!(p.invalid_rows.len(), 1);
+        assert!(p.removals.is_empty(),
+                "a broken row must not also be proposed for deletion, got {:?}", p.removals);
+    }
+
+    /// Regression: a rejected row's security claim must not survive to
+    /// wrongly indict a later, entirely valid row that resolves to the same
+    /// security -- the chained-claim bug in Task 9's first pass.
+    #[test]
+    fn a_rejected_claim_does_not_block_a_later_valid_row() {
+        let mut msft = db_apple();
+        msft.id = 2;
+        msft.label = "Microsoft".into();
+        msft.ticker = "MSFT US".into();
+        msft.bdp_security = "MSFT US Equity".into();
+        let db = vec![db_apple(), msft];
+
+        // Row 2 renames Apple onto Microsoft's security and is rejected. Row 3
+        // is Microsoft's own, completely unmodified row.
+        let mut collide = row_from(&db[0]);
+        collide.ticker = "MSFT US".into();
+        let rows = vec![collide, SheetRow { row_number: 3, ..row_from(&db[1]) }];
+        let p = diff(&sheet(rows, true), &db, &classes(), &views(), "h");
+
+        assert_eq!(p.invalid_rows.len(), 1,
+                   "only the renamed row should be invalid, got {:?}", p.invalid_rows);
+        assert_eq!(p.invalid_rows[0].row_number, 2);
+        assert_eq!(p.invalid_rows[0].reason,
+                   "security 'MSFT US Equity' already belongs to 'Microsoft'");
+    }
+
+    /// The collision and within-sheet-duplicate checks apply to add rows
+    /// (blank id) too, not only to edits of an existing id.
+    #[test]
+    fn add_rows_are_checked_for_collisions_and_duplicates_too() {
+        let db = vec![db_apple()];
+
+        // An add that resolves to a security a DB asset already owns. Apple's
+        // own row is deliberately left out of the sheet so this exercises the
+        // owner-collision check itself, not the in-sheet claimed-by-row-N path
+        // covered by the next case.
+        let mut add_collides = row_from(&db[0]);
+        add_collides.id = None;
+        add_collides.row_number = 2;
+        add_collides.label = "Also Apple".into();
+        // ticker/yellow_key untouched -> resolves to "AAPL US Equity", Apple's own.
+        let p = diff(&sheet(vec![add_collides], true), &db, &classes(), &views(), "h");
+        assert!(p.adds.is_empty(), "the colliding add must not be proposed, got {:?}", p.adds);
+        assert_eq!(p.invalid_rows.len(), 1);
+        assert_eq!(p.invalid_rows[0].row_number, 2);
+        assert_eq!(p.invalid_rows[0].reason,
+                   "security 'AAPL US Equity' already belongs to 'Apple'");
+
+        // Two adds in the same sheet claiming the same brand-new security.
+        let mut add1 = row_from(&db[0]);
+        add1.id = None; add1.row_number = 3; add1.label = "New1".into();
+        add1.ticker = "NEW US".into();
+        let mut add2 = row_from(&db[0]);
+        add2.id = None; add2.row_number = 4; add2.label = "New2".into();
+        add2.ticker = "NEW US".into();
+        let q = diff(&sheet(vec![row_from(&db[0]), add1, add2], true), &db,
+                     &classes(), &views(), "h");
+        assert_eq!(q.adds.len(), 1, "only the first add should succeed, got {:?}", q.adds);
+        assert_eq!(q.invalid_rows.len(), 1);
+        assert_eq!(q.invalid_rows[0].row_number, 4);
+        assert_eq!(q.invalid_rows[0].reason,
+                   "security 'NEW US Equity' is already claimed by row 3");
     }
 }
