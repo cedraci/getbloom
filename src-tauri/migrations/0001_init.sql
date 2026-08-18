@@ -1,4 +1,13 @@
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- TimescaleDB is used when present but is NOT required: nothing in this schema
+-- depends on a hypertable feature (no compression, retention, or continuous
+-- aggregates), and Timescale ships no Windows builds. Without it `observation`
+-- is a plain table with identical keys and behaviour.
+DO $$
+BEGIN
+    EXECUTE 'CREATE EXTENSION IF NOT EXISTS timescaledb';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'TimescaleDB unavailable (%) - continuing without it', SQLERRM;
+END $$;
 
 CREATE TABLE asset_class (
   id          BIGSERIAL PRIMARY KEY,
@@ -75,7 +84,12 @@ CREATE TABLE observation (
   PRIMARY KEY (asset_id, field_id, obs_date),
   CHECK ((value_num IS NULL) <> (value_text IS NULL))
 );
-SELECT create_hypertable('observation', 'obs_date');
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('observation', 'obs_date');
+    END IF;
+END $$;
 
 CREATE TABLE ingest_issue (
   id       BIGSERIAL PRIMARY KEY,
