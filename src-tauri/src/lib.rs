@@ -1,5 +1,6 @@
 pub mod blp_driver;
 pub mod budget;
+pub mod bulk;
 pub mod commands;
 pub mod db;
 pub mod deletion;

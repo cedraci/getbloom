@@ -27,6 +27,9 @@ tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 thiserror = "1"
+rust_xlsxwriter = "0.98.2"
+calamine = "0.36.1"
+sha2 = "0.11.0"
 
 [dev-dependencies]
 tempfile = "3"
