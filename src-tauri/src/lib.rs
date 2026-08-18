@@ -2,6 +2,7 @@ pub mod blp_driver;
 pub mod budget;
 pub mod commands;
 pub mod db;
+pub mod deletion;
 pub mod error;
 pub mod fetch;
 pub mod fields;

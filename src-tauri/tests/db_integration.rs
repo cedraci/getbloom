@@ -379,3 +379,83 @@ async fn smoke_real_bloomberg_end_to_end() {
     let payload = payload.expect("run has no payload_path");
     assert!(std::path::Path::new(&payload).exists(), "missing audit payload {payload}");
 }
+
+/// `observation.run_id` is NOT NULL REFERENCES run(id), so any test that plants
+/// an observation must plant a run first. `run.status` is CHECK-constrained to
+/// ('generating','refreshing','reading','ingesting','ok','failed','partial') --
+/// 'completed' is not a legal value.
+async fn new_run(pool: &sqlx::PgPool, view_id: i64) -> i64 {
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
+         VALUES ($1, 'eod', 'manual', 'ok', 1) RETURNING id")
+        .bind(view_id).fetch_one(pool).await.unwrap();
+    id
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn describe_deletion_counts_what_hangs_off_an_asset() {
+    use getbloomdata_lib::deletion::{describe_deletion, EntityKind};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("DescribeCls"), "test").await.unwrap();
+    let asset = getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Describe Me".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("DSC"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+    let field = getbloomdata_lib::fields::create_field(
+        &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("DescribeView"), "")
+        .await.unwrap();
+    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
+
+    let run_id = new_run(&pool, view.id).await;
+    sqlx::query(
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3),
+                ($1, $2, DATE '2026-08-11', 2.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id)
+        .execute(&pool).await.unwrap();
+
+    let impact = describe_deletion(&pool, EntityKind::Asset, asset.id).await.unwrap();
+    assert_eq!(impact.label, "Describe Me");
+    assert_eq!(impact.observations, 2);
+    assert_eq!(impact.first_obs, Some("2026-08-10".parse().unwrap()));
+    assert_eq!(impact.last_obs, Some("2026-08-11".parse().unwrap()));
+    assert_eq!(impact.views, 1);
+    assert!(impact.can_retire && impact.can_purge);
+    assert!(impact.blocked_reason.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn describe_deletion_blocks_a_non_empty_asset_class() {
+    use getbloomdata_lib::deletion::{describe_deletion, EntityKind};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("BlockedCls"), "test").await.unwrap();
+    getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Occupant".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("OCC"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+
+    let impact = describe_deletion(&pool, EntityKind::AssetClass, class.id).await.unwrap();
+    assert_eq!(impact.children, 1);
+    assert!(!impact.can_retire, "an asset class has no retired state");
+    assert!(!impact.can_purge, "a class with an asset in it cannot be deleted");
+    assert!(impact.blocked_reason.is_some());
+}
