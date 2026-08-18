@@ -200,9 +200,12 @@ pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
         };
         let active_text = cell_text(r, c_active).to_lowercase();
         let active = match active_text.as_str() {
-            "" => true, // no column, or blank: assume the asset stays collected
-            "yes" | "y" | "true" | "1" | "oui" => true,
-            _ => false,
+            "no" | "n" | "false" | "0" | "non" => false,
+            // Empty/absent, a recognized truthy token, or anything unrecognized
+            // (a typo, a stray character) all resolve to active. A mistyped
+            // cell that keeps collecting is visible and recoverable; one that
+            // silently stops collecting is neither.
+            _ => true,
         };
         let views = view_indices
             .iter()
@@ -362,5 +365,43 @@ mod tests {
         assert_eq!(data.rows.len(), 1);
         assert_eq!(data.rows[0].row_number, 4);
         assert_eq!(data.rows[0].label, "Sparse");
+    }
+
+    #[test]
+    fn an_unrecognized_active_value_reads_as_active_but_falsey_tokens_do_not() {
+        use rust_xlsxwriter::Workbook;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("active_tokens.xlsx");
+        let mut book = Workbook::new();
+        let s = book.add_worksheet();
+        s.set_name(SHEET_NAME).unwrap();
+        for (c, h) in FIXED_HEADERS.iter().enumerate() {
+            s.write_string(0, c as u16, *h).unwrap();
+        }
+        // Column 1 is label, column 7 is active.
+        let cases = [
+            ("Row No", "no"),
+            ("Row N", "n"),
+            ("Row False", "false"),
+            ("Row Zero", "0"),
+            ("Row Non", "non"), // French locale: this machine and its Excel are French
+            ("Row Typo", "definitely not a real value"),
+        ];
+        for (i, (label, value)) in cases.iter().enumerate() {
+            let row = (i + 1) as u32;
+            s.write_string(row, 1, *label).unwrap();
+            s.write_string(row, 7, *value).unwrap();
+        }
+        book.save(&path).unwrap();
+
+        let data = read_assets_sheet(&path).unwrap();
+        assert_eq!(data.rows.len(), 6);
+        for r in &data.rows {
+            if r.label == "Row Typo" {
+                assert!(r.active, "an unrecognized value must lean active: silent data loss is worse than a visible typo");
+            } else {
+                assert!(!r.active, "row labeled '{}' should read as inactive", r.label);
+            }
+        }
     }
 }
