@@ -864,7 +864,7 @@ async fn scheduler_skips_schedules_whose_view_is_retired() {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --test db_integration a_view_with_runs purging_a_never_run_view scheduler_skips -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --test db_integration -- --ignored --nocapture
 ```
 
 Expected: compile errors for `deletion::delete_view` and `scheduler::due_schedules`.
@@ -948,7 +948,7 @@ Check the imports at the top of `scheduler.rs`: it already uses `PgPool` and `Ap
 - [ ] **Step 5: Run the tests to verify they pass**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --test db_integration a_view_with_runs purging_a_never_run_view scheduler_skips -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --test db_integration -- --ignored --nocapture
 ```
 
 Expected: `test result: ok. 3 passed`.
@@ -2631,7 +2631,7 @@ async fn a_large_removal_set_needs_the_typed_count() {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --test db_integration export_then_import apply_import -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --test db_integration -- --ignored --nocapture
 ```
 
 Expected: compile error, `cannot find function 'export_assets_xlsx'`.
@@ -2883,7 +2883,7 @@ pub async fn apply_import(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --test db_integration export_then_import apply_import -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --test db_integration -- --ignored --nocapture
 ```
 
 Expected: `test result: ok. 3 passed`.
