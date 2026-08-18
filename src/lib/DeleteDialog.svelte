@@ -35,10 +35,20 @@
 
 <div class="backdrop">
   <div class="dialog">
-    {#if error}<p class="error">{error}</p>{/if}
     {#if !impact}
-      <p>Checking what depends on this&hellip;</p>
+      {#if error}
+        <p class="error">{error}</p>
+        <div class="actions">
+          <button onclick={() => onclose(false)}>Close</button>
+        </div>
+      {:else}
+        <p>Checking what depends on this&hellip;</p>
+        <div class="actions">
+          <button onclick={() => onclose(false)}>Cancel</button>
+        </div>
+      {/if}
     {:else}
+      {#if error}<p class="error">{error}</p>{/if}
       <h3>Remove {NOUN[kind]} &ldquo;{impact.label}&rdquo;?</h3>
       <ul class="counts">
         {#if impact.observations > 0}
