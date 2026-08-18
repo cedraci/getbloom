@@ -1,6 +1,7 @@
 //! Reading and writing the assets workbook. No database access lives here.
 
 use crate::error::{AppError, AppResult};
+use calamine::{Data, Reader, Xlsx};
 use rust_xlsxwriter::{DataValidation, Format, Workbook};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -105,6 +106,128 @@ pub fn file_sha256(path: &Path) -> AppResult<String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
+/// One row as the user left it. Nothing here is validated or resolved: that is
+/// the differ's job, so that validation can be unit-tested without a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetRow {
+    /// 1-based spreadsheet row number, so error messages match what Excel shows.
+    pub row_number: u32,
+    pub id: Option<i64>,
+    pub label: String,
+    pub class: String,
+    pub id_kind: String,
+    pub ticker: String,
+    pub isin: String,
+    pub yellow_key: String,
+    pub active: bool,
+    pub views: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetData {
+    /// False for a hand-built or pasted list. Guardrail 1: such a file can
+    /// never propose a removal, because the absence of a row means nothing
+    /// when the file was never a full export in the first place.
+    pub has_id_column: bool,
+    pub view_columns: Vec<String>,
+    pub rows: Vec<SheetRow>,
+}
+
+fn cell_text(row: &[Data], idx: Option<usize>) -> String {
+    match idx.and_then(|i| row.get(i)) {
+        None | Some(Data::Empty) => String::new(),
+        Some(Data::Float(f)) => {
+            // Excel stores every number as a float; an id typed as 12 arrives
+            // as 12.0 and must not become the string "12.0".
+            if f.fract() == 0.0 { format!("{}", *f as i64) } else { f.to_string() }
+        }
+        Some(Data::Int(i)) => i.to_string(),
+        Some(Data::Bool(b)) => (if *b { "yes" } else { "no" }).to_string(),
+        Some(other) => other.to_string(),
+    }
+    .trim()
+    .to_string()
+}
+
+pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
+    let mut book: Xlsx<_> = calamine::open_workbook(path)
+        .map_err(|e| AppError::Validation(format!("cannot open {}: {e}", path.display())))?;
+    let range = book.worksheet_range(SHEET_NAME).map_err(|e| {
+        AppError::Validation(format!("workbook has no sheet named '{SHEET_NAME}': {e}"))
+    })?;
+
+    let mut rows_iter = range.rows();
+    let header_raw: Vec<String> = rows_iter
+        .next()
+        .ok_or_else(|| AppError::Validation("sheet is empty".into()))?
+        .iter()
+        .map(|c| c.to_string().trim().to_string())
+        .collect();
+    let header: Vec<String> = header_raw.iter().map(|h| h.to_lowercase()).collect();
+
+    let col = |name: &str| header.iter().position(|h| h == name);
+    let (c_id, c_label, c_class, c_kind, c_ticker, c_isin, c_key, c_active) = (
+        col("id"), col("label"), col("class"), col("id_kind"),
+        col("ticker"), col("isin"), col("yellow_key"), col("active"),
+    );
+    if c_label.is_none() {
+        return Err(AppError::Validation("sheet has no 'label' column".into()));
+    }
+
+    // Anything that is not a known fixed header is a view column. `security` is
+    // a fixed header and is read but discarded -- import recomputes it. View
+    // names keep their original case, because they have to match `view.name`.
+    let (view_indices, view_columns): (Vec<usize>, Vec<String>) = header_raw
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| !h.is_empty() && !FIXED_HEADERS.contains(&h.to_lowercase().as_str()))
+        .map(|(i, h)| (i, h.clone()))
+        .unzip();
+
+    let mut rows = Vec::new();
+    for (offset, r) in rows_iter.enumerate() {
+        let row_number = (offset + 2) as u32; // header is row 1
+        if r.iter().all(|c| matches!(c, Data::Empty)) {
+            continue;
+        }
+        let id_text = cell_text(r, c_id);
+        let id = if id_text.is_empty() {
+            None
+        } else {
+            Some(id_text.parse::<i64>().map_err(|_| {
+                AppError::Validation(format!("row {row_number}: id '{id_text}' is not a number"))
+            })?)
+        };
+        let active_text = cell_text(r, c_active).to_lowercase();
+        let active = match active_text.as_str() {
+            "" => true, // no column, or blank: assume the asset stays collected
+            "yes" | "y" | "true" | "1" | "oui" => true,
+            _ => false,
+        };
+        let views = view_indices
+            .iter()
+            .zip(view_columns.iter())
+            .filter(|(i, _)| !cell_text(r, Some(**i)).is_empty())
+            .map(|(_, name)| name.clone())
+            .collect();
+
+        rows.push(SheetRow {
+            row_number,
+            id,
+            label: cell_text(r, c_label),
+            class: cell_text(r, c_class),
+            id_kind: cell_text(r, c_kind).to_lowercase(),
+            ticker: cell_text(r, c_ticker),
+            isin: cell_text(r, c_isin),
+            yellow_key: cell_text(r, c_key),
+            active,
+            views,
+        });
+    }
+
+    Ok(SheetData { has_id_column: c_id.is_some(), view_columns, rows })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +280,87 @@ mod tests {
         assert_eq!(a.len(), 64, "sha-256 hex is 64 characters");
         std::fs::write(&path, b"hello!").unwrap();
         assert_ne!(a, file_sha256(&path).unwrap());
+    }
+
+    #[test]
+    fn round_trips_a_written_sheet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assets.xlsx");
+        let views = vec!["Daily".to_string(), "Weekly".to_string()];
+        write_assets_sheet(&path, &sample(), &views, &["Equity".to_string()]).unwrap();
+
+        let data = read_assets_sheet(&path).unwrap();
+        assert!(data.has_id_column);
+        assert_eq!(data.view_columns, views);
+        assert_eq!(data.rows.len(), 1);
+        let r = &data.rows[0];
+        assert_eq!(r.row_number, 2, "spreadsheet rows are 1-based and row 1 is the header");
+        assert_eq!(r.id, Some(7));
+        assert_eq!(r.label, "Apple");
+        assert_eq!(r.class, "Equity");
+        assert_eq!(r.id_kind, "ticker");
+        assert_eq!(r.ticker, "AAPL US");
+        assert_eq!(r.yellow_key, "Equity");
+        assert!(r.active);
+        assert_eq!(r.views, vec!["Daily".to_string()]);
+    }
+
+    #[test]
+    fn a_blank_id_cell_reads_back_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.xlsx");
+        let mut rows = sample();
+        rows[0].id = 0;
+        write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+        let data = read_assets_sheet(&path).unwrap();
+        assert!(data.has_id_column, "the column exists even when its cells are blank");
+        assert_eq!(data.rows[0].id, None, "a blank id means 'add this asset'");
+    }
+
+    #[test]
+    fn a_sheet_without_an_id_column_is_flagged() {
+        use rust_xlsxwriter::Workbook;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pasted.xlsx");
+        let mut book = Workbook::new();
+        let s = book.add_worksheet();
+        s.set_name(SHEET_NAME).unwrap();
+        for (c, h) in ["label", "class", "id_kind", "ticker", "yellow_key"].iter().enumerate() {
+            s.write_string(0, c as u16, *h).unwrap();
+        }
+        s.write_string(1, 0, "Microsoft").unwrap();
+        s.write_string(1, 1, "Equity").unwrap();
+        s.write_string(1, 2, "ticker").unwrap();
+        s.write_string(1, 3, "MSFT US").unwrap();
+        s.write_string(1, 4, "Equity").unwrap();
+        book.save(&path).unwrap();
+
+        let data = read_assets_sheet(&path).unwrap();
+        assert!(!data.has_id_column);
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].id, None);
+        assert_eq!(data.rows[0].label, "Microsoft");
+        assert!(data.rows[0].active, "a sheet with no `active` column means all active");
+    }
+
+    #[test]
+    fn blank_rows_are_skipped_not_read_as_empty_assets() {
+        use rust_xlsxwriter::Workbook;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gappy.xlsx");
+        let mut book = Workbook::new();
+        let s = book.add_worksheet();
+        s.set_name(SHEET_NAME).unwrap();
+        for (c, h) in FIXED_HEADERS.iter().enumerate() {
+            s.write_string(0, c as u16, *h).unwrap();
+        }
+        s.write_string(3, 1, "Sparse").unwrap(); // rows 2 and 3 left entirely blank
+        s.write_string(3, 2, "Equity").unwrap();
+        book.save(&path).unwrap();
+
+        let data = read_assets_sheet(&path).unwrap();
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].row_number, 4);
+        assert_eq!(data.rows[0].label, "Sparse");
     }
 }
