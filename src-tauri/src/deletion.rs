@@ -187,3 +187,80 @@ pub async fn delete_asset_class(pool: &PgPool, id: i64) -> AppResult<()> {
     }
     Ok(())
 }
+
+/// Purge order matters: children before parents, because the foreign keys are
+/// deliberately restrictive. `ingest_issue` first (it names both an asset and a
+/// run), then `observation`, then the membership row, then the asset itself.
+pub async fn purge_asset_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+) -> AppResult<()> {
+    sqlx::query("DELETE FROM ingest_issue WHERE asset_id = $1")
+        .bind(id).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM observation WHERE asset_id = $1")
+        .bind(id).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM view_asset WHERE asset_id = $1")
+        .bind(id).execute(&mut **tx).await?;
+    let n = sqlx::query("DELETE FROM asset WHERE id = $1")
+        .bind(id).execute(&mut **tx).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::Validation(format!("no such asset: id {id}")));
+    }
+    Ok(())
+}
+
+pub async fn purge_field_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+) -> AppResult<()> {
+    sqlx::query("DELETE FROM ingest_issue WHERE field_id = $1")
+        .bind(id).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM observation WHERE field_id = $1")
+        .bind(id).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM view_field WHERE field_id = $1")
+        .bind(id).execute(&mut **tx).await?;
+    let n = sqlx::query("DELETE FROM field_def WHERE id = $1")
+        .bind(id).execute(&mut **tx).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::Validation(format!("no such field: id {id}")));
+    }
+    Ok(())
+}
+
+pub async fn delete_asset(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult<()> {
+    match mode {
+        DeleteMode::Retire => {
+            let n = sqlx::query("UPDATE asset SET active = false WHERE id = $1")
+                .bind(id).execute(pool).await?.rows_affected();
+            if n == 0 {
+                return Err(AppError::Validation(format!("no such asset: id {id}")));
+            }
+            Ok(())
+        }
+        DeleteMode::Purge => {
+            let mut tx = pool.begin().await?;
+            purge_asset_tx(&mut tx, id).await?;
+            tx.commit().await?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn delete_field(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult<()> {
+    match mode {
+        DeleteMode::Retire => {
+            let n = sqlx::query("UPDATE field_def SET active = false WHERE id = $1")
+                .bind(id).execute(pool).await?.rows_affected();
+            if n == 0 {
+                return Err(AppError::Validation(format!("no such field: id {id}")));
+            }
+            Ok(())
+        }
+        DeleteMode::Purge => {
+            let mut tx = pool.begin().await?;
+            purge_field_tx(&mut tx, id).await?;
+            tx.commit().await?;
+            Ok(())
+        }
+    }
+}

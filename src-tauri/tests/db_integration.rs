@@ -512,3 +512,136 @@ async fn delete_asset_class_refuses_while_occupied_then_succeeds_when_empty() {
         .bind(class.id).fetch_one(&pool).await.unwrap();
     assert_eq!(n, 0);
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn retiring_an_asset_hides_it_from_views_but_keeps_its_observations() {
+    use getbloomdata_lib::deletion::{delete_asset, DeleteMode};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("RetireCls"), "test").await.unwrap();
+    let asset = getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Retiree".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("RET"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+    let field = getbloomdata_lib::fields::create_field(
+        &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("RetireView"), "").await.unwrap();
+    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
+    sqlx::query(
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
+
+    assert_eq!(getbloomdata_lib::views::view_assets(&pool, view.id).await.unwrap().len(), 1);
+
+    delete_asset(&pool, asset.id, DeleteMode::Retire).await.unwrap();
+
+    assert!(getbloomdata_lib::views::view_assets(&pool, view.id).await.unwrap().is_empty(),
+            "a retired asset must drop out of view resolution");
+    let (obs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM observation WHERE asset_id = $1")
+        .bind(asset.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(obs, 1, "retire never destroys collected data");
+    let (row,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
+        .bind(asset.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(row, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn purging_an_asset_clears_its_data_but_leaves_run_and_hit_ledger() {
+    use getbloomdata_lib::deletion::{delete_asset, DeleteMode};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("PurgeCls"), "test").await.unwrap();
+    let asset = getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Doomed".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("DOOM"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+    let field = getbloomdata_lib::fields::create_field(
+        &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("PurgeView"), "").await.unwrap();
+    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
+
+    let run_id = new_run(&pool, view.id).await;
+    sqlx::query("INSERT INTO hit_ledger (run_id, estimated_hits) VALUES ($1, 7)")
+        .bind(run_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO ingest_issue (run_id, asset_id, field_id, obs_date, severity, code, detail)
+         VALUES ($1, $2, $3, DATE '2026-08-10', 'warn', 'no_data', 'test')")
+        .bind(run_id).bind(asset.id).bind(field.id).execute(&pool).await.unwrap();
+
+    delete_asset(&pool, asset.id, DeleteMode::Purge).await.unwrap();
+
+    for (table, col) in [("observation", "asset_id"), ("ingest_issue", "asset_id"),
+                         ("view_asset", "asset_id"), ("asset", "id")] {
+        let (n,): (i64,) = sqlx::query_as(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
+            .bind(asset.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "{table} should have no rows for the purged asset");
+    }
+    let (runs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM run WHERE id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(runs, 1, "a purge must never rewrite the record of work that happened");
+    let (hits,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM hit_ledger WHERE run_id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(hits, 1, "the budget ledger records money spent and is never rewritten");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn purging_a_field_clears_its_observations_and_memberships() {
+    use getbloomdata_lib::deletion::{delete_field, DeleteMode};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("FldPurgeCls"), "test").await.unwrap();
+    let asset = getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Holder".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("HLD"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+    let field = getbloomdata_lib::fields::create_field(
+        &pool, class.id, "PX_VOLUME", "Volume", "numeric").await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("FldPurgeView"), "").await.unwrap();
+    getbloomdata_lib::views::set_view_fields(&pool, view.id, &[field.id]).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
+    sqlx::query(
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 5.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
+
+    delete_field(&pool, field.id, DeleteMode::Purge).await.unwrap();
+
+    for (table, col) in [("observation", "field_id"), ("ingest_issue", "field_id"),
+                         ("view_field", "field_id"), ("field_def", "id")] {
+        let (n,): (i64,) = sqlx::query_as(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
+            .bind(field.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "{table} should have no rows for the purged field");
+    }
+}
