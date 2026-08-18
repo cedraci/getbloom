@@ -24,11 +24,19 @@
 
 ## Deviations from the spec, decided at planning time
 
-Three details the spec left open, resolved here so no task has to invent them:
+Four details the spec left open, resolved here so no task has to invent them:
 
 1. **`apply_assets_import` takes a fourth argument**, `confirmed_removal_count: Option<i64>`. Spec §8.1 guardrail 2 requires the user to type the removal count, but §6's signature has nowhere to put it. Task 10 adds it.
 2. **No file-picker dialog.** `tauri-plugin-dialog` is not a dependency and adding it drags in capability configuration for one text field. Export and import take a `path: String`; the UI seeds that field from `get_settings().data_dir` as `<data_dir>\assets.xlsx`. The user can type any path.
-3. **`active` flips are not "edits".** A row whose `active` differs from the database lands in `retires` or `reactivations`, never in an `EditRow.changed` list. This keeps the two ways of retiring an asset (the `active` column, and deleting the row entirely) visible as one category in the diff screen.
+3. **The bulk integration tests get their own database.** `db_integration.rs`
+   fixtures never clean up and run on parallel threads against one database. A
+   whole-registry import test cannot survive that: an asset another test inserts
+   mid-flight reads as a proposed removal, and Retire is the default, so the
+   import test would deactivate someone else's fixture. Task 10's tests create
+   and truncate `bloom_test_bulk` (derived from `BLOOM_TEST_DATABASE_URL`) and
+   serialize behind a mutex. The Postgres role must be allowed to
+   `CREATE DATABASE`; on this machine it is `postgres`, which is.
+4. **`active` flips are not "edits".** A row whose `active` differs from the database lands in `retires` or `reactivations`, never in an `EditRow.changed` list. This keeps the two ways of retiring an asset (the `active` column, and deleting the row entirely) visible as one category in the diff screen.
 
 ---
 
@@ -86,6 +94,18 @@ In `src-tauri/src/lib.rs`, add `pub mod deletion;` to the module list, keeping i
 Append to `src-tauri/tests/db_integration.rs`:
 
 ```rust
+/// `observation.run_id` is NOT NULL REFERENCES run(id), so any test that plants
+/// an observation must plant a run first. `run.status` is CHECK-constrained to
+/// ('generating','refreshing','reading','ingesting','ok','failed','partial') --
+/// 'completed' is not a legal value.
+async fn new_run(pool: &sqlx::PgPool, view_id: i64) -> i64 {
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
+         VALUES ($1, 'eod', 'manual', 'ok', 1) RETURNING id")
+        .bind(view_id).fetch_one(pool).await.unwrap();
+    id
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn describe_deletion_counts_what_hangs_off_an_asset() {
@@ -110,11 +130,12 @@ async fn describe_deletion_counts_what_hangs_off_an_asset() {
         .await.unwrap();
     getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
 
+    let run_id = new_run(&pool, view.id).await;
     sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, source_run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 1.0, NULL),
-                ($1, $2, DATE '2026-08-11', 2.0, NULL)")
-        .bind(asset.id).bind(field.id)
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3),
+                ($1, $2, DATE '2026-08-11', 2.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id)
         .execute(&pool).await.unwrap();
 
     let impact = describe_deletion(&pool, EntityKind::Asset, asset.id).await.unwrap();
@@ -519,10 +540,11 @@ async fn retiring_an_asset_hides_it_from_views_but_keeps_its_observations() {
         &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
     let view = getbloomdata_lib::views::create_view(&pool, &uniq("RetireView"), "").await.unwrap();
     getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
     sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, source_run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 1.0, NULL)")
-        .bind(asset.id).bind(field.id).execute(&pool).await.unwrap();
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
 
     assert_eq!(getbloomdata_lib::views::view_assets(&pool, view.id).await.unwrap().len(), 1);
 
@@ -561,12 +583,11 @@ async fn purging_an_asset_clears_its_data_but_leaves_run_and_hit_ledger() {
     let view = getbloomdata_lib::views::create_view(&pool, &uniq("PurgeView"), "").await.unwrap();
     getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
 
-    let (run_id,): (i64,) = sqlx::query_as(
-        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
-         VALUES ($1, 'eod', 'manual', 'completed', 1) RETURNING id")
-        .bind(view.id).fetch_one(&pool).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
+    sqlx::query("INSERT INTO hit_ledger (run_id, estimated_hits) VALUES ($1, 7)")
+        .bind(run_id).execute(&pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, source_run_id)
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
          VALUES ($1, $2, DATE '2026-08-10', 1.0, $3)")
         .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
     sqlx::query(
@@ -586,6 +607,9 @@ async fn purging_an_asset_clears_its_data_but_leaves_run_and_hit_ledger() {
     let (runs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM run WHERE id = $1")
         .bind(run_id).fetch_one(&pool).await.unwrap();
     assert_eq!(runs, 1, "a purge must never rewrite the record of work that happened");
+    let (hits,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM hit_ledger WHERE run_id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(hits, 1, "the budget ledger records money spent and is never rewritten");
 }
 
 #[tokio::test]
@@ -610,10 +634,11 @@ async fn purging_a_field_clears_its_observations_and_memberships() {
         &pool, class.id, "PX_VOLUME", "Volume", "numeric").await.unwrap();
     let view = getbloomdata_lib::views::create_view(&pool, &uniq("FldPurgeView"), "").await.unwrap();
     getbloomdata_lib::views::set_view_fields(&pool, view.id, &[field.id]).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
     sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, source_run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 5.0, NULL)")
-        .bind(asset.id).bind(field.id).execute(&pool).await.unwrap();
+        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 5.0, $3)")
+        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
 
     delete_field(&pool, field.id, DeleteMode::Purge).await.unwrap();
 
@@ -762,7 +787,7 @@ async fn a_view_with_runs_refuses_to_purge_but_still_retires() {
     let view = getbloomdata_lib::views::create_view(&pool, &uniq("HistoricView"), "").await.unwrap();
     sqlx::query(
         "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
-         VALUES ($1, 'eod', 'manual', 'completed', 1)")
+         VALUES ($1, 'eod', 'manual', 'ok', 1)")
         .bind(view.id).execute(&pool).await.unwrap();
 
     let err = delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap_err();
@@ -1342,7 +1367,7 @@ Create an empty `src-tauri/src/bulk/diff.rs` for now (Task 9 fills it):
 // Filled in by the diff task.
 ```
 
-Add `pub mod bulk;` to `src-tauri/src/lib.rs`, alphabetically first in the module list (before `pub mod blp_driver;`... check: `blp_driver` sorts before `budget` sorts before `bulk`; place it after `pub mod budget;`).
+Add `pub mod bulk;` to `src-tauri/src/lib.rs`, immediately after `pub mod budget;` (the module list is alphabetical, and `budget` sorts before `bulk`).
 
 - [ ] **Step 3: Write the failing test**
 
@@ -1379,6 +1404,18 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_id_is_written_as_a_blank_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.xlsx");
+        let mut rows = sample();
+        rows[0].id = 0; // an asset that does not exist yet
+        write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+        // Proven properly in the reader task; here it is enough that the file
+        // writes without turning 0 into a number the reader would parse.
+        assert!(path.exists());
+    }
+
+    #[test]
     fn hashing_the_same_bytes_twice_gives_the_same_digest() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h.bin");
@@ -1407,7 +1444,7 @@ Expected: compile error, `cannot find function 'write_assets_sheet'`.
 //! Reading and writing the assets workbook. No database access lives here.
 
 use crate::error::{AppError, AppResult};
-use rust_xlsxwriter::{DataValidation, DataValidationRule, Format, Workbook};
+use rust_xlsxwriter::{DataValidation, Format, Workbook};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -1462,7 +1499,14 @@ pub fn write_assets_sheet(
 
     for (i, r) in rows.iter().enumerate() {
         let row = (i + 1) as u32;
-        sheet.write_number_with_format(row, 0, r.id as f64, &readonly).map_err(xlsx_err)?;
+        // A blank id is how the sheet says "new asset". Writing 0 here would
+        // read back as id 0 and be rejected as an id not in the database, so a
+        // row assembled for an add must leave the cell empty.
+        if r.id > 0 {
+            sheet.write_number_with_format(row, 0, r.id as f64, &readonly).map_err(xlsx_err)?;
+        } else {
+            sheet.write_blank(row, 0, &readonly).map_err(xlsx_err)?;
+        }
         sheet.write_string(row, 1, &r.label).map_err(xlsx_err)?;
         sheet.write_string(row, 2, &r.class).map_err(xlsx_err)?;
         sheet.write_string(row, 3, &r.id_kind).map_err(xlsx_err)?;
@@ -1492,7 +1536,6 @@ pub fn write_assets_sheet(
     // `yellow_key` deliberately has no dropdown: the set is open-ended
     // (Equity, Corp, Index, Curncy, Comdty, Govt, ...) and constraining it
     // would block a legitimate key nobody thought to list.
-    let _ = DataValidationRule::<i32>::EqualTo(0); // keep the import honest if unused
 
     book.save(path).map_err(xlsx_err)?;
     Ok(())
@@ -1506,7 +1549,6 @@ pub fn file_sha256(path: &Path) -> AppResult<String> {
 }
 ```
 
-If `DataValidationRule` turns out to be unused, delete that placeholder line and its `use` import rather than keeping dead code.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -1566,6 +1608,18 @@ Append inside the existing `mod tests` in `src-tauri/src/bulk/sheet.rs`:
         assert_eq!(r.yellow_key, "Equity");
         assert!(r.active);
         assert_eq!(r.views, vec!["Daily".to_string()]);
+    }
+
+    #[test]
+    fn a_blank_id_cell_reads_back_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.xlsx");
+        let mut rows = sample();
+        rows[0].id = 0;
+        write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+        let data = read_assets_sheet(&path).unwrap();
+        assert!(data.has_id_column, "the column exists even when its cells are blank");
+        assert_eq!(data.rows[0].id, None, "a blank id means 'add this asset'");
     }
 
     #[test]
@@ -1680,12 +1734,13 @@ pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
     })?;
 
     let mut rows_iter = range.rows();
-    let header: Vec<String> = rows_iter
+    let header_raw: Vec<String> = rows_iter
         .next()
         .ok_or_else(|| AppError::Validation("sheet is empty".into()))?
         .iter()
-        .map(|c| c.to_string().trim().to_lowercase())
+        .map(|c| c.to_string().trim().to_string())
         .collect();
+    let header: Vec<String> = header_raw.iter().map(|h| h.to_lowercase()).collect();
 
     let col = |name: &str| header.iter().position(|h| h == name);
     let (c_id, c_label, c_class, c_kind, c_ticker, c_isin, c_key, c_active) = (
@@ -1697,23 +1752,14 @@ pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
     }
 
     // Anything that is not a known fixed header is a view column. `security` is
-    // a fixed header and is read but discarded -- import recomputes it.
-    let view_columns: Vec<String> = range
-        .rows()
-        .next()
-        .map(|r| r.iter().map(|c| c.to_string().trim().to_string()).collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .filter(|(_, h)| !h.is_empty() && !FIXED_HEADERS.contains(&h.to_lowercase().as_str()))
-        .map(|(_, h)| h)
-        .collect();
-    let view_indices: Vec<usize> = header
+    // a fixed header and is read but discarded -- import recomputes it. View
+    // names keep their original case, because they have to match `view.name`.
+    let (view_indices, view_columns): (Vec<usize>, Vec<String>) = header_raw
         .iter()
         .enumerate()
-        .filter(|(_, h)| !h.is_empty() && !FIXED_HEADERS.contains(&h.as_str()))
-        .map(|(i, _)| i)
-        .collect();
+        .filter(|(_, h)| !h.is_empty() && !FIXED_HEADERS.contains(&h.to_lowercase().as_str()))
+        .map(|(i, h)| (i, h.clone()))
+        .unzip();
 
     let mut rows = Vec::new();
     for (offset, r) in rows_iter.enumerate() {
@@ -2359,7 +2405,7 @@ git commit -m "feat: pure differ turning a sheet plus the registry into an impor
 
 **Files:**
 - Modify: `src-tauri/src/bulk/mod.rs` (replace the stub with the real module)
-- Test: `src-tauri/tests/db_integration.rs` (append)
+- Test: `src-tauri/tests/db_integration.rs` (append; four tests plus a `bulk_pool()` helper on an isolated `bloom_test_bulk` database)
 
 **Interfaces:**
 - Consumes: `sheet::{ExportRow, SheetData, read_assets_sheet, write_assets_sheet, file_sha256}`; `diff::{DbAsset, ImportPlan, diff}`; `deletion::{DeleteMode, purge_asset_tx}`; `registry::resolve_bdp_security`.
@@ -2375,117 +2421,154 @@ git commit -m "feat: pure differ turning a sheet plus the registry into an impor
 Append to `src-tauri/tests/db_integration.rs`:
 
 ```rust
+/// The bulk import reasons about the WHOLE registry, so it cannot be tested
+/// against the shared fixture database: those tests never clean up and run on
+/// parallel threads, so an asset another test inserted mid-flight would show up
+/// here as a proposed removal -- and, with Retire as the default, this test
+/// would deactivate another test's fixture. These tests get their own database,
+/// wiped at the start of each, and a mutex so they never overlap.
+static BULK_DB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn bulk_pool() -> sqlx::PgPool {
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let (base, _) = url.rsplit_once('/').expect("database url ends with /<dbname>");
+    let admin = sqlx::PgPool::connect(&format!("{base}/postgres")).await.unwrap();
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM pg_database WHERE datname = 'bloom_test_bulk'")
+        .fetch_optional(&admin).await.unwrap();
+    if exists.is_none() {
+        sqlx::query("CREATE DATABASE bloom_test_bulk").execute(&admin).await.unwrap();
+    }
+    admin.close().await;
+    let pool = getbloomdata_lib::db::connect(&format!("{base}/bloom_test_bulk"))
+        .await.unwrap();
+    sqlx::query(
+        "TRUNCATE hit_ledger, ingest_issue, observation, run, view_field, view_asset,
+                  schedule, view, field_def, asset, asset_class RESTART IDENTITY CASCADE")
+        .execute(&pool).await.unwrap();
+    pool
+}
+
+async fn mk_asset(pool: &sqlx::PgPool, class_id: i64, label: &str, ticker: &str) -> i64 {
+    getbloomdata_lib::registry::create_asset(
+        pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class_id, label: label.into(), id_kind: "ticker".into(),
+            ticker: Some(ticker.into()), isin: None, yellow_key: "Equity".into(),
+        }).await.unwrap().id
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn export_then_import_is_a_no_op() {
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("assets.xlsx");
 
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("RoundTripCls"), "test").await.unwrap();
-    getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Round Trip".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("RTP"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, "Daily", "").await.unwrap();
+    let a = mk_asset(&pool, class.id, "Round Trip", "RTP US").await;
+    let b = mk_asset(&pool, class.id, "Second", "SEC US").await;
+    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[a]).await.unwrap();
+    getbloomdata_lib::registry::set_asset_active(&pool, b, false).await.unwrap();
 
     getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
     let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
     assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
     assert!(plan.is_empty(), "a fresh round trip must change nothing, got {plan:?}");
+    // A retired asset must survive the round trip retired, not be reactivated.
+    assert!(plan.reactivations.is_empty());
 }
 
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn apply_import_adds_edits_and_purges_in_one_transaction() {
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
     use getbloomdata_lib::deletion::DeleteMode;
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("assets.xlsx");
 
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("ApplyCls"), "test").await.unwrap();
-    let keep = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id, label: "Keep".into(), id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("KEP"))), isin: None,
-            yellow_key: "Equity".into() }).await.unwrap();
-    let drop = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id, label: "Drop".into(), id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("DRP"))), isin: None,
-            yellow_key: "Equity".into() }).await.unwrap();
-    let third = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id, label: "Third".into(), id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("THR"))), isin: None,
-            yellow_key: "Equity".into() }).await.unwrap();
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, "Daily", "").await.unwrap();
+    let keep = mk_asset(&pool, class.id, "Keep", "KEP US").await;
+    let drop = mk_asset(&pool, class.id, "Drop", "DRP US").await;
+    let third = mk_asset(&pool, class.id, "Third", "THR US").await;
+    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[third]).await.unwrap();
 
     getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
 
-    // Rewrite the sheet: rename `keep`, add one, and leave `drop` out.
-    // Other assets in the shared test database are untouched only because the
-    // export carries them all; we edit the file rather than rebuilding it.
-    let data = getbloomdata_lib::bulk::sheet::read_assets_sheet(&path).unwrap();
-    let mut rows: Vec<getbloomdata_lib::bulk::sheet::ExportRow> = data.rows.iter()
-        .filter(|r| r.id != Some(drop.id))
-        .map(|r| getbloomdata_lib::bulk::sheet::ExportRow {
+    // Rewrite the sheet the way a user would in Excel: rename `keep`, put it in
+    // the Daily view, add a row with a blank id, and delete `drop`'s row.
+    let data = read_assets_sheet(&path).unwrap();
+    let mut rows: Vec<ExportRow> = data.rows.iter()
+        .filter(|r| r.id != Some(drop))
+        .map(|r| ExportRow {
             id: r.id.unwrap_or(0),
-            label: if r.id == Some(keep.id) { "Keep Renamed".into() } else { r.label.clone() },
+            label: if r.id == Some(keep) { "Keep Renamed".into() } else { r.label.clone() },
             class: r.class.clone(), id_kind: r.id_kind.clone(),
             ticker: r.ticker.clone(), isin: r.isin.clone(),
             yellow_key: r.yellow_key.clone(), active: r.active,
-            security: String::new(), views: r.views.clone(),
+            security: String::new(),
+            views: if r.id == Some(keep) { vec!["Daily".into()] } else { r.views.clone() },
         }).collect();
-    let new_ticker = format!("{} US", uniq("NEW"));
-    rows.push(getbloomdata_lib::bulk::sheet::ExportRow {
-        id: 0, label: "Brand New".into(), class: class.name.clone(),
-        id_kind: "ticker".into(), ticker: new_ticker.clone(), isin: String::new(),
+    rows.push(ExportRow {
+        id: 0, label: "Brand New".into(), class: "Equity".into(),
+        id_kind: "ticker".into(), ticker: "NEW US".into(), isin: String::new(),
         yellow_key: "Equity".into(), active: true, security: String::new(), views: vec![],
     });
-    let views: Vec<String> = getbloomdata_lib::views::list_views(&pool).await.unwrap()
-        .into_iter().map(|v| v.name).collect();
-    let classes: Vec<String> = getbloomdata_lib::registry::list_asset_classes(&pool).await
-        .unwrap().into_iter().map(|c| c.name).collect();
-    // id 0 means "blank" to the writer: write it as an add.
-    getbloomdata_lib::bulk::sheet::write_assets_sheet(&path, &rows, &views, &classes).unwrap();
+    write_assets_sheet(&path, &rows, &["Daily".to_string()], &["Equity".to_string()])
+        .unwrap();
 
     let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
     assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
-    assert!(plan.removals.iter().any(|r| r.id == drop.id));
-    assert!(plan.edits.iter().any(|e| e.id == keep.id));
-    assert!(plan.adds.iter().any(|a| a.label == "Brand New"));
+    assert_eq!(plan.adds.len(), 1);
+    assert_eq!(plan.edits.len(), 1);
+    assert_eq!(plan.edits[0].id, keep);
+    assert_eq!(plan.membership_changes.len(), 1);
+    assert_eq!(plan.removals.len(), 1);
+    assert_eq!(plan.removals[0].id, drop);
+    assert!(!plan.requires_typed_confirmation, "1 of 3 active is not over half");
 
     let res = getbloomdata_lib::bulk::apply_import(
-        &pool, &path, &plan.file_hash,
-        &[(drop.id, DeleteMode::Purge)],
-        Some(plan.removals.len() as i64)).await.unwrap();
-    assert!(res.added >= 1 && res.edited >= 1 && res.removed >= 1);
+        &pool, &path, &plan.file_hash, &[(drop, DeleteMode::Purge)], None).await.unwrap();
+    assert_eq!(res.added, 1);
+    assert_eq!(res.edited, 1);
+    assert_eq!(res.removed, 1);
 
     let (gone,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(drop.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(gone, 0);
+        .bind(drop).fetch_one(&pool).await.unwrap();
+    assert_eq!(gone, 0, "purge deletes the row outright");
     let (label,): (String,) = sqlx::query_as("SELECT label FROM asset WHERE id = $1")
-        .bind(keep.id).fetch_one(&pool).await.unwrap();
+        .bind(keep).fetch_one(&pool).await.unwrap();
     assert_eq!(label, "Keep Renamed");
+    let (members,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM view_asset WHERE view_id = $1 AND asset_id = $2")
+        .bind(view.id).bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(members, 1, "the x in the Daily column added a membership");
     let (still,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(third.id).fetch_one(&pool).await.unwrap();
+        .bind(third).fetch_one(&pool).await.unwrap();
     assert_eq!(still, 1, "an untouched row must survive");
+    let (added,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM asset WHERE bdp_security = 'NEW US Equity'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(added, 1);
+
+    // The database moved under the file, so re-previewing the same sheet must
+    // converge on "nothing to do" rather than proposing the same work twice.
+    let replay = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert!(replay.is_empty(), "applying twice must converge, got {replay:?}");
 }
 
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn apply_import_refuses_a_stale_hash() {
     use getbloomdata_lib::error::AppError;
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("assets.xlsx");
 
@@ -2494,6 +2577,54 @@ async fn apply_import_refuses_a_stale_hash() {
         &pool, &path, "0000000000000000000000000000000000000000000000000000000000000000",
         &[], None).await.unwrap_err();
     assert!(matches!(err, AppError::ImportRejected { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_large_removal_set_needs_the_typed_count() {
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::error::AppError;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    for i in 1..=4 {
+        mk_asset(&pool, class.id, &format!("A{i}"), &format!("A{i} US")).await;
+    }
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    // Keep one row of four -- a truncated paste, which is exactly what
+    // guardrail 2 exists to catch.
+    let data = read_assets_sheet(&path).unwrap();
+    let rows: Vec<ExportRow> = data.rows.iter().take(1).map(|r| ExportRow {
+        id: r.id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
+        id_kind: r.id_kind.clone(), ticker: r.ticker.clone(), isin: r.isin.clone(),
+        yellow_key: r.yellow_key.clone(), active: r.active,
+        security: String::new(), views: r.views.clone(),
+    }).collect();
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert_eq!(plan.removals.len(), 3);
+    assert!(plan.requires_typed_confirmation);
+
+    let err = getbloomdata_lib::bulk::apply_import(
+        &pool, &path, &plan.file_hash, &[], None).await.unwrap_err();
+    assert!(matches!(err, AppError::ImportRejected { .. }),
+            "an unconfirmed mass removal must be refused, got {err:?}");
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE active")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 4, "nothing may be applied when the guardrail refuses");
+
+    // With the count typed, the same call goes through and defaults to Retire.
+    getbloomdata_lib::bulk::apply_import(
+        &pool, &path, &plan.file_hash, &[], Some(3)).await.unwrap();
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE active")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "the three missing rows are retired, not purged");
 }
 ```
 
@@ -3168,7 +3299,7 @@ $env:BLOOM_TEST_DATABASE_URL = [Environment]::GetEnvironmentVariable("BLOOM_TEST
 cargo test --manifest-path src-tauri/Cargo.toml --test db_integration -- --ignored
 ```
 
-Expected: all green. The baseline was 8 (plus one live-Bloomberg smoke test that only runs on the Bloomberg machine); this plan adds 11.
+Expected: all green. The baseline was 8 (plus one live-Bloomberg smoke test that only runs on the Bloomberg machine); this plan adds 12.
 
 - [ ] **Step 4: Run the Python sidecar tests**
 
