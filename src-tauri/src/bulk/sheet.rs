@@ -102,11 +102,7 @@ pub fn file_sha256(path: &Path) -> AppResult<String> {
     let bytes = std::fs::read(path)?;
     let mut h = Sha256::new();
     h.update(&bytes);
-    // digest 0.11's fixed-size `Array` output no longer implements `LowerHex`
-    // (it did via `GenericArray` on the 0.10 line the brief was written
-    // against), so hex-encode byte by byte instead of `format!("{:x}", ..)`.
-    let digest = h.finalize();
-    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(format!("{:x}", h.finalize()))
 }
 
 #[cfg(test)]
