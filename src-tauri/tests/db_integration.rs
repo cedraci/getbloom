@@ -459,3 +459,56 @@ async fn describe_deletion_blocks_a_non_empty_asset_class() {
     assert!(!impact.can_purge, "a class with an asset in it cannot be deleted");
     assert!(impact.blocked_reason.is_some());
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn delete_schedule_removes_the_row() {
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("SchedView"), "").await.unwrap();
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, TIME '18:00', TIME '19:00', true)")
+        .bind(view.id).execute(&pool).await.unwrap();
+    let (sid,): (i64,) = sqlx::query_as("SELECT id FROM schedule WHERE view_id = $1")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+
+    getbloomdata_lib::deletion::delete_schedule(&pool, sid).await.unwrap();
+
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM schedule WHERE id = $1")
+        .bind(sid).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn delete_asset_class_refuses_while_occupied_then_succeeds_when_empty() {
+    use getbloomdata_lib::error::AppError;
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = getbloomdata_lib::registry::create_asset_class(
+        &pool, &uniq("EmptyMeCls"), "test").await.unwrap();
+    let asset = getbloomdata_lib::registry::create_asset(
+        &pool, getbloomdata_lib::registry::NewAsset {
+            asset_class_id: class.id,
+            label: "Tenant".into(),
+            id_kind: "ticker".into(),
+            ticker: Some(format!("{} US", uniq("TEN"))),
+            isin: None,
+            yellow_key: "Equity".into(),
+        }).await.unwrap();
+
+    let err = getbloomdata_lib::deletion::delete_asset_class(&pool, class.id).await.unwrap_err();
+    assert!(matches!(err, AppError::DeleteBlocked { .. }),
+            "expected DeleteBlocked, got {err:?}");
+
+    sqlx::query("DELETE FROM asset WHERE id = $1").bind(asset.id)
+        .execute(&pool).await.unwrap();
+    getbloomdata_lib::deletion::delete_asset_class(&pool, class.id).await.unwrap();
+
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset_class WHERE id = $1")
+        .bind(class.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+}

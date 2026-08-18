@@ -156,3 +156,34 @@ pub async fn describe_deletion(
     }
     Ok(impact)
 }
+
+/// A schedule holds no history: there is nothing to retire and nothing to
+/// cascade. `drawn_for`/`drawn_at` live on the row and go with it.
+pub async fn delete_schedule(pool: &PgPool, id: i64) -> AppResult<()> {
+    let n = sqlx::query("DELETE FROM schedule WHERE id = $1")
+        .bind(id).execute(pool).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::Validation(format!("no such schedule: id {id}")));
+    }
+    Ok(())
+}
+
+/// An asset class is a grouping, not data. It is deletable only when nothing
+/// points at it -- there is no meaningful "retired class", because a retired
+/// class would still have to answer for its assets.
+pub async fn delete_asset_class(pool: &PgPool, id: i64) -> AppResult<()> {
+    let assets = scalar(pool, "SELECT COUNT(*) FROM asset WHERE asset_class_id = $1", id).await?;
+    let flds = scalar(pool, "SELECT COUNT(*) FROM field_def WHERE asset_class_id = $1", id).await?;
+    if assets > 0 || flds > 0 {
+        return Err(AppError::DeleteBlocked {
+            reason: "asset class is not empty".into(),
+            counts: vec![("asset(s)".into(), assets), ("field(s)".into(), flds)],
+        });
+    }
+    let n = sqlx::query("DELETE FROM asset_class WHERE id = $1")
+        .bind(id).execute(pool).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::Validation(format!("no such asset class: id {id}")));
+    }
+    Ok(())
+}
