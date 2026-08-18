@@ -35,6 +35,14 @@ export interface ScheduleRow {
   window_end: string; drawn_for: string | null; drawn_at: string | null;
   last_result: string | null;
 }
+export type EntityKind = "asset_class" | "asset" | "field" | "view" | "schedule";
+export type DeleteMode = "retire" | "purge";
+export interface DeletionImpact {
+  kind: EntityKind; id: number; label: string;
+  observations: number; first_obs: string | null; last_obs: string | null;
+  views: number; issues: number; runs: number; children: number;
+  can_retire: boolean; can_purge: boolean; blocked_reason: string | null;
+}
 export interface AppConfig { data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string; }
 
 export const api = {
@@ -68,6 +76,13 @@ export const api = {
   listSchedules: () => invoke<ScheduleRow[]>("list_schedules"),
   upsertSchedule: (viewId: number, windowStart: string, windowEnd: string, active: boolean) =>
     invoke<void>("upsert_schedule", { viewId, windowStart, windowEnd, active }),
+  describeDeletion: (kind: EntityKind, id: number) =>
+    invoke<DeletionImpact>("describe_deletion", { kind, id }),
+  deleteAsset: (id: number, mode: DeleteMode) => invoke<void>("delete_asset", { id, mode }),
+  deleteField: (id: number, mode: DeleteMode) => invoke<void>("delete_field", { id, mode }),
+  deleteView: (id: number, mode: DeleteMode) => invoke<void>("delete_view", { id, mode }),
+  deleteAssetClass: (id: number) => invoke<void>("delete_asset_class", { id }),
+  deleteSchedule: (id: number) => invoke<void>("delete_schedule", { id }),
   getSettings: () => invoke<AppConfig>("get_settings"),
   saveSettings: (cfg: AppConfig) => invoke<void>("save_settings", { cfg }),
 };

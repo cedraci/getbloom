@@ -76,6 +76,9 @@ pub fn run() {
             commands::estimate_view, commands::run_eod_now, commands::run_backfill_now,
             commands::list_runs, commands::list_issues, commands::detect_view_gaps,
             commands::list_schedules, commands::upsert_schedule,
+            commands::describe_deletion,
+            commands::delete_asset, commands::delete_field, commands::delete_view,
+            commands::delete_asset_class, commands::delete_schedule,
             commands::get_settings, commands::save_settings,
         ])
         .run(tauri::generate_context!())

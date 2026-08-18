@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::orchestrator::{self, PipelineConfig, RunOutcome};
 use crate::scheduler::previous_weekday;
-use crate::{budget, fields, registry, scheduler, views};
+use crate::{budget, deletion, fields, registry, scheduler, views};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -296,4 +296,49 @@ pub async fn save_settings(state: State<'_, AppState>, cfg: AppConfig)
         .map_err(|e| AppError::Validation(e.to_string()))?)?;
     *state.cfg.write().await = cfg;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deletion
+// ---------------------------------------------------------------------------
+//
+// The UI calls describe_deletion to render its dialog, but every delete_*
+// command re-checks its own invariants. The dialog is a courtesy; the command
+// is the enforcement.
+
+#[tauri::command]
+pub async fn describe_deletion(state: State<'_, AppState>,
+                               kind: deletion::EntityKind, id: i64)
+    -> Result<deletion::DeletionImpact, AppError> {
+    deletion::describe_deletion(&state.pool, kind, id).await
+}
+
+#[tauri::command]
+pub async fn delete_asset(state: State<'_, AppState>, id: i64, mode: deletion::DeleteMode)
+    -> Result<(), AppError> {
+    deletion::delete_asset(&state.pool, id, mode).await
+}
+
+#[tauri::command]
+pub async fn delete_field(state: State<'_, AppState>, id: i64, mode: deletion::DeleteMode)
+    -> Result<(), AppError> {
+    deletion::delete_field(&state.pool, id, mode).await
+}
+
+#[tauri::command]
+pub async fn delete_view(state: State<'_, AppState>, id: i64, mode: deletion::DeleteMode)
+    -> Result<(), AppError> {
+    deletion::delete_view(&state.pool, id, mode).await
+}
+
+#[tauri::command]
+pub async fn delete_asset_class(state: State<'_, AppState>, id: i64)
+    -> Result<(), AppError> {
+    deletion::delete_asset_class(&state.pool, id).await
+}
+
+#[tauri::command]
+pub async fn delete_schedule(state: State<'_, AppState>, id: i64)
+    -> Result<(), AppError> {
+    deletion::delete_schedule(&state.pool, id).await
 }
