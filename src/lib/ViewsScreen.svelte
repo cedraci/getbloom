@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, type Asset, type AssetClass, type EstimateOut, type FieldDef, type View } from "./api";
+  import { api, type Asset, type AssetClass, type EntityKind, type EstimateOut, type FieldDef, type View } from "./api";
+  import DeleteDialog from "./DeleteDialog.svelte";
 
   let views = $state<View[]>([]);
   let assets = $state<Asset[]>([]);
@@ -7,6 +8,12 @@
   let classes = $state<AssetClass[]>([]);
   let estimates = $state<Record<number, EstimateOut>>({});
   let error = $state("");
+  let pending = $state<{ kind: EntityKind; id: number } | null>(null);
+
+  function afterDelete(changed: boolean) {
+    pending = null;
+    if (changed) reload();
+  }
 
   let newViewName = $state("");
   let newViewDescription = $state("");
@@ -85,7 +92,7 @@
     <button type="submit">Add view</button>
   </form>
   <table>
-    <thead><tr><th>Name</th><th>Description</th><th>Estimate</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Description</th><th>Estimate</th><th></th><th></th></tr></thead>
     <tbody>
       {#each views as v}
         <tr class:selected={selectedViewId === v.id}>
@@ -97,6 +104,8 @@
             {/if}
           </td>
           <td><button onclick={() => selectView(v.id)}>Select</button></td>
+          <td><button class="x" title="Remove view"
+                      onclick={() => (pending = { kind: "view", id: v.id })}>&times;</button></td>
         </tr>
       {/each}
     </tbody>
@@ -129,6 +138,8 @@
                        onchange={() => toggleField(f.id)} />
                 {f.mnemonic} — {f.label}
               </label>
+              <button class="x" title="Remove field"
+                      onclick={() => (pending = { kind: "field", id: f.id })}>&times;</button>
             </li>
           {/each}
         </ul>
@@ -159,9 +170,15 @@
   </form>
 </section>
 
+{#if pending}
+  <DeleteDialog kind={pending.kind} id={pending.id} onclose={afterDelete} />
+{/if}
+
 <style>
   .error { color: #c00; }
   .hint { color: #a60; margin: 0.5rem 0 0; }
+  .x { border: none; background: none; color: #c00; cursor: pointer;
+       font-size: 1rem; line-height: 1; padding: 0 0.3rem; }
   section { padding: 1rem; }
   h2 { margin-top: 1.5rem; }
   h3 { margin-bottom: 0.3rem; }

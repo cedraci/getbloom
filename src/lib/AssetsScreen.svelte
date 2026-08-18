@@ -1,11 +1,19 @@
 <script lang="ts">
   import { api, type Asset, type AssetClass, type NewAsset } from "./api";
+  import DeleteDialog from "./DeleteDialog.svelte";
+  import type { EntityKind } from "./api";
   let classes = $state<AssetClass[]>([]);
   let assets = $state<Asset[]>([]);
   let error = $state("");
   let form = $state<NewAsset>({ asset_class_id: 0, label: "", id_kind: "ticker",
                                 ticker: "", isin: null, yellow_key: "Equity" });
   let newClassName = $state("");
+  let pending = $state<{ kind: EntityKind; id: number } | null>(null);
+
+  function afterDelete(changed: boolean) {
+    pending = null;
+    if (changed) reload();
+  }
 
   async function reload() {
     try {
@@ -40,7 +48,12 @@
   <input bind:value={newClassName} placeholder="e.g. Equity" />
   <button onclick={addClass} disabled={!newClassName}>Add class</button>
   <ul class="classes">
-    {#each classes as c}<li>{c.name}</li>{/each}
+    {#each classes as c}
+      <li>{c.name}
+        <button class="x" title="Remove class"
+                onclick={() => (pending = { kind: "asset_class", id: c.id })}>&times;</button>
+      </li>
+    {/each}
   </ul>
 
   <h2>Assets</h2>
@@ -71,7 +84,7 @@
     <button type="submit" disabled={!classes.length}>Add asset</button>
   </form>
   <table>
-    <thead><tr><th>Label</th><th>Security</th><th>Class</th><th>Active</th></tr></thead>
+    <thead><tr><th>Label</th><th>Security</th><th>Class</th><th>Active</th><th></th></tr></thead>
     <tbody>
       {#each assets as a}
         <tr>
@@ -79,11 +92,17 @@
           <td>{classes.find((c) => c.id === a.asset_class_id)?.name}</td>
           <td><input type="checkbox" checked={a.active}
                onchange={() => api.setAssetActive(a.id, !a.active).then(reload)} /></td>
+          <td><button class="x" title="Remove asset"
+                      onclick={() => (pending = { kind: "asset", id: a.id })}>&times;</button></td>
         </tr>
       {/each}
     </tbody>
   </table>
 </section>
+
+{#if pending}
+  <DeleteDialog kind={pending.kind} id={pending.id} onclose={afterDelete} />
+{/if}
 
 <style>
   .error { color: #c00; }
@@ -93,6 +112,8 @@
   .classes { list-style: none; padding: 0; margin: 0.5rem 0 0;
              display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .classes li { border: 1px solid #ccc; border-radius: 3px; padding: 0.1rem 0.5rem; }
+  .x { border: none; background: none; color: #c00; cursor: pointer;
+       font-size: 1rem; line-height: 1; padding: 0 0.3rem; }
   section { padding: 1rem; }
   h2 { margin-top: 1.5rem; }
   table { border-collapse: collapse; margin-top: 0.5rem; }
