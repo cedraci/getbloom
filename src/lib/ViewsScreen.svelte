@@ -138,8 +138,14 @@
   {/if}
 
   <h2>Fields</h2>
+  {#if !classes.length}
+    <p class="hint">
+      No asset class exists yet. Create one on the <strong>Assets</strong> tab first —
+      a field is always defined for a class.
+    </p>
+  {/if}
   <form onsubmit={(e) => { e.preventDefault(); addField(); }}>
-    <select bind:value={newField.asset_class_id}>
+    <select bind:value={newField.asset_class_id} disabled={!classes.length}>
       {#each classes as c}<option value={c.id}>{c.name}</option>{/each}
     </select>
     <input bind:value={newField.mnemonic} placeholder="PX_LAST" required />
@@ -149,12 +155,13 @@
       <option value="text">text</option>
       <option value="date">date</option>
     </select>
-    <button type="submit">Add field</button>
+    <button type="submit" disabled={!classes.length}>Add field</button>
   </form>
 </section>
 
 <style>
   .error { color: #c00; }
+  .hint { color: #a60; margin: 0.5rem 0 0; }
   section { padding: 1rem; }
   h2 { margin-top: 1.5rem; }
   h3 { margin-bottom: 0.3rem; }
