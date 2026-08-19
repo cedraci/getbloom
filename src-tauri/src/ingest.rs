@@ -33,17 +33,29 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
     let (mut inserted, mut superseded, mut unchanged) = (0u64, 0u64, 0u64);
 
     for c in &outcome.cells {
-        let (num, text) = match &c.value {
-            CellValue::Num(n) => (Some(*n), None),
-            CellValue::Text(t) => (None, Some(t.clone())),
+        // Only a numeric price has an adjustment basis (schema
+        // observation_numeric_needs_basis / the migration's "text-valued
+        // fields ... legitimately have none"). Asserting RAW for a text cell
+        // would be a false claim, and would also let a text row and a future
+        // NULL-basis writer both claim "current" for the same logical series
+        // without colliding on observation_current.
+        let (num, text, basis_id) = match &c.value {
+            CellValue::Num(n) => (Some(*n), None, Some(raw_basis)),
+            CellValue::Text(t) => (None, Some(t.clone()), None),
         };
 
+        // FOR UPDATE: two concurrent runs racing the same
+        // (instrument, field, date, ..., basis) key must serialize here,
+        // not both decide "no current row" and collide on
+        // observation_current.
         let current: Option<(i64, Option<f64>, Option<String>)> = sqlx::query_as(
             "SELECT id, value_num, value_text FROM observation
               WHERE instrument_id = $1 AND field_id = $2 AND obs_date = $3
-                AND granularity = 'eod' AND layer = 'raw' AND basis_id = $4
-                AND system_to = 'infinity'")
-            .bind(c.instrument_id).bind(c.field_id).bind(c.obs_date).bind(raw_basis)
+                AND granularity = 'eod' AND layer = 'raw'
+                AND basis_id IS NOT DISTINCT FROM $4
+                AND system_to = 'infinity'
+              FOR UPDATE")
+            .bind(c.instrument_id).bind(c.field_id).bind(c.obs_date).bind(basis_id)
             .fetch_optional(&mut *tx).await?;
 
         if let Some((id, old_num, old_text)) = current {
@@ -62,7 +74,7 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
                 value_num, value_text, run_id)
              VALUES ($1,$2,$3,'eod','raw',$4,$5,$6,$7)")
             .bind(c.instrument_id).bind(c.field_id).bind(c.obs_date)
-            .bind(raw_basis).bind(num).bind(text).bind(run_id)
+            .bind(basis_id).bind(num).bind(text).bind(run_id)
             .execute(&mut *tx).await?;
         inserted += 1;
     }

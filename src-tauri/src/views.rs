@@ -84,18 +84,32 @@ pub async fn set_view_fields(
 /// case a later phase opens a review against an instrument that is already
 /// bound and already has a book entry.
 pub async fn view_instruments(pool: &PgPool, view_id: i64) -> AppResult<Vec<BookEntry>> {
-    let ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT vi.instrument_id FROM view_instrument vi
+    // A single query scoped to this view, not `book::list` (one
+    // `current_security` query per row in the WHOLE book) filtered down in
+    // Rust afterward -- `estimate_view` calls this per view and the views
+    // screen calls `estimate_view` per view on every load, so the old
+    // approach cost views x book_size queries for a screen render.
+    let today = chrono::Local::now().date_naive();
+    Ok(sqlx::query_as::<_, BookEntry>(
+        "SELECT b.instrument_id, b.asset_class_id, b.label, b.active, b.note,
+                sec.value AS security
+           FROM view_instrument vi
            JOIN book_entry b ON b.instrument_id = vi.instrument_id
+           LEFT JOIN LATERAL (
+             SELECT value FROM instrument_alias
+              WHERE instrument_id = b.instrument_id AND id_type = 'bdp_security'
+                AND valid_from <= $2 AND valid_to > $2
+                AND system_to = 'infinity'
+              ORDER BY valid_from DESC LIMIT 1
+           ) sec ON true
           WHERE vi.view_id = $1 AND b.active
             AND NOT EXISTS (
               SELECT 1 FROM resolution_review r
                 JOIN resolution_decision d ON d.id = r.decision_id
                WHERE r.status = 'pending' AND d.chosen_instrument_id = vi.instrument_id)
           ORDER BY b.label")
-        .bind(view_id).fetch_all(pool).await?;
-    let all = crate::book::list(pool).await?;
-    Ok(all.into_iter().filter(|b| ids.contains(&b.instrument_id)).collect())
+        .bind(view_id).bind(today)
+        .fetch_all(pool).await?)
 }
 
 pub async fn view_fields(pool: &PgPool, view_id: i64) -> AppResult<Vec<FieldDef>> {

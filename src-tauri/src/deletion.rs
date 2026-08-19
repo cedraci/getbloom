@@ -51,6 +51,15 @@ pub struct DeletionImpact {
     pub can_retire: bool,
     pub can_purge: bool,
     pub blocked_reason: Option<String>,
+    /// True when `observations`/`first_obs`/`last_obs`/`issues` above
+    /// describe history that a purge leaves on disk rather than deletes.
+    /// Currently only `EntityKind::Asset` (a book entry): purging one removes
+    /// the book entry and its view memberships, never the instrument's
+    /// identity, its aliases, or its recorded observations -- see
+    /// `purge_asset_tx`. Without this flag the dialog cannot be worded
+    /// correctly for both cases: a field purge really does delete its
+    /// observations, an asset purge never does.
+    pub purge_keeps_history: bool,
 }
 
 async fn scalar(pool: &PgPool, sql: &str, id: i64) -> AppResult<i64> {
@@ -83,12 +92,16 @@ pub async fn describe_deletion(
         can_retire: false,
         can_purge: false,
         blocked_reason: None,
+        purge_keeps_history: false,
     };
 
     match kind {
         // "Asset" here means a book entry: identity (instrument, aliases,
         // observations) lives elsewhere and a book-entry deletion never
-        // touches it -- see purge_book_entry_tx.
+        // touches it -- see purge_asset_tx. observations/issues below are
+        // shown for context (how much history this instrument has), not as
+        // a warning of data loss -- purge_keeps_history tells the frontend
+        // to word it that way.
         EntityKind::Asset => {
             impact.label =
                 label_of(pool, "SELECT label FROM book_entry WHERE instrument_id = $1", id)
@@ -109,6 +122,7 @@ pub async fn describe_deletion(
                 .await?;
             impact.can_retire = true;
             impact.can_purge = true;
+            impact.purge_keeps_history = true;
         }
         EntityKind::Field => {
             impact.label = label_of(pool, "SELECT label FROM field_def WHERE id = $1", id).await?;
@@ -286,8 +300,8 @@ pub async fn delete_field(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult
 /// available, and -- once the scheduler filters on `view.active` -- retiring
 /// genuinely stops collection.
 ///
-/// `view_asset` and `view_field` are the only cascading foreign keys in the
-/// schema, so they go with the view without an explicit statement.
+/// `view_instrument` and `view_field` are the only cascading foreign keys in
+/// the schema, so they go with the view without an explicit statement.
 pub async fn delete_view(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult<()> {
     match mode {
         DeleteMode::Retire => {

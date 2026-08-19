@@ -46,6 +46,11 @@ export interface DeletionImpact {
   observations: number; first_obs: string | null; last_obs: string | null;
   views: number; issues: number; runs: number; children: number;
   can_retire: boolean; can_purge: boolean; blocked_reason: string | null;
+  // True when `observations`/`issues` above survive a purge instead of
+  // being deleted by it -- currently only for kind "asset" (a book entry):
+  // purging one removes it from the book and from its views, never the
+  // underlying instrument, its aliases, or its recorded history.
+  purge_keeps_history: boolean;
 }
 export interface AppConfig { data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string; }
 

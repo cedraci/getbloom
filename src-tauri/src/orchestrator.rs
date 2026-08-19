@@ -108,14 +108,29 @@ async fn load_view(pool: &PgPool, view_id: i64) -> AppResult<Loaded> {
             .unwrap_or_else(|| format!("Class{id}"))
     };
     let mut assets = Vec::with_capacity(members.len());
+    let today = chrono::Local::now().date_naive();
     for m in &members {
         // The security string is derived from the alias valid today, never read
         // off the book entry -- one instrument wears several over its life.
         let Some(security) = m.security.clone() else {
             // No security valid today: delisted, or never resolved. Skipping is
-            // right, and saying so is what keeps it from looking like a holiday.
+            // right, and saying so is what keeps it from looking like a holiday --
+            // eprintln! alone reaches nobody in a Tauri binary, so it is also
+            // recorded durably. No run row exists yet at this point in the flow
+            // (load_view runs before execute() creates one), so run_id is NULL --
+            // exactly what ingest_issue.run_id being nullable is for (see the
+            // migration's comment on that column).
             eprintln!("view {view_id}: instrument {} has no security string today, skipping",
                       m.instrument_id);
+            sqlx::query(
+                "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
+                 VALUES (NULL, $1, 'warn', 'no_security_today', $2)")
+                .bind(m.instrument_id)
+                .bind(format!(
+                    "view {view_id}: instrument {} has no security string valid as of {today}, \
+                     skipped",
+                    m.instrument_id))
+                .execute(pool).await?;
             continue;
         };
         assets.push(FetchAsset {

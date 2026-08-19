@@ -16,7 +16,10 @@ use crate::resolution::score::Hints;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// sqlx::FromRow lets views::view_instruments build a BookEntry directly from
+// a single joined query instead of going through `list` (one query per row
+// in the whole book) and filtering in Rust.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BookEntry {
     pub instrument_id: i64,
     pub asset_class_id: i64,

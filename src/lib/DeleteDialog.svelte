@@ -52,10 +52,20 @@
       <h3>Remove {NOUN[kind]} &ldquo;{impact.label}&rdquo;?</h3>
       <ul class="counts">
         {#if impact.observations > 0}
-          <li>{impact.observations} observation(s), {impact.first_obs} to {impact.last_obs}</li>
+          <li>
+            {impact.observations} observation(s), {impact.first_obs} to {impact.last_obs}
+            {#if impact.purge_keeps_history}
+              &mdash; recorded against the underlying instrument; purge does not delete these
+            {/if}
+          </li>
         {/if}
         {#if impact.views > 0}<li>member of {impact.views} view(s)</li>{/if}
-        {#if impact.issues > 0}<li>{impact.issues} recorded issue(s)</li>{/if}
+        {#if impact.issues > 0}
+          <li>
+            {impact.issues} recorded issue(s)
+            {#if impact.purge_keeps_history}&mdash; also kept{/if}
+          </li>
+        {/if}
         {#if impact.runs > 0}<li>{impact.runs} run(s) reference it</li>{/if}
         {#if impact.children > 0}<li>{impact.children} dependent row(s)</li>{/if}
         {#if impact.observations === 0 && impact.views === 0 && impact.issues === 0
@@ -72,12 +82,23 @@
         {/if}
         {#if impact.can_purge}
           <button class="danger" onclick={() => run("purge")} disabled={busy}>
-            {impact.can_retire ? "Purge — delete it and its data" : "Delete"}
+            {#if impact.purge_keeps_history}
+              Purge &mdash; remove from the book (history is kept)
+            {:else if impact.can_retire}
+              Purge — delete it and its data
+            {:else}
+              Delete
+            {/if}
           </button>
         {/if}
         <button onclick={() => onclose(false)} disabled={busy}>Cancel</button>
       </div>
-      {#if impact.can_purge && impact.can_retire}
+      {#if impact.purge_keeps_history}
+        <p class="note">
+          Purge removes this from your book and from every view. The instrument, its
+          identifiers and its recorded history are never deleted.
+        </p>
+      {:else if impact.can_purge && impact.can_retire}
         <p class="note">Purge cannot be undone. Runs and the budget ledger are never altered.</p>
       {/if}
     {/if}

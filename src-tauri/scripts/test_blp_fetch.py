@@ -87,6 +87,73 @@ class HelperTests(unittest.TestCase):
             "not_entitled")
 
 
+class _StubElement:
+    """Records appendValue/appendElement/setElement calls; never touches blpapi."""
+
+    def __init__(self):
+        self.values = []
+
+    def appendValue(self, v):
+        self.values.append(v)
+
+    def appendElement(self):
+        e = _StubElement()
+        self.values.append(e)
+        return e
+
+    def setElement(self, name, value):
+        setattr(self, name, value)
+
+
+class _StubRequest:
+    """Records every request.set(field, value) call so a test can assert on it."""
+
+    def __init__(self, name):
+        self.name = name
+        self.sets = {}
+        self._elements = {}
+
+    def set(self, field, value):
+        self.sets[field] = value
+
+    def getElement(self, name):
+        return self._elements.setdefault(name, _StubElement())
+
+
+class _StubService:
+    def createRequest(self, name):
+        return _StubRequest(name)
+
+
+ADJUSTMENT_FLAGS = (
+    "adjustmentNormal", "adjustmentAbnormal", "adjustmentSplit", "adjustmentFollowDPDF")
+
+
+class BuildRequestTests(unittest.TestCase):
+    """P0 3.1: without these four flags a stored price follows the Terminal's
+    DPDF<GO> setting and is not reproducible. This is the task's highest-value
+    four lines -- deleting them breaks nothing else, so they need their own
+    test rather than relying on incidental coverage elsewhere.
+    """
+
+    def test_history_request_forces_all_four_adjustment_flags_false(self):
+        spec = {"kind": "history", "securities": ["AAPL US Equity"], "fields": ["PX_LAST"],
+                "start": "20260801", "end": "20260801"}
+        req = blp_fetch.build_request(None, _StubService(), spec)
+        for flag in ADJUSTMENT_FLAGS:
+            self.assertIn(flag, req.sets, f"{flag} was never set on the history request")
+            self.assertIs(req.sets[flag], False, f"{flag} must be exactly False")
+
+    def test_reference_request_does_not_set_adjustment_flags(self):
+        # Adjustment only means anything for a time series; a reference (BDP)
+        # request has no history to adjust.
+        spec = {"kind": "reference", "securities": ["AAPL US Equity"], "fields": ["NAME"],
+                "obs_date": "2026-08-01"}
+        req = blp_fetch.build_request(None, _StubService(), spec)
+        for flag in ADJUSTMENT_FLAGS:
+            self.assertNotIn(flag, req.sets)
+
+
 class RealEodTests(unittest.TestCase):
     """Live capture: 2 securities x 2 history fields + NAME, obs_date 2026-08-17."""
 
