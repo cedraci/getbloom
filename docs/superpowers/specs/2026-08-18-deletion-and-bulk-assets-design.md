@@ -197,6 +197,41 @@ membership changes, retires, and purges. All rows land or none do.
    removal count** to confirm.
 3. **Each removal carries its own Retire-or-Purge choice** in the diff screen,
    defaulting to Retire.
+4. **Apply refuses any removal the caller did not review.** Every id in the
+   fresh plan's removals must carry an explicit mode. Without this, an asset
+   created by another writer between preview and apply -- absent from the
+   sheet, therefore a removal, and never something the user looked at -- would
+   fall back to Retire silently.
+
+### 8.2 The workbook is rewritten after a successful apply
+
+A blank-id row is an add, and the id the database assigns it exists nowhere in
+the file. If the file were left as the user saved it, the next preview would
+read that newly created asset as *both* an invalid duplicate claim on its own
+security *and* a removal, because its id never appears in the sheet. So a
+successful apply rewrites the workbook over the same path with the committed
+state, and the new ids land in the file.
+
+Two consequences, both of which the UI must handle:
+
+- **The rewrite is best-effort and never fails the import.** The file is
+  frequently locked -- the user's own copy open in Excel is the ordinary case
+  on Windows -- and by the time the rewrite runs the transaction has already
+  committed. `ImportResult.workbook_refreshed` reports it. False means the
+  import succeeded and only the file is stale; it must be surfaced as a notice
+  telling the user to close Excel and export again, never as a failed import.
+  Telling a user their import failed when it did not leads them to "fix" the
+  sheet by deleting the row they just added, which then proposes deleting the
+  asset they just created.
+- **A copy already open in Excel is now stale even on success.** The file on
+  disk has been replaced; the window the user is looking at has not. One
+  Ctrl-S from that window restores the blank-id row and puts them back in the
+  case above. The import screen should tell the user to close and reopen the
+  workbook after a successful import.
+
+Neither state is destructive: the invalid-row message names the owning asset
+and says to export again, and guardrail 4 means the orphaned asset can only be
+removed by someone explicitly choosing to.
 
 ## 9. Error handling
 
