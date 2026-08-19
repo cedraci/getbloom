@@ -163,6 +163,17 @@ async fn view_fields_falls_back_to_class_fields() {
     assert!(fs.iter().any(|x| x.id == f.id));
 }
 
+/// Rewritten for Task 13B: `ingest.rs` documents that it deliberately replaced
+/// an `ON CONFLICT DO UPDATE` (silent overwrite) with close-and-insert --
+/// exactly the "never overwrite an observation" global constraint this branch
+/// exists to enforce. The old assertion here counted every row for
+/// (instrument, field) with no `system_to` filter, which was correct only
+/// under the old overwrite-in-place behaviour: a second ingest with a changed
+/// value now leaves TWO rows on disk (one closed, one current), not one. The
+/// intent -- "ingesting the same fact twice converges to one current value,
+/// never a duplicate" -- is unchanged; the assertion is rewritten to check
+/// the current row only, and to assert the superseded row survives instead
+/// of being silently overwritten.
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn ingest_twice_converges_no_duplicates() {
@@ -197,11 +208,13 @@ async fn ingest_twice_converges_no_duplicates() {
         problems: vec![],
     };
     ingest::ingest_outcome(&pool, run_id, &mk(100.0)).await.unwrap();
-    ingest::ingest_outcome(&pool, run_id, &mk(101.5)).await.unwrap(); // re-run: update, not dup
+    ingest::ingest_outcome(&pool, run_id, &mk(101.5)).await.unwrap(); // re-run: converges, not dup
 
+    // Never a duplicate CURRENT row for the same logical series.
     let (count, val): (i64, f64) = sqlx::query_as(
         "SELECT count(*)::bigint, max(value_num)
-         FROM observation WHERE instrument_id = $1 AND field_id = $2",
+         FROM observation
+         WHERE instrument_id = $1 AND field_id = $2 AND system_to = 'infinity'",
     )
     .bind(entry.instrument_id)
     .bind(f.id)
@@ -210,6 +223,20 @@ async fn ingest_twice_converges_no_duplicates() {
     .unwrap();
     assert_eq!(count, 1);
     assert_eq!(val, 101.5);
+
+    // The corrected value is superseded, never overwritten: the append-only
+    // history stays on disk under a closed system_to.
+    let (superseded,): (i64,) = sqlx::query_as(
+        "SELECT count(*)::bigint FROM observation
+         WHERE instrument_id = $1 AND field_id = $2 AND system_to <> 'infinity'",
+    )
+    .bind(entry.instrument_id)
+    .bind(f.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(superseded, 1,
+               "a corrected value must close system_to on the old row, never overwrite it");
 }
 
 // A fetcher that returns canned data. This is the payoff of the reshaped
