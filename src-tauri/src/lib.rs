@@ -81,6 +81,8 @@ pub fn run() {
             commands::delete_asset, commands::delete_field, commands::delete_view,
             commands::delete_asset_class, commands::delete_schedule,
             commands::get_settings, commands::save_settings,
+            commands::export_assets_xlsx, commands::preview_assets_import,
+            commands::apply_assets_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

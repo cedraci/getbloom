@@ -45,6 +45,34 @@ export interface DeletionImpact {
 }
 export interface AppConfig { data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string; }
 
+export interface AssetRef { id: number; label: string; security: string; }
+export interface AddRow {
+  row_number: number; label: string; class: string; id_kind: string;
+  ticker: string; isin: string; yellow_key: string; active: boolean;
+  security: string; views: string[];
+}
+export interface EditRow {
+  id: number; row_number: number; label: string; class: string; id_kind: string;
+  ticker: string; isin: string; yellow_key: string; security: string; changed: string[];
+}
+export interface MembershipChange {
+  id: number; label: string; added: string[]; removed: string[];
+}
+export interface InvalidRow { row_number: number; reason: string; }
+export interface ImportPlan {
+  file_hash: string; has_id_column: boolean;
+  adds: AddRow[]; edits: EditRow[];
+  retires: AssetRef[]; reactivations: AssetRef[];
+  membership_changes: MembershipChange[]; removals: AssetRef[];
+  invalid_rows: InvalidRow[];
+  active_asset_count: number; requires_typed_confirmation: boolean;
+}
+export interface ImportResult {
+  added: number; edited: number; retired: number;
+  reactivated: number; membership_assets_updated: number; removed: number;
+  workbook_refreshed: boolean;
+}
+
 export const api = {
   listAssetClasses: () => invoke<AssetClass[]>("list_asset_classes"),
   createAssetClass: (name: string, description: string) =>
@@ -85,4 +113,11 @@ export const api = {
   deleteSchedule: (id: number) => invoke<void>("delete_schedule", { id }),
   getSettings: () => invoke<AppConfig>("get_settings"),
   saveSettings: (cfg: AppConfig) => invoke<void>("save_settings", { cfg }),
+  exportAssetsXlsx: (path: string) => invoke<void>("export_assets_xlsx", { path }),
+  previewAssetsImport: (path: string) => invoke<ImportPlan>("preview_assets_import", { path }),
+  applyAssetsImport: (path: string, fileHash: string,
+                      removalModes: [number, DeleteMode][],
+                      confirmedRemovalCount: number | null) =>
+    invoke<ImportResult>("apply_assets_import",
+      { path, fileHash, removalModes, confirmedRemovalCount }),
 };

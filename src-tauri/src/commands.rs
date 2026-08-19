@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::orchestrator::{self, PipelineConfig, RunOutcome};
 use crate::scheduler::previous_weekday;
-use crate::{budget, deletion, fields, registry, scheduler, views};
+use crate::{budget, bulk, deletion, fields, registry, scheduler, views};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -341,4 +341,30 @@ pub async fn delete_asset_class(state: State<'_, AppState>, id: i64)
 pub async fn delete_schedule(state: State<'_, AppState>, id: i64)
     -> Result<(), AppError> {
     deletion::delete_schedule(&state.pool, id).await
+}
+
+// ---------------------------------------------------------------------------
+// Bulk assets
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn export_assets_xlsx(state: State<'_, AppState>, path: String)
+    -> Result<(), AppError> {
+    bulk::export_assets_xlsx(&state.pool, &PathBuf::from(path)).await
+}
+
+#[tauri::command]
+pub async fn preview_assets_import(state: State<'_, AppState>, path: String)
+    -> Result<bulk::diff::ImportPlan, AppError> {
+    bulk::preview_import(&state.pool, &PathBuf::from(path)).await
+}
+
+#[tauri::command]
+pub async fn apply_assets_import(state: State<'_, AppState>, path: String,
+                                 file_hash: String,
+                                 removal_modes: Vec<(i64, deletion::DeleteMode)>,
+                                 confirmed_removal_count: Option<i64>)
+    -> Result<bulk::ImportResult, AppError> {
+    bulk::apply_import(&state.pool, &PathBuf::from(path), &file_hash,
+                       &removal_modes, confirmed_removal_count).await
 }
