@@ -209,34 +209,67 @@ pub async fn current_security(pool: &PgPool, instrument_id: i64, as_of: NaiveDat
 
 /// Record an attribute for a validity period.
 ///
-/// Two different things can be true when this is called, and both must be
-/// handled, because they mean different things for history:
-///   - a real-world change: `valid_from` lands inside a still-open prior
-///     period, so that period's end is now known -- close its `valid_to`.
-///   - a correction: we already asserted something for this exact
-///     `valid_from` and it was wrong -- supersede it (`system_to`), never
-///     move a boundary.
-/// If the incoming value is identical to what is already current for that
-/// exact period, the call is a no-op: superseding to write the same value
-/// again would only add noise to history.
+/// Two different things can be true when this is called, and they must be
+/// told apart by whether a row already exists for this EXACT `valid_from`,
+/// not by call order (Task 7 can resolve the same instrument twice with
+/// `valid_from` derived from a listing date that starts absent and later
+/// appears, producing calls in either chronological order):
+///   - a correction: a row for this exact `valid_from` already exists. We
+///     already asserted something for this period and it was wrong --
+///     supersede it (`system_to`) and insert the fix, inheriting the
+///     superseded row's `valid_to` unchanged. Never move a boundary here --
+///     if the new row instead took `forever()`, correcting the middle of a
+///     timeline would silently swallow every period after it. If the
+///     incoming value is identical to what is already current, the call is a
+///     no-op: superseding to write the same value again would only add
+///     noise to history.
+///   - a real-world change: no row exists for this exact `valid_from`, so
+///     this is a new period, arriving either after or before what is
+///     already known. Its boundaries are computed, not assumed, so that
+///     periods stay non-overlapping regardless of the order calls arrive in:
+///       - if a still-open prior period contains this start
+///         (`valid_from < new AND valid_to > new`), that period's end is now
+///         known -- close it at `new`.
+///       - the new row's own `valid_to` is capped at the earliest existing
+///         `valid_from` strictly after it, if any, else `forever()`. Without
+///         this cap, a period inserted BEFORE an existing later one would
+///         stay open-ended and overlap it -- exactly the "two open rows, no
+///         tiebreak" bug this cap exists to rule out by construction.
 pub async fn set_attr(tx: &mut Tx<'_>, instrument_id: i64, attr: &str, value: &str,
                       valid_from: NaiveDate, source: &str, decision_id: Option<i64>)
     -> AppResult<()>
 {
-    let current: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM instrument_attr
+    let existing: Option<(String, NaiveDate)> = sqlx::query_as(
+        "SELECT value, valid_to FROM instrument_attr
           WHERE instrument_id = $1 AND attr = $2 AND valid_from = $3
             AND system_to = 'infinity'")
         .bind(instrument_id).bind(attr).bind(valid_from)
         .fetch_optional(&mut **tx).await?;
-    if current.as_deref() == Some(value) {
+
+    if let Some((existing_value, existing_valid_to)) = existing {
+        // Correction: same exact period. A no-op if nothing actually changed.
+        if existing_value == value {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE instrument_attr SET system_to = now()
+              WHERE instrument_id = $1 AND attr = $2 AND valid_from = $3
+                AND system_to = 'infinity'")
+            .bind(instrument_id).bind(attr).bind(valid_from)
+            .execute(&mut **tx).await?;
+        sqlx::query(
+            "INSERT INTO instrument_attr
+               (instrument_id, attr, value, valid_from, valid_to, source, decision_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(instrument_id).bind(attr).bind(value).bind(valid_from)
+            .bind(existing_valid_to).bind(source).bind(decision_id)
+            .execute(&mut **tx).await?;
         return Ok(());
     }
 
-    // Real-world change: $3 (valid_from) appears three times -- as the new
-    // end date, and in the bounds check for "a period that was still open
-    // when this one begins". A row with valid_from == $3 is the correction
-    // case below, not this one, so it is deliberately excluded here.
+    // Real-world change: a new period, in either chronological direction.
+    // $3 (valid_from) appears three times below -- as the new end date for a
+    // still-open period it lands inside, and in that period's own bounds check.
     sqlx::query(
         "UPDATE instrument_attr SET valid_to = $3
           WHERE instrument_id = $1 AND attr = $2 AND system_to = 'infinity'
@@ -244,21 +277,23 @@ pub async fn set_attr(tx: &mut Tx<'_>, instrument_id: i64, attr: &str, value: &s
         .bind(instrument_id).bind(attr).bind(valid_from)
         .execute(&mut **tx).await?;
 
-    // Correction: same period, different (or first) value.
-    sqlx::query(
-        "UPDATE instrument_attr SET system_to = now()
-          WHERE instrument_id = $1 AND attr = $2 AND valid_from = $3
-            AND system_to = 'infinity'")
+    // Cap the new period at whatever already-known period follows it, so an
+    // insert into the middle (or before the earliest known period) cannot
+    // overlap what comes after it.
+    let next_start: Option<NaiveDate> = sqlx::query_scalar(
+        "SELECT min(valid_from) FROM instrument_attr
+          WHERE instrument_id = $1 AND attr = $2 AND system_to = 'infinity'
+            AND valid_from > $3")
         .bind(instrument_id).bind(attr).bind(valid_from)
-        .execute(&mut **tx).await?;
-    // valid_to is bound explicitly (forever(), not the column default) for the
-    // same reason insert_alias does -- see the comment on forever().
+        .fetch_one(&mut **tx).await?;
+    let valid_to = next_start.unwrap_or_else(forever);
+
     sqlx::query(
         "INSERT INTO instrument_attr
            (instrument_id, attr, value, valid_from, valid_to, source, decision_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7)")
         .bind(instrument_id).bind(attr).bind(value).bind(valid_from)
-        .bind(forever()).bind(source).bind(decision_id)
+        .bind(valid_to).bind(source).bind(decision_id)
         .execute(&mut **tx).await?;
     Ok(())
 }

@@ -251,6 +251,68 @@ async fn setting_an_identical_attribute_value_for_the_same_period_is_a_no_op() {
     assert_eq!(total, 1, "an identical re-assertion must not write a second row");
 }
 
+/// Call order must not matter: writing the later period first, then the
+/// earlier one, must still leave two non-overlapping periods with a shared
+/// boundary -- not two rows that are both open-ended. Task 7's bind_identity
+/// reaches exactly this ordering when a listing date starts absent (so
+/// valid_from defaults to today) and a re-resolution later supplies the real,
+/// earlier date.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn setting_an_attribute_for_an_earlier_period_after_a_later_one_still_closes_correctly() {
+    let pool = common::pool().await;
+    let inst = store::create(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "META PLATFORMS INC",
+                    d("2022-06-09"), "bloomberg", None).await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "FACEBOOK INC",
+                    d("2012-05-18"), "bloomberg", None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let early = store::attrs(&pool, inst.instrument_id, d("2015-01-01")).await.unwrap();
+    let early_names: Vec<&str> = early.iter().filter(|a| a.attr == "name")
+        .map(|a| a.value.as_str()).collect();
+    assert_eq!(early_names, ["FACEBOOK INC"], "exactly one row covers the earlier date");
+
+    let late = store::attrs(&pool, inst.instrument_id, d("2026-01-01")).await.unwrap();
+    let late_names: Vec<&str> = late.iter().filter(|a| a.attr == "name")
+        .map(|a| a.value.as_str()).collect();
+    assert_eq!(late_names, ["META PLATFORMS INC"], "exactly one row covers the later date");
+
+    let all = store::attrs(&pool, inst.instrument_id, d("2015-01-01")).await.unwrap();
+    let early_row = all.iter().find(|a| a.attr == "name").unwrap();
+    assert_eq!(early_row.valid_to, d("2022-06-09"),
+               "the earlier row's end must be exactly the later row's start");
+}
+
+/// Three periods written out of order (last, then first, then middle) must
+/// still partition into three clean, non-overlapping periods.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn setting_an_attribute_into_the_middle_of_known_periods_still_partitions_cleanly() {
+    let pool = common::pool().await;
+    let inst = store::create(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "LAST",
+                    d("2020-01-01"), "bloomberg", None).await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "FIRST",
+                    d("2000-01-01"), "bloomberg", None).await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "MIDDLE",
+                    d("2010-01-01"), "bloomberg", None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    fn names(rows: &[store::Attr]) -> Vec<&str> {
+        rows.iter().filter(|a| a.attr == "name").map(|a| a.value.as_str()).collect()
+    }
+
+    let in_first = store::attrs(&pool, inst.instrument_id, d("2005-01-01")).await.unwrap();
+    assert_eq!(names(&in_first), ["FIRST"]);
+    let in_middle = store::attrs(&pool, inst.instrument_id, d("2015-01-01")).await.unwrap();
+    assert_eq!(names(&in_middle), ["MIDDLE"]);
+    let in_last = store::attrs(&pool, inst.instrument_id, d("2025-01-01")).await.unwrap();
+    assert_eq!(names(&in_last), ["LAST"]);
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn the_current_security_string_is_derived_not_stored() {
