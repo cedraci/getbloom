@@ -10,6 +10,7 @@ pub mod fields;
 pub mod ingest;
 pub mod orchestrator;
 pub mod registry;
+pub mod resolution;
 pub mod scheduler;
 pub mod views;
 
