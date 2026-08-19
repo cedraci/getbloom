@@ -29,12 +29,21 @@ pub fn build_args(script: &Path, raw_out: Option<&Path>) -> Vec<String> {
 }
 
 /// The protocol is "last JSON line of stdout"; everything else on stdout is
-/// noise and diagnostics belong on stderr.
-pub fn parse_response(stdout: &str) -> Option<SidecarResponse> {
+/// noise and diagnostics belong on stderr. `log()` in the sidecar writes to
+/// stderr only, so today exactly one line ever reaches stdout -- but nothing
+/// enforces that upstream, and a stray future `print` must degrade into
+/// "ignored noise" rather than "unparseable response" for either caller.
+/// Both `run_fetch` and `run_raw` share this scan so that guarantee holds for
+/// both, not just the one path someone remembered to test.
+fn last_json_line<T: serde::de::DeserializeOwned>(stdout: &str) -> Option<T> {
     stdout
         .lines()
         .rev()
-        .find_map(|l| serde_json::from_str::<SidecarResponse>(l.trim()).ok())
+        .find_map(|l| serde_json::from_str::<T>(l.trim()).ok())
+}
+
+pub fn parse_response(stdout: &str) -> Option<SidecarResponse> {
+    last_json_line(stdout)
 }
 
 /// Reject a response that reports success while saying nothing at all.
@@ -148,8 +157,8 @@ pub async fn run_raw(
     payload: &serde_json::Value,
 ) -> AppResult<serde_json::Value> {
     let text = run_sidecar_text(python_path, script_path, payload, None).await?;
-    serde_json::from_str(&text)
-        .map_err(|e| AppError::Sidecar(format!("sidecar returned invalid JSON: {e}")))
+    last_json_line(&text).ok_or_else(|| AppError::Sidecar(
+        "sidecar returned invalid JSON: no JSON line found on stdout".into()))
 }
 
 #[cfg(test)]

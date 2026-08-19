@@ -21,9 +21,10 @@ use serde::{Deserialize, Serialize};
 /// session, updating in realtime. Requesting it would spend a call on a value
 /// that is stale on arrival and meaningless to store. INACTIVE_DATE, below,
 /// answers the question it was recruited for, with a date instead of a mood.
-pub const IDENTITY_FIELDS: [&str; 11] = [
+pub const IDENTITY_FIELDS: [&str; 12] = [
     "ID_BB_GLOBAL",
     "ID_BB_GLOBAL_SHARE_CLASS_LEVEL",
+    "ID_BB_UNIQUE",
     "ID_ISIN",
     "EXCH_CODE",
     "CRNCY",
@@ -363,6 +364,7 @@ mod tests {
             "fieldExceptions": [], "sequenceNumber": 0,
             "fieldData": {
                 "ID_BB_GLOBAL": "BBG000B9XRY4",
+                "ID_BB_UNIQUE": "EQ0010169500001000",
                 "ID_ISIN": "US0378331005",
                 "EXCH_CODE": "US",
                 "CRNCY": "USD",
@@ -377,6 +379,8 @@ mod tests {
         let b = &blocks[0];
         assert_eq!(b.security, "AAPL US Equity");
         assert_eq!(b.figi.as_deref(), Some("BBG000B9XRY4"));
+        assert_eq!(b.bbg_unique.as_deref(), Some("EQ0010169500001000"),
+                   "ID_BB_UNIQUE rides free in the same ReferenceDataRequest");
         assert_eq!(b.listing_date, Some("1980-12-12".parse().unwrap()));
         assert_eq!(b.inactive_date, None, "an absent field is None, never a default");
         assert_eq!(b.status, None);
@@ -420,5 +424,30 @@ mod tests {
         let rows = mock.hist_ids("META US Equity", "META US Equity",
                                  "2000-01-01".parse().unwrap()).await.unwrap();
         assert_eq!(rows[0].new_id, "META");
+    }
+
+    /// "A refused request must not cost a Bloomberg hit." A blank anchor is
+    /// rejected before the mock records anything -- call_count staying 0 is
+    /// the whole assertion.
+    #[tokio::test]
+    async fn a_blank_anchor_is_refused_before_any_call_is_recorded() {
+        let mock = MockMasterFetcher::from_capture(HISTIDS);
+        let result = mock.hist_ids("META US Equity", "   ",
+                                   "2000-01-01".parse().unwrap()).await;
+        assert!(result.is_err());
+        assert_eq!(mock.call_count(), 0,
+                   "a rejected request must not reach the mock's call log, \
+                    which stands in for the Bloomberg wire");
+    }
+
+    /// Task 7's local-resolution test asserts Bloomberg was NOT called by
+    /// reading this counter; this pins that it counts correctly in the first
+    /// place.
+    #[tokio::test]
+    async fn call_count_tracks_every_recorded_call() {
+        let mock = MockMasterFetcher::from_capture(HISTIDS);
+        mock.identity(&["AAPL US Equity".to_string()]).await.unwrap();
+        mock.instrument_list("AAPL", None, 20).await.unwrap();
+        assert_eq!(mock.call_count(), 2);
     }
 }
