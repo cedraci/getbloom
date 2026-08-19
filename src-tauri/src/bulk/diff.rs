@@ -182,6 +182,20 @@ pub fn diff(
             }
         };
 
+        // An instrument whose current security round-tripped blank
+        // (`load_db_instruments`: no alias valid today, so export honestly
+        // wrote empty identifier/yellow_key rather than fabricate one) is not
+        // a validation failure -- it is the export saying "I could not
+        // express this one." Leave it alone entirely: no edit, no removal, no
+        // invalid-row noise from a row the user never meaningfully touched.
+        // Presence is already registered above, so guardrail 1 still leaves
+        // it out of the removal pass.
+        if let Some(cur) = existing {
+            if cur.identifier.is_empty() {
+                continue;
+            }
+        }
+
         if r.label.is_empty() {
             plan.invalid_rows.push(InvalidRow {
                 row_number: r.row_number,
@@ -218,7 +232,13 @@ pub fn diff(
         // A security that belongs to a DIFFERENT instrument means this row is
         // trying to rebind an existing instrument's identity onto one it does
         // not own. The same instrument keeping its own security is fine.
-        if let Some(owner) = db.iter().find(|a| a.security == security) {
+        // Case-insensitive, matching the identity-change check below: a
+        // blank-id row spelled in a different case than the book's own
+        // record of the same security must still be caught here, not slip
+        // through into `plan.adds` and have `book::add`'s
+        // `ON CONFLICT (instrument_id) DO UPDATE` silently overwrite the
+        // existing entry's label and force-reactivate it.
+        if let Some(owner) = db.iter().find(|a| a.security.eq_ignore_ascii_case(&security)) {
             if Some(owner.instrument_id) != r.instrument_id {
                 plan.invalid_rows.push(InvalidRow {
                     row_number: r.row_number,
@@ -452,6 +472,83 @@ mod tests {
         let plan = diff(&sheet, &db, &["Equity".into()], &[], "hash");
         assert_eq!(plan.edits.len(), 1);
         assert!(plan.invalid_rows.is_empty());
+    }
+
+    /// Deviation 2's entire justification: `AAPL US Equity` -> `AAPL US Corp`
+    /// is a different security even though the identifier column never
+    /// changed, and there is no UPDATE path for it -- book_entry stores no
+    /// identity fields at all. Must be rejected the same way a changed
+    /// identifier is, not silently accepted as a label/class-only edit.
+    #[test]
+    fn a_yellow_key_only_change_is_rejected_as_an_identity_change() {
+        let db = vec![DbInstrument { instrument_id: 7, label: "Apple".into(),
+            class: "Equity".into(), identifier: "AAPL US".into(),
+            yellow_key: "Equity".into(), active: true,
+            security: "AAPL US Equity".into(), views: vec![] }];
+        let sheet = SheetData { has_id_column: true, view_columns: vec![],
+            rows: vec![SheetRow { row_number: 2, instrument_id: Some(7),
+                label: "Apple".into(), class: "Equity".into(),
+                identifier: "AAPL US".into(), yellow_key: "Corp".into(),
+                active: true, views: vec![] }] };
+        let plan = diff(&sheet, &db, &["Equity".into()], &[], "hash");
+        assert_eq!(plan.invalid_rows.len(), 1);
+        assert!(plan.invalid_rows[0].reason.contains("identifier"));
+        assert!(plan.edits.is_empty());
+    }
+
+    /// Important finding 1: `load_db_instruments` writes a blank
+    /// identifier/yellow_key when an instrument has no security valid today
+    /// (see its own doc comment) -- honest, not a validation failure. A
+    /// re-import of that row unchanged must be a complete no-op: no edit, no
+    /// removal, no invalid row.
+    #[test]
+    fn an_instrument_with_no_current_security_round_trips_as_a_no_op() {
+        let db = vec![DbInstrument { instrument_id: 9, label: "Delisted Co".into(),
+            class: "Equity".into(), identifier: String::new(),
+            yellow_key: String::new(), active: false,
+            security: String::new(), views: vec![] }];
+        let sheet = SheetData { has_id_column: true, view_columns: vec![],
+            rows: vec![SheetRow { row_number: 2, instrument_id: Some(9),
+                label: "Delisted Co".into(), class: "Equity".into(),
+                identifier: String::new(), yellow_key: String::new(),
+                active: false, views: vec![] }] };
+        let plan = diff(&sheet, &db, &["Equity".into()], &[], "hash");
+        assert!(plan.invalid_rows.is_empty(), "got {:?}", plan.invalid_rows);
+        assert!(plan.adds.is_empty());
+        assert!(plan.edits.is_empty());
+        assert!(plan.removals.is_empty());
+        assert!(plan.retires.is_empty());
+        assert!(plan.reactivations.is_empty());
+    }
+
+    /// Important finding 2: the owner-collision check must be
+    /// case-insensitive, matching the identity-change check -- otherwise a
+    /// blank-id row spelled in a different case than the book's own record
+    /// slips into `plan.adds`, and `book::add`'s
+    /// `ON CONFLICT (instrument_id) DO UPDATE ... SET active = TRUE` would
+    /// silently rename and force-reactivate an entry the user deliberately
+    /// retired, reporting it as "added".
+    #[test]
+    fn a_differently_cased_identifier_for_an_existing_entry_is_recognised_not_added() {
+        let mut retired = db_apple();
+        retired.active = false;
+        let db = vec![retired];
+
+        // Lowercase identifier, blank instrument_id: looks like a fresh add,
+        // but resolves to the same security (case-insensitively) as the
+        // retired Apple entry.
+        let lowercase_add = SheetRow {
+            row_number: 2, instrument_id: None, label: "Apple (retyped)".into(),
+            class: "Equity".into(), identifier: "aapl us".into(),
+            yellow_key: "equity".into(), active: true, views: vec![],
+        };
+        let p = diff(&sheet(vec![lowercase_add], true), &db, &classes(), &views(), "h");
+        assert!(p.adds.is_empty(),
+                "a different-case spelling of an existing security must not be proposed \
+                 as an add, got {:?}", p.adds);
+        assert_eq!(p.invalid_rows.len(), 1);
+        assert!(p.invalid_rows[0].reason.contains("already belongs to instrument #1"),
+                "got {:?}", p.invalid_rows[0].reason);
     }
 
     #[test]

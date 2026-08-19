@@ -86,8 +86,17 @@ pub fn write_assets_sheet(
     // Dropdowns turn the most typo-prone columns into pick lists.
     let last = rows.len().max(1) as u32;
     let classes: Vec<&str> = class_names.iter().map(String::as_str).collect();
-    let dv_class = DataValidation::new().allow_list_strings(&classes).map_err(xlsx_err)?;
-    sheet.add_data_validation(1, 2, last, 2, &dv_class).map_err(xlsx_err)?;
+    // Excel's inline list-validation formula is capped at 255 characters,
+    // commas included. A book with enough asset classes to exceed that is a
+    // cosmetic-pick-list problem, not a reason to fail the whole export --
+    // the class itself is still validated for real in `diff::diff` against
+    // the database, never by this dropdown. Skip it rather than error out.
+    let class_list_len: usize =
+        classes.iter().map(|c| c.len() + 1).sum::<usize>().saturating_sub(1);
+    if !classes.is_empty() && class_list_len <= 255 {
+        let dv_class = DataValidation::new().allow_list_strings(&classes).map_err(xlsx_err)?;
+        sheet.add_data_validation(1, 2, last, 2, &dv_class).map_err(xlsx_err)?;
+    }
     let dv_active = DataValidation::new()
         .allow_list_strings(&["yes", "no"]).map_err(xlsx_err)?;
     sheet.add_data_validation(1, 5, last, 5, &dv_active).map_err(xlsx_err)?;

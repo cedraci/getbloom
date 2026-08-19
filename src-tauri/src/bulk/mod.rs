@@ -40,8 +40,13 @@ pub struct ImportResult {
     pub removed: i64,
     /// A row that resolved ambiguously and opened a review instead of binding
     /// (spec §8). Not a failure: a book of two hundred lines must not stop
-    /// dead because one line is ambiguous.
+    /// dead because one line is ambiguous. Carried back into the rewritten
+    /// workbook (see `export_book_with_pending`), marked "needs review".
     pub reviews_opened: usize,
+    /// A row Bloomberg had nothing for at all (`AddOutcome::NotFound`) --
+    /// neither bound nor ambiguous. Also carried back into the rewritten
+    /// workbook, marked "not found", rather than silently dropped.
+    pub not_found: usize,
     /// Whether the post-commit re-export of the workbook (see `apply_import`)
     /// actually landed on disk. `false` means the committed changes are real
     /// but the file the user is looking at is now stale and must be
@@ -112,23 +117,47 @@ async fn class_names(pool: &PgPool) -> AppResult<Vec<String>> {
     Ok(rows.into_iter().map(|(n,)| n).collect())
 }
 
-pub async fn export_assets_xlsx(pool: &PgPool, path: &Path) -> AppResult<()> {
-    let instruments = load_db_instruments(pool).await?;
-    let views = view_names(pool).await?;
-    let classes = class_names(pool).await?;
-    let rows: Vec<ExportRow> = instruments.into_iter().map(|a| {
-        // `status` is written for the reader only, never read back: every row
-        // here already lives in book_entry, so "unresolved" means only that
-        // its security has no alias valid today (e.g. delisted), not that it
-        // is awaiting a review -- a raw input still `pending` in
-        // resolution_review never made it into book_entry in the first place.
+/// Every book entry, in the shape the sheet writes. `status` is written for
+/// the reader only, never read back: every row here already lives in
+/// book_entry, so "unresolved" means only that its security has no alias
+/// valid today (e.g. delisted), not that it is awaiting a review -- a raw
+/// input still `pending` in resolution_review never made it into book_entry
+/// in the first place.
+fn book_export_rows(instruments: Vec<DbInstrument>) -> Vec<ExportRow> {
+    instruments.into_iter().map(|a| {
         let status = if a.security.is_empty() { "unresolved" } else { "resolved" }.to_string();
         ExportRow {
             instrument_id: a.instrument_id, label: a.label, class: a.class,
             identifier: a.identifier, yellow_key: a.yellow_key, active: a.active,
             security: a.security, status, views: a.views,
         }
-    }).collect();
+    }).collect()
+}
+
+pub async fn export_assets_xlsx(pool: &PgPool, path: &Path) -> AppResult<()> {
+    let instruments = load_db_instruments(pool).await?;
+    let views = view_names(pool).await?;
+    let classes = class_names(pool).await?;
+    let rows = book_export_rows(instruments);
+    sheet::write_assets_sheet(path, &rows, &views, &classes)
+}
+
+/// Same as `export_assets_xlsx`, plus `pending` rows appended verbatim --
+/// rows this apply just processed that did NOT become book entries (an
+/// ambiguous row that opened a review, or one Bloomberg had nothing for).
+/// Used only by `apply_import_with`'s post-commit rewrite: without this, the
+/// rewrite -- which replaces the user's whole file with a full book export --
+/// would silently erase the only record the user had of exactly those rows,
+/// defeating the workbook's job as the migration tool (see the doc comment on
+/// `apply_import_with`).
+async fn export_book_with_pending(pool: &PgPool, path: &Path, pending: Vec<ExportRow>)
+    -> AppResult<()>
+{
+    let instruments = load_db_instruments(pool).await?;
+    let views = view_names(pool).await?;
+    let classes = class_names(pool).await?;
+    let mut rows = book_export_rows(instruments);
+    rows.extend(pending);
     sheet::write_assets_sheet(path, &rows, &views, &classes)
 }
 
@@ -169,10 +198,16 @@ pub async fn preview_import(pool: &PgPool, path: &Path) -> AppResult<ImportPlan>
 /// deliberately NOT part of the transaction below: an ambiguous row must open
 /// a review and tally into `ImportResult.reviews_opened`, not roll back a
 /// book of two hundred lines because one line could not be bound (spec §8).
-/// A row Bloomberg has nothing for (`AddOutcome::NotFound`) is skipped the
-/// same way -- not an ambiguity, and not a reason to abort either; the row
-/// stays on disk in the sheet for the user to fix or remove on the next round
-/// trip.
+/// A row Bloomberg has nothing for (`AddOutcome::NotFound`) is handled the
+/// same way and tallies into `ImportResult.not_found`.
+///
+/// Neither outcome becomes a book entry, but both are real input the user
+/// typed and neither may vanish. Each is kept, verbatim (identifier, yellow
+/// key, label, class, views), and carried into the post-commit rewrite below
+/// via `export_book_with_pending` -- the row really does "stay on disk in the
+/// sheet for the user to fix or remove on the next round trip," for an
+/// id-bearing sheet as much as a hand-built one, marked with a `status` of
+/// "needs review" or "not found" so the user knows why it was not added.
 ///
 /// Once the transactional part commits, the workbook is re-exported over
 /// `path` best-effort -- see the comment at that call site for why a failed
@@ -268,6 +303,11 @@ pub async fn apply_import_with<F: MasterFetcher>(
 
     let mut res = ImportResult::default();
 
+    // Rows this apply processed that did NOT become book entries -- carried
+    // verbatim into the post-commit rewrite below, see the doc comment on
+    // this function.
+    let mut carry_forward: Vec<ExportRow> = Vec::new();
+
     // Adds first, and outside the transaction below -- see the doc comment on
     // this function for why. Each row costs Bloomberg calls only through
     // `book::add`/resolution, which already never calls out for a row that
@@ -296,10 +336,21 @@ pub async fn apply_import_with<F: MasterFetcher>(
             }
             AddOutcome::NeedsReview { .. } => {
                 res.reviews_opened += 1;
+                carry_forward.push(ExportRow {
+                    instrument_id: 0, label: a.label.clone(), class: a.class.clone(),
+                    identifier: a.identifier.clone(), yellow_key: a.yellow_key.clone(),
+                    active: a.active, security: String::new(),
+                    status: "needs review".into(), views: a.views.clone(),
+                });
             }
             AddOutcome::NotFound => {
-                // Nothing to bind and nothing to review; see the doc comment
-                // on this function.
+                res.not_found += 1;
+                carry_forward.push(ExportRow {
+                    instrument_id: 0, label: a.label.clone(), class: a.class.clone(),
+                    identifier: a.identifier.clone(), yellow_key: a.yellow_key.clone(),
+                    active: a.active, security: String::new(),
+                    status: "not found".into(), views: a.views.clone(),
+                });
             }
         }
     }
@@ -382,23 +433,33 @@ pub async fn apply_import_with<F: MasterFetcher>(
     // ids to write back, cannot propose a removal under guardrail 1, and its
     // next preview fails loudly with the existing "already belongs to
     // instrument #N ... export it again" invalid-row message rather than
-    // destructively.
+    // destructively. It is also safe for `carry_forward` specifically: the
+    // rows that opened a review or came back not-found are still sitting on
+    // disk in the user's own file, untouched, because nothing about this
+    // branch rewrites it.
     //
-    // When it does run, this MUST be best-effort. The transaction above
-    // already committed (and every add already committed for real through
-    // `book::add`, above): the change is real and the caller must be told it
-    // succeeded no matter what happens next. The file can be locked by the
-    // user's own open copy of it in Excel (a sharing violation, `os error 5`
-    // on Windows) or by anything else transient; none of that may turn a
-    // landed write into a reported failure, which would both lie to the
-    // caller and leave a retry stuck -- a removal-only retry would keep
-    // re-committing an empty transaction and keep failing on the same locked
-    // file forever, and an add-bearing retry would be flatly rejected as
-    // invalid (the blank-id row now collides with the instrument it already
-    // created), reading exactly like "you pasted a duplicate, delete this
-    // row" when the real fix is "export again".
+    // When the rewrite DOES run, `carry_forward` goes with it: those rows
+    // never became book entries, so a plain `export_assets_xlsx` here would
+    // silently erase them from the file the user is looking at, reporting
+    // "N added" while quietly deleting the other M lines the import could not
+    // place -- the exact failure this task exists to prevent, since the
+    // workbook is the only record of a migration in progress. See
+    // `export_book_with_pending`.
+    //
+    // This MUST be best-effort. The transaction above already committed (and
+    // every add already committed for real through `book::add`, above): the
+    // change is real and the caller must be told it succeeded no matter what
+    // happens next. The file can be locked by the user's own open copy of it
+    // in Excel (a sharing violation, `os error 5` on Windows) or by anything
+    // else transient; none of that may turn a landed write into a reported
+    // failure, which would both lie to the caller and leave a retry stuck --
+    // a removal-only retry would keep re-committing an empty transaction and
+    // keep failing on the same locked file forever, and an add-bearing retry
+    // would be flatly rejected as invalid (the blank-id row now collides with
+    // the instrument it already created), reading exactly like "you pasted a
+    // duplicate, delete this row" when the real fix is "export again".
     res.workbook_refreshed = if plan.has_id_column {
-        export_assets_xlsx(pool, path).await.is_ok()
+        export_book_with_pending(pool, path, carry_forward).await.is_ok()
     } else {
         false
     };

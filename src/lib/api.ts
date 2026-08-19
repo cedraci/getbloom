@@ -87,6 +87,7 @@ export interface ImportPlan {
 export interface ImportResult {
   added: number; edited: number; retired: number;
   reactivated: number; membership_assets_updated: number; removed: number;
+  reviews_opened: number; not_found: number;
   workbook_refreshed: boolean;
 }
 

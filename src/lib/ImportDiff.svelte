@@ -24,9 +24,12 @@
     plan.retires.length === 0 && plan.reactivations.length === 0 &&
     plan.membership_changes.length === 0);
 
-  // Renders the six ImportResult counts as a compact, comma-joined clause,
+  // Renders the ImportResult counts as a compact, comma-joined clause,
   // omitting zero terms -- so an import that only added two rows reads as
-  // "2 added", not a wall of "0 edited, 0 retired, ...".
+  // "2 added", not a wall of "0 edited, 0 retired, ...". reviews_opened and
+  // not_found matter as much as added: a row that did not become a book
+  // entry is still carried back into the rewritten workbook (marked "needs
+  // review"/"not found"), and the user needs to know to go look for it.
   function summarizeCounts(res: ImportResult): string {
     const parts: string[] = [];
     if (res.added) parts.push(`${res.added} added`);
@@ -35,6 +38,8 @@
     if (res.reactivated) parts.push(`${res.reactivated} reactivated`);
     if (res.membership_assets_updated) parts.push(`${res.membership_assets_updated} membership update(s)`);
     if (res.removed) parts.push(`${res.removed} removed`);
+    if (res.reviews_opened) parts.push(`${res.reviews_opened} opened for review`);
+    if (res.not_found) parts.push(`${res.not_found} not found`);
     return parts.join(", ");
   }
 
