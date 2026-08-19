@@ -1,0 +1,144 @@
+{
+  "//blp/refdata": {
+    "opened": true,
+    "seconds": 0.19,
+    "error": "",
+    "operations": [
+      "IntradayBarDateTimeChoiceRequest",
+      "PingRequest",
+      "BeqsRequest",
+      "PortfolioDataRequest",
+      "ReferenceDataSlowMtgeRequest",
+      "CustomEqsRequest",
+      "ReferenceDataSlowRequest",
+      "ReferenceDataRequest",
+      "HistoricalDataRequest",
+      "IntradayBarRequest",
+      "IntradayTickRequest"
+    ],
+    "schema_file": "probe_out\\schema_blp_refdata.txt",
+    "schema_bytes": 61944
+  },
+  "//blp/apiflds": {
+    "opened": true,
+    "seconds": 0.17,
+    "error": "",
+    "operations": [
+      "FieldInfoRequest",
+      "FieldSearchRequest",
+      "CategorizedFieldSearchRequest",
+      "FieldListRequest",
+      "APITerminalFieldSearchRequest"
+    ],
+    "schema_file": "probe_out\\schema_blp_apiflds.txt",
+    "schema_bytes": 81916
+  },
+  "//blp/instruments": {
+    "opened": true,
+    "seconds": 0.21,
+    "error": "",
+    "operations": [
+      "instrumentListRequest",
+      "curveListRequest",
+      "govtListRequest"
+    ],
+    "schema_file": "probe_out\\schema_blp_instruments.txt",
+    "schema_bytes": 18558
+  },
+  "//blp/mktdata": {
+    "opened": true,
+    "seconds": 0.19,
+    "error": "",
+    "operations": [],
+    "schema_file": "probe_out\\schema_blp_mktdata.txt",
+    "schema_bytes": 448234
+  },
+  "//blp/mktbar": {
+    "opened": true,
+    "seconds": 0.16,
+    "error": "",
+    "operations": [],
+    "schema_file": "probe_out\\schema_blp_mktbar.txt",
+    "schema_bytes": 9082
+  },
+  "//blp/mktvwap": {
+    "opened": true,
+    "seconds": 0.2,
+    "error": "",
+    "operations": [],
+    "schema_file": "probe_out\\schema_blp_mktvwap.txt",
+    "schema_bytes": 155859
+  },
+  "//blp/mktlist": {
+    "opened": true,
+    "seconds": 0.19,
+    "error": "",
+    "operations": [
+      "SnapshotRequest"
+    ],
+    "schema_file": "probe_out\\schema_blp_mktlist.txt",
+    "schema_bytes": 90875
+  },
+  "//blp/tasvc": {
+    "opened": true,
+    "seconds": 0.18,
+    "error": "",
+    "operations": [
+      "studyRequest"
+    ],
+    "schema_file": "probe_out\\schema_blp_tasvc.txt",
+    "schema_bytes": 138859
+  },
+  "//blp/pagedata": {
+    "opened": true,
+    "seconds": 0.17,
+    "error": "",
+    "operations": [],
+    "schema_file": "probe_out\\schema_blp_pagedata.txt",
+    "schema_bytes": 18901
+  },
+  "//blp/srcref": {
+    "opened": true,
+    "seconds": 0.18,
+    "error": "",
+    "operations": [],
+    "schema_file": "probe_out\\schema_blp_srcref.txt",
+    "schema_bytes": 29285
+  },
+  "//blp/exrsvc": {
+    "opened": true,
+    "seconds": 0.18,
+    "error": "",
+    "operations": [
+      "ExcelGetGridRequest"
+    ],
+    "schema_file": "probe_out\\schema_blp_exrsvc.txt",
+    "schema_bytes": 6818
+  },
+  "//blp/irdctk3": {
+    "opened": true,
+    "seconds": 0.17,
+    "error": "",
+    "operations": [
+      "CreateOrModifyProfile",
+      "DeleteProfile",
+      "EndSession",
+      "GetCurveFwdValues",
+      "GetCurveInterpValues",
+      "GetCurveNameAttributes",
+      "GetCurveNameList",
+      "GetCurveNumList",
+      "GetCurveRecurringFwdValues",
+      "GetPCSList",
+      "GetParCurve",
+      "GetProfileList",
+      "GetSpotCurve",
+      "GetUserDefault",
+      "StartSession",
+      "GetAllCurrency",
+      "GetUserEnablement"
+    ],
+    "schema_file": "probe_out\\schema_blp_irdctk3.txt",
+    "schema_bytes": 610848
+  }
+}

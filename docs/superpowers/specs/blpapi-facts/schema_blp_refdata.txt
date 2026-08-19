@@ -1,0 +1,1431 @@
+Service //blp/refdata
+    Operations = {
+        OPERATION IntradayBarDateTimeChoiceRequest = {
+            Request = {
+                ELEMENT IntradayBarDateTimeChoiceRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE IntradayBarDateTimeChoiceRequest (SEQUENCE) {
+                        DESCRIPTION seqIntradayBarDateTimeChoiceRequest
+                        ELEMENT security {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT eventType {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BarEventType(ENUMERATION) {
+                                DESCRIPTION
+                                BarEventType(STRING) {
+                                    TRADE
+                                    BID
+                                    ASK
+                                }
+                            }
+                        }
+                        ELEMENT interval {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT dateTimeInfo {
+                            DESCRIPTION choice of setting start end datetime or list start datetimes and duration 
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DateTimeInfo (CHOICE) {
+                                DESCRIPTION
+                                ELEMENT dateTimeRange {
+                                    DESCRIPTION provides start/end datetime
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE StartEndDateInterval (SEQUENCE) {
+                                        DESCRIPTION
+                                        ELEMENT startDateTime {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE DATETIME
+                                        }
+                                        ELEMENT endDateTime {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE DATETIME
+                                        }
+                                    }
+                                }
+                                ELEMENT startDateDuration {
+                                    DESCRIPTION provides array of start datetime and duration for every day
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE StartDateRangeDuration (SEQUENCE) {
+                                        DESCRIPTION
+                                        ELEMENT rangeStartDateTimeList {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE DATETIME [] 
+                                        }
+                                        ELEMENT duration {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE INT32
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT gapFillInitialBar {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentNormal {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentAbnormal {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentSplit {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentFollowDPDF {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxDataPoints {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxDataPointsOrigin {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DataPointsOrigin(ENUMERATION) {
+                                DESCRIPTION
+                                DataPointsOrigin(STRING) {
+                                    AT_END_TIME
+                                    AT_START_TIME
+                                }
+                            }
+                        }
+                        ELEMENT intervalHasSeconds {
+                            DESCRIPTION flag that indicates that value of interval is in seconds
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeOutOfSessionBars {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION PingRequest = {
+            Request = {
+                ELEMENT PingRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE PingRequest (SEQUENCE) {
+                        DESCRIPTION seqPingRequest
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION BeqsRequest = {
+            Request = {
+                ELEMENT BeqsRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE BeqsRequest (SEQUENCE) {
+                        DESCRIPTION seqBeqsRequest
+                        ELEMENT screenName {
+                            DESCRIPTION
+                            MIN VALUES 1
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT screenType {
+                            DESCRIPTION
+                            MIN VALUES 1
+                            MAX VALUES 1
+                            TYPE ScreenValues(ENUMERATION) {
+                                DESCRIPTION
+                                ScreenValues(STRING) {
+                                    GLOBAL
+                                    PRIVATE
+                                }
+                            }
+                        }
+                        ELEMENT languageId {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE LanguageType(ENUMERATION) {
+                                DESCRIPTION
+                                LanguageType(STRING) {
+                                    ENGLISH
+                                    KANJI
+                                    FRENCH
+                                    GERMAN
+                                    SPANISH
+                                    PORTUGUESE
+                                    ITALIAN
+                                    CHINESE_TRAD
+                                    KOREAN
+                                    CHINESE_SIMP
+                                    THAI
+                                    SWED
+                                    FINNISH
+                                    DUTCH
+                                    MALAY
+                                    RUSSIAN
+                                    GREEK
+                                    POLISH
+                                    DANISH
+                                    FLEMISH
+                                    ESTONIAN
+                                    TURKISH
+                                    NORWEGIAN
+                                    LATVIAN
+                                    LITHUANIAN
+                                    INDONESIAN
+                                }
+                            }
+                        }
+                        ELEMENT Group {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                        ELEMENT pxnum {
+                            DESCRIPTION Optional Pricing Number
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION PortfolioDataRequest = {
+            Request = {
+                ELEMENT PortfolioDataRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE PortfolioDataRequest (SEQUENCE) {
+                        DESCRIPTION seqPortfolioDataRequest
+                        ELEMENT securities {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT fields {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                        ELEMENT startSequenceNumber {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION ReferenceDataSlowMtgeRequest = {
+            Request = {
+                ELEMENT ReferenceDataRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE ReferenceDataRequest (SEQUENCE) {
+                        DESCRIPTION seqReferenceDataRequest
+                        ELEMENT securities {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT fields {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnFormattedValue {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT startSequenceNumber {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT useUTCTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT tableOverrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverrideTable (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverrideTable
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT row {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE FieldOverrideRow (SEQUENCE)  [] {
+                                        DESCRIPTION seqFieldOverrideRow
+                                        ELEMENT value {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT returnNullValue {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT gfutOption {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE GfutOption (SEQUENCE) {
+                                DESCRIPTION
+                                ELEMENT includeSerialContracts {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BOOL
+                                }
+                            }
+                        }
+                        ELEMENT querySnapshot {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION CustomEqsRequest = {
+            Request = {
+                ELEMENT CustomEqsRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE CustomEqsRequest (SEQUENCE) {
+                        DESCRIPTION seqCustomEqsRequest
+                        ELEMENT securities {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT fields {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT currency {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT startSequenceNumber {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION ReferenceDataSlowRequest = {
+            Request = {
+                ELEMENT ReferenceDataRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE ReferenceDataRequest (SEQUENCE) {
+                        DESCRIPTION seqReferenceDataRequest
+                        ELEMENT securities {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT fields {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnFormattedValue {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT startSequenceNumber {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT useUTCTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT tableOverrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverrideTable (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverrideTable
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT row {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE FieldOverrideRow (SEQUENCE)  [] {
+                                        DESCRIPTION seqFieldOverrideRow
+                                        ELEMENT value {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT returnNullValue {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT gfutOption {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE GfutOption (SEQUENCE) {
+                                DESCRIPTION
+                                ELEMENT includeSerialContracts {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BOOL
+                                }
+                            }
+                        }
+                        ELEMENT querySnapshot {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION ReferenceDataRequest = {
+            Request = {
+                ELEMENT ReferenceDataRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE ReferenceDataRequest (SEQUENCE) {
+                        DESCRIPTION seqReferenceDataRequest
+                        ELEMENT securities {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT fields {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnFormattedValue {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT startSequenceNumber {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT useUTCTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT tableOverrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverrideTable (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverrideTable
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT row {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE FieldOverrideRow (SEQUENCE)  [] {
+                                        DESCRIPTION seqFieldOverrideRow
+                                        ELEMENT value {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT returnNullValue {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT gfutOption {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE GfutOption (SEQUENCE) {
+                                DESCRIPTION
+                                ELEMENT includeSerialContracts {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BOOL
+                                }
+                            }
+                        }
+                        ELEMENT querySnapshot {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION HistoricalDataRequest = {
+            Request = {
+                ELEMENT HistoricalDataRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE HistoricalDataRequest (SEQUENCE) {
+                        DESCRIPTION seqHistoricalDataRequest
+                        ELEMENT securities {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT fields {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT startDate {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT endDate {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT periodicityAdjustment {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE PeriodicityAdjustmentType(ENUMERATION) {
+                                DESCRIPTION
+                                PeriodicityAdjustmentType(STRING) {
+                                    ACTUAL
+                                    CALENDAR
+                                    FISCAL
+                                }
+                            }
+                        }
+                        ELEMENT periodicitySelection {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE PeriodicitySelectionType(ENUMERATION) {
+                                DESCRIPTION
+                                PeriodicitySelectionType(STRING) {
+                                    DAILY
+                                    WEEKLY
+                                    MONTHLY
+                                    QUARTERLY
+                                    SEMI_ANNUALLY
+                                    YEARLY
+                                }
+                            }
+                        }
+                        ELEMENT currency {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT overrideOption {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE OverrideOption(ENUMERATION) {
+                                DESCRIPTION
+                                OverrideOption(STRING) {
+                                    OVERRIDE_OPTION_CLOSE
+                                    OVERRIDE_OPTION_GPA
+                                }
+                            }
+                        }
+                        ELEMENT pricingOption {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE PricingOption(ENUMERATION) {
+                                DESCRIPTION
+                                PricingOption(STRING) {
+                                    PRICING_OPTION_PRICE
+                                    PRICING_OPTION_YIELD
+                                }
+                            }
+                        }
+                        ELEMENT nonTradingDayFillOption {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE NonTradingDayFillOption(ENUMERATION) {
+                                DESCRIPTION
+                                NonTradingDayFillOption(STRING) {
+                                    NON_TRADING_WEEKDAYS
+                                    ALL_CALENDAR_DAYS
+                                    ACTIVE_DAYS_ONLY
+                                }
+                            }
+                        }
+                        ELEMENT nonTradingDayFillMethod {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE NonTradingDayFillMethod(ENUMERATION) {
+                                DESCRIPTION
+                                NonTradingDayFillMethod(STRING) {
+                                    PREVIOUS_VALUE
+                                    NIL_VALUE
+                                    NEXTDAY_VALUE
+                                }
+                            }
+                        }
+                        ELEMENT maxDataPoints {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT returnRelativeDate {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT overrides {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldOverride (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldOverride
+                                ELEMENT fieldId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT value {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                        ELEMENT startSequenceNumber {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT adjustmentNormal {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentAbnormal {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentSplit {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentFollowDPDF {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT calendarCodeOverride {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT calendarOverridesInfo {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE CalendarOverridesInfo (SEQUENCE) {
+                                DESCRIPTION
+                                ELEMENT calendarOverrides {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE STRING [] 
+                                }
+                                ELEMENT calendarOverridesOperation {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE CalendarOverridesOperationType(ENUMERATION) {
+                                        DESCRIPTION
+                                        CalendarOverridesOperationType(STRING) {
+                                            CDR_AND
+                                            CDR_OR
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnDataIndicator {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnFundamentalPeriodicDateFormat {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION IntradayBarRequest = {
+            Request = {
+                ELEMENT IntradayBarRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE IntradayBarRequest (SEQUENCE) {
+                        DESCRIPTION seqIntradayBarRequest
+                        ELEMENT security {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT eventType {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE EventType(ENUMERATION) {
+                                DESCRIPTION
+                                EventType(STRING) {
+                                    TRADE
+                                    BID
+                                    ASK
+                                    BID_BEST
+                                    ASK_BEST
+                                    BID_YIELD
+                                    ASK_YIELD
+                                    MID_PRICE
+                                    AT_TRADE
+                                    BEST_BID
+                                    BEST_ASK
+                                    SETTLE
+                                }
+                            }
+                        }
+                        ELEMENT startDateTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DATETIME
+                        }
+                        ELEMENT endDateTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DATETIME
+                        }
+                        ELEMENT interval {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT gapFillInitialBar {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentNormal {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentAbnormal {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentSplit {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentFollowDPDF {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxDataPoints {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxDataPointsOrigin {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DataPointsOrigin(ENUMERATION) {
+                                DESCRIPTION
+                                DataPointsOrigin(STRING) {
+                                    AT_END_TIME
+                                    AT_START_TIME
+                                }
+                            }
+                        }
+                        ELEMENT intervalHasSeconds {
+                            DESCRIPTION flag that indicates that value of interval is in seconds
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+        OPERATION IntradayTickRequest = {
+            Request = {
+                ELEMENT IntradayTickRequest {
+                    DESCRIPTION
+                    MIN VALUES 1
+                    MAX VALUES 1
+                    TYPE IntradayTickRequest (SEQUENCE) {
+                        DESCRIPTION seqIntradayTickRequest
+                        ELEMENT security {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT startDateTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DATETIME
+                        }
+                        ELEMENT endDateTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DATETIME
+                        }
+                        ELEMENT eventTypes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE EventType(ENUMERATION)  [] {
+                                DESCRIPTION
+                                EventType(STRING) {
+                                    TRADE
+                                    BID
+                                    ASK
+                                    BID_BEST
+                                    ASK_BEST
+                                    BID_YIELD
+                                    ASK_YIELD
+                                    MID_PRICE
+                                    AT_TRADE
+                                    BEST_BID
+                                    BEST_ASK
+                                    SETTLE
+                                }
+                            }
+                        }
+                        ELEMENT includeConditionCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeNonPlottableEvents {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeExchangeCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT returnEids {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeBrokerCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeRpsCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxDataPoints {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT includeBicMicCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT forcedDelay {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeSpreadPrice {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeYield {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeActionCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeIndicatorCodes {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeTradeTime {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeUpfrontPrice {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeEqRefPrice {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentNormal {
+                            DESCRIPTION Adjust historical pricing to reflect: Regular Cash, Interim, 1st Interim, 2nd Interim, 3rd Interim, 4th
+                        Interim, 5th Interim, Income, Estimated, Partnership Distribution, Final, Interest on Capital, 
+                        Distribution, Prorated.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentAbnormal {
+                            DESCRIPTION Adjust historical pricing to reflect: Special Cash, Liquidation, Capital Gains, Long-Term Capital Gains, 
+                         Short-Term Capital Gains, Memorial, Return of Capital, Rights Redemption, Miscellaneous, Return 
+                         Premium, Preferred Rights Redemption, Proceeds/Rights, Proceeds/Shares, Proceeds/Warrants.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentSplit {
+                            DESCRIPTION Adjust historical pricing and/or volume to reflect: Spin-Offs, Stock Splits/Consolidations, Stock 
+                         Dividend/Bonus, Rights Offerings/Entitlement.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT adjustmentFollowDPDF {
+                            DESCRIPTION Adjust historical pricing and/or volume as per user's DPDF screen
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeClientSpecificFields {
+                            DESCRIPTION option to retrieve custom fields for new XDF source for currency trades: 
+                   ClientDomicile
+                   ClientSegment
+                   ClientSubsegment
+                   ClientIdentifier
+                   Direction
+                   TradeId
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeTradeId {
+                            DESCRIPTION option to retrieve unique identifier for a trade event.                
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxDataPointsOrigin {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE DataPointsOrigin(ENUMERATION) {
+                                DESCRIPTION
+                                DataPointsOrigin(STRING) {
+                                    AT_END_TIME
+                                    AT_START_TIME
+                                }
+                            }
+                        }
+                        ELEMENT filter {
+                            DESCRIPTION format example: "size>10 && cc=ob"
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT includeTradeDate {
+                            DESCRIPTION option to retrieve the date of the trade.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeDirtyTicks {
+                            DESCRIPTION option to retrieve ticks that had been subsequently cancelled or amended.  Return cancelledFlag, correctionFlag, and nativeTradeId.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeSubSecondTimestamps {
+                            DESCRIPTION option to retrieve sub-second timestamps - where available 
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeBloombergStandardConditionCodes {
+                            DESCRIPTION option to retrieve the Bloomberg Standard Condition Codes. Return bloombergStandardConditionCodes.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeMarketModelTypology {
+                            DESCRIPTION option to retrieve the Market Model Typology trade type, where available. Return marketModelTypology.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeNativeTradeId {
+                            DESCRIPTION option to retrieve he Trade Aggressor. Return tradeAggressor.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeAggressor {
+                            DESCRIPTION option to the Market Model Typology trade type, where available. Return marketModelTypology.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeSecurityStatusEvents {
+                            DESCRIPTION option to retrieve trading phase, suspension status and auction status changes. Return tradingPhase, suspensionState, auctionState and simplifiedState.
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT includeESMATradeFlag {
+                            DESCRIPTION option to retrieve ESMA Trade flag. Return ESMATradeFlag
+            
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT filters {
+                            DESCRIPTION define intraday tick request FDM filter.
+            
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FDMFilterType (SEQUENCE)  [] {
+                                DESCRIPTION
+                                ELEMENT filterName {
+                                    DESCRIPTION name of the filter: have to be unique, e.g. "filter_0"
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT fieldId {
+                                    DESCRIPTION ticker plant FDM field ID string:e.g. "EVENT_PRICE"
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT filterRule {
+                                    DESCRIPTION rule apply on this field: e.g. "[10.5, 11.5]"
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+        } // End OPERATION
+    } // End Operations
+} // End Service

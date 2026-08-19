@@ -1,0 +1,124 @@
+{
+  "field_info": {
+    "HISTORICAL_IDS_TIME_RANGE": {
+      "mnemonic": "HISTORICAL_IDS_TIME_RANGE",
+      "description": "Historical Identifiers in a Time Range",
+      "datatype": "String",
+      "documentation": "Returns the historical evolution of the specified identifier on the date specified in Historical Identifiers Time Range Start Date (ID289, HISTORICAL_ID_TM_RANGE_START_DT) to today's current identifier.  Lists the Date, Old Identifier, New Identifier, Old Exchange, New Exchange, Corporate Action Identifier, Source, and Event.\n\nFor example, if company 1 lists under ticker 'AAA', changes its ticker to 'BBB',  delists, and is assigned  a dummy ticker '1234Z', this field will list those events as specified above.  However, if a separate and new company 2 later lists under ticker 'AAA', as 'AAA' no longer has any relevance to the original company, it would not be listed in the chain of events for company 1.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [
+        "ID325",
+        "ID289"
+      ],
+      "ftype": "BulkFormat"
+    },
+    "EQY_DVD_ADJUST_FACT": {
+      "mnemonic": "EQY_DVD_ADJUST_FACT",
+      "description": "Adjustment Factors",
+      "datatype": "String",
+      "documentation": "This bulk data field returns a list of adjustment factors used to adjust prices and/or volumes for stock splits, stock dividends, rights issues and spin-offs. Adjustment factors for normal and abnormal cash dividends are not included by default. To override the default behavior, use field Corporate Actions Filter (DV175, CORPORATE_ACTIONS_FILTER).\n\nThe field returns data in 4 unlabeled columns:\nColumn 1 - Adjustment Date\nColumn 2 - Adjustment Factor\nColumn 3 - Operator Type (1=div, 2=mult, 3=add. Opposite for Volume)\nColumn 4 - Flag (1=prices only, 3=prices and volumes)\n\nExample: (for FTE FP Equity)\n11/29/1999  0.9966  2  3\nOn 11/29/1999, there was an adjustment factor of 0.9966 that you must multiply and this applies to prices and volumes\n",
+      "categoryName": [],
+      "property": [],
+      "overrides": [
+        "DV175"
+      ],
+      "ftype": "BulkFormat"
+    }
+  },
+  "override_mnemonics": {
+    "HISTORICAL_STARTING_IDENTIFIER": "Historical Starting Identifier",
+    "CORPORATE_ACTIONS_FILTER": "Corporate Actions Filter",
+    "HISTORICAL_ID_TM_RANGE_START_DT": "Historical Identifiers Time Range Start Date"
+  },
+  "plain::META US Equity": [
+    {
+      "securityData": [
+        {
+          "security": "META US Equity",
+          "eidData": [],
+          "fieldExceptions": [
+            {
+              "fieldId": "HISTORICAL_IDS_TIME_RANGE",
+              "errorInfo": {
+                "source": "19559:rsfrdsvc1",
+                "code": 9,
+                "category": "BAD_FLD",
+                "message": "Field not applicable to security",
+                "subcategory": "NOT_APPLICABLE_TO_REF_DATA"
+              }
+            }
+          ],
+          "sequenceNumber": 0,
+          "fieldData": {
+            "EQY_DVD_ADJUST_FACT": [
+              {
+                "Adjustment Date": "2010-10-31",
+                "Adjustment Factor": 5.0,
+                "Adjustment Factor Operator Type": 1.0,
+                "Adjustment Factor Flag": 3.0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "plain::AAPL US Equity": [
+    {
+      "securityData": [
+        {
+          "security": "AAPL US Equity",
+          "eidData": [],
+          "fieldExceptions": [
+            {
+              "fieldId": "HISTORICAL_IDS_TIME_RANGE",
+              "errorInfo": {
+                "source": "19425:rsfrdsvc1",
+                "code": 9,
+                "category": "BAD_FLD",
+                "message": "Field not applicable to security",
+                "subcategory": "NOT_APPLICABLE_TO_REF_DATA"
+              }
+            }
+          ],
+          "sequenceNumber": 0,
+          "fieldData": {
+            "EQY_DVD_ADJUST_FACT": [
+              {
+                "Adjustment Date": "2020-08-31",
+                "Adjustment Factor": 4.0,
+                "Adjustment Factor Operator Type": 1.0,
+                "Adjustment Factor Flag": 3.0
+              },
+              {
+                "Adjustment Date": "2014-06-09",
+                "Adjustment Factor": 7.0,
+                "Adjustment Factor Operator Type": 1.0,
+                "Adjustment Factor Flag": 3.0
+              },
+              {
+                "Adjustment Date": "2005-02-28",
+                "Adjustment Factor": 2.0,
+                "Adjustment Factor Operator Type": 1.0,
+                "Adjustment Factor Flag": 3.0
+              },
+              {
+                "Adjustment Date": "2000-06-21",
+                "Adjustment Factor": 2.0,
+                "Adjustment Factor Operator Type": 1.0,
+                "Adjustment Factor Flag": 3.0
+              },
+              {
+                "Adjustment Date": "1987-06-16",
+                "Adjustment Factor": 2.0,
+                "Adjustment Factor Operator Type": 1.0,
+                "Adjustment Factor Flag": 3.0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

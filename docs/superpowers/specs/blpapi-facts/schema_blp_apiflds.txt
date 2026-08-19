@@ -1,0 +1,1614 @@
+Service //blp/apiflds
+    Operations = {
+        OPERATION FieldInfoRequest = {
+            Request = {
+                ELEMENT fieldInfoRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldInfoRequest (SEQUENCE) {
+                        DESCRIPTION seqFieldInfoRequest
+                        ELEMENT id {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT returnFieldDocumentation {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT properties {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT language {
+                            DESCRIPTION Optional selector of the language in which the
+                    response is returned. Default is 'ENGLISH'. The response is
+                    encoded in UTF-8.
+                
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Language(ENUMERATION) {
+                                DESCRIPTION An enum of supported languages
+                                Language(STRING) {
+                                    ENGLISH
+                                    JAPANESE
+                                    FRENCH
+                                    GERMAN
+                                    SPANISH
+                                    PORTUGUESE
+                                    ITALIAN
+                                    CHINESE_TRAD
+                                    KOREAN
+                                    CHINESE_SIMP
+                                    RUSSIAN
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT fieldResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldResponse (CHOICE) {
+                        DESCRIPTION choiceFieldResponse
+                        ELEMENT fieldData {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldData (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldData
+                                ELEMENT id {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT fieldInfo {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldInfo (SEQUENCE) {
+                                        DESCRIPTION seqFieldInfo
+                                        ELEMENT mnemonic {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT description {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT datatype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE DataType(ENUMERATION) {
+                                                DESCRIPTION
+                                                DataType(STRING) {
+                                                    Bool
+                                                    Char
+                                                    Int16
+                                                    UInt16
+                                                    Int32
+                                                    UInt32
+                                                    Int64
+                                                    UInt64
+                                                    Float
+                                                    Double
+                                                    String
+                                                    Datetime
+                                                }
+                                            }
+                                        }
+                                        ELEMENT documentation {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT categoryName {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT property {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE Property (SEQUENCE)  [] {
+                                                DESCRIPTION seqProperty
+                                                ELEMENT id {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT value {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                            }
+                                        }
+                                        ELEMENT overrides {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT ftype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE FType(ENUMERATION) {
+                                                DESCRIPTION 
+                An enumeration based on XDM's FType "Description" values.
+                See: XDM > Options > Metamodel > FType > Field type
+            
+                                                FType(STRING) {
+                                                    Reserved
+                                                    Character
+                                                    StringOrReal
+                                                    Price
+                                                    SecurityDescription
+                                                    Date
+                                                    Time
+                                                    DateOrTime
+                                                    BulkFormat
+                                                    Month_Year
+                                                    Boolean
+                                                    Currency
+                                                    String
+                                                    Real
+                                                    LongCharacter
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldError {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ErrorInfo (SEQUENCE) {
+                                        DESCRIPTION seqErrorInfo
+                                        ELEMENT source {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT code {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE INT32
+                                        }
+                                        ELEMENT category {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT message {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT fieldSearchError {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE ErrorInfo (SEQUENCE) {
+                                DESCRIPTION seqErrorInfo
+                                ELEMENT source {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT code {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE INT32
+                                }
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT message {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+        OPERATION FieldSearchRequest = {
+            Request = {
+                ELEMENT fieldSearchRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldSearchRequest (SEQUENCE) {
+                        DESCRIPTION seqFieldSearchRequest
+                        ELEMENT searchSpec {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT include {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Criteria (SEQUENCE) {
+                                DESCRIPTION seqCriteria
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE STRING [] 
+                                }
+                                ELEMENT productType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ProductType(ENUMERATION) {
+                                        DESCRIPTION
+                                        ProductType(STRING) {
+                                            All
+                                            Govt
+                                            Corp
+                                            Mtge
+                                            M-Mkt
+                                            Muni
+                                            Pfd
+                                            Equity
+                                            Cmdty
+                                            Index
+                                            Curncy
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldType(ENUMERATION) {
+                                        DESCRIPTION
+                                        FieldType(STRING) {
+                                            All
+                                            RealTime
+                                            Static
+                                        }
+                                    }
+                                }
+                                ELEMENT bpsRequirement {
+                                    DESCRIPTION Filter the fields returned by their requirement
+                    for a BPS subscription.
+                
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BpsRequirement(ENUMERATION) {
+                                        DESCRIPTION
+                                        BpsRequirement(STRING) {
+                                            All
+                                            BPS
+                                            NoBPS
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT exclude {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Criteria (SEQUENCE) {
+                                DESCRIPTION seqCriteria
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE STRING [] 
+                                }
+                                ELEMENT productType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ProductType(ENUMERATION) {
+                                        DESCRIPTION
+                                        ProductType(STRING) {
+                                            All
+                                            Govt
+                                            Corp
+                                            Mtge
+                                            M-Mkt
+                                            Muni
+                                            Pfd
+                                            Equity
+                                            Cmdty
+                                            Index
+                                            Curncy
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldType(ENUMERATION) {
+                                        DESCRIPTION
+                                        FieldType(STRING) {
+                                            All
+                                            RealTime
+                                            Static
+                                        }
+                                    }
+                                }
+                                ELEMENT bpsRequirement {
+                                    DESCRIPTION Filter the fields returned by their requirement
+                    for a BPS subscription.
+                
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BpsRequirement(ENUMERATION) {
+                                        DESCRIPTION
+                                        BpsRequirement(STRING) {
+                                            All
+                                            BPS
+                                            NoBPS
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT returnFieldDocumentation {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT properties {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT language {
+                            DESCRIPTION Optional selector of the language in which the
+                    response is returned. Default is 'ENGLISH'. The response is
+                    encoded in UTF-8.
+                
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Language(ENUMERATION) {
+                                DESCRIPTION An enum of supported languages
+                                Language(STRING) {
+                                    ENGLISH
+                                    JAPANESE
+                                    FRENCH
+                                    GERMAN
+                                    SPANISH
+                                    PORTUGUESE
+                                    ITALIAN
+                                    CHINESE_TRAD
+                                    KOREAN
+                                    CHINESE_SIMP
+                                    RUSSIAN
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT fieldResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldResponse (CHOICE) {
+                        DESCRIPTION choiceFieldResponse
+                        ELEMENT fieldData {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldData (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldData
+                                ELEMENT id {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT fieldInfo {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldInfo (SEQUENCE) {
+                                        DESCRIPTION seqFieldInfo
+                                        ELEMENT mnemonic {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT description {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT datatype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE DataType(ENUMERATION) {
+                                                DESCRIPTION
+                                                DataType(STRING) {
+                                                    Bool
+                                                    Char
+                                                    Int16
+                                                    UInt16
+                                                    Int32
+                                                    UInt32
+                                                    Int64
+                                                    UInt64
+                                                    Float
+                                                    Double
+                                                    String
+                                                    Datetime
+                                                }
+                                            }
+                                        }
+                                        ELEMENT documentation {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT categoryName {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT property {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE Property (SEQUENCE)  [] {
+                                                DESCRIPTION seqProperty
+                                                ELEMENT id {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT value {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                            }
+                                        }
+                                        ELEMENT overrides {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT ftype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE FType(ENUMERATION) {
+                                                DESCRIPTION 
+                An enumeration based on XDM's FType "Description" values.
+                See: XDM > Options > Metamodel > FType > Field type
+            
+                                                FType(STRING) {
+                                                    Reserved
+                                                    Character
+                                                    StringOrReal
+                                                    Price
+                                                    SecurityDescription
+                                                    Date
+                                                    Time
+                                                    DateOrTime
+                                                    BulkFormat
+                                                    Month_Year
+                                                    Boolean
+                                                    Currency
+                                                    String
+                                                    Real
+                                                    LongCharacter
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldError {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ErrorInfo (SEQUENCE) {
+                                        DESCRIPTION seqErrorInfo
+                                        ELEMENT source {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT code {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE INT32
+                                        }
+                                        ELEMENT category {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT message {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT fieldSearchError {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE ErrorInfo (SEQUENCE) {
+                                DESCRIPTION seqErrorInfo
+                                ELEMENT source {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT code {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE INT32
+                                }
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT message {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+        OPERATION CategorizedFieldSearchRequest = {
+            Request = {
+                ELEMENT categorizedFieldSearchRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE CategorizedFieldSearchRequest (SEQUENCE) {
+                        DESCRIPTION seqCategorizedFieldSearchRequest
+                        ELEMENT searchSpec {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT exclude {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Criteria (SEQUENCE) {
+                                DESCRIPTION seqCriteria
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE STRING [] 
+                                }
+                                ELEMENT productType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ProductType(ENUMERATION) {
+                                        DESCRIPTION
+                                        ProductType(STRING) {
+                                            All
+                                            Govt
+                                            Corp
+                                            Mtge
+                                            M-Mkt
+                                            Muni
+                                            Pfd
+                                            Equity
+                                            Cmdty
+                                            Index
+                                            Curncy
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldType(ENUMERATION) {
+                                        DESCRIPTION
+                                        FieldType(STRING) {
+                                            All
+                                            RealTime
+                                            Static
+                                        }
+                                    }
+                                }
+                                ELEMENT bpsRequirement {
+                                    DESCRIPTION Filter the fields returned by their requirement
+                    for a BPS subscription.
+                
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BpsRequirement(ENUMERATION) {
+                                        DESCRIPTION
+                                        BpsRequirement(STRING) {
+                                            All
+                                            BPS
+                                            NoBPS
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT returnFieldDocumentation {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT properties {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT language {
+                            DESCRIPTION Optional selector of the language in which the
+                    response is returned. Default is 'ENGLISH'. The response is
+                    encoded in UTF-8.
+                
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Language(ENUMERATION) {
+                                DESCRIPTION An enum of supported languages
+                                Language(STRING) {
+                                    ENGLISH
+                                    JAPANESE
+                                    FRENCH
+                                    GERMAN
+                                    SPANISH
+                                    PORTUGUESE
+                                    ITALIAN
+                                    CHINESE_TRAD
+                                    KOREAN
+                                    CHINESE_SIMP
+                                    RUSSIAN
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT categorizedFieldResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE CategorizedFieldResponse (CHOICE) {
+                        DESCRIPTION choiceCategorizedFieldResponse
+                        ELEMENT category {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE CategoryData (SEQUENCE)  [] {
+                                DESCRIPTION seqCategoryData
+                                ELEMENT categoryName {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT categoryId {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT numFields {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE INT32
+                                }
+                                ELEMENT description {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT isLeafNode {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BOOL
+                                }
+                                ELEMENT fieldData {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE FieldData (SEQUENCE)  [] {
+                                        DESCRIPTION seqFieldData
+                                        ELEMENT id {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT fieldInfo {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE FieldInfo (SEQUENCE) {
+                                                DESCRIPTION seqFieldInfo
+                                                ELEMENT mnemonic {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT description {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT datatype {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE DataType(ENUMERATION) {
+                                                        DESCRIPTION
+                                                        DataType(STRING) {
+                                                            Bool
+                                                            Char
+                                                            Int16
+                                                            UInt16
+                                                            Int32
+                                                            UInt32
+                                                            Int64
+                                                            UInt64
+                                                            Float
+                                                            Double
+                                                            String
+                                                            Datetime
+                                                        }
+                                                    }
+                                                }
+                                                ELEMENT documentation {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT categoryName {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 18446744073709551615
+                                                    TYPE STRING [] 
+                                                }
+                                                ELEMENT property {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 18446744073709551615
+                                                    TYPE Property (SEQUENCE)  [] {
+                                                        DESCRIPTION seqProperty
+                                                        ELEMENT id {
+                                                            DESCRIPTION
+                                                            MIN VALUES 0
+                                                            MAX VALUES 1
+                                                            TYPE STRING
+                                                        }
+                                                        ELEMENT value {
+                                                            DESCRIPTION
+                                                            MIN VALUES 0
+                                                            MAX VALUES 1
+                                                            TYPE STRING
+                                                        }
+                                                    }
+                                                }
+                                                ELEMENT overrides {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 18446744073709551615
+                                                    TYPE STRING [] 
+                                                }
+                                                ELEMENT ftype {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE FType(ENUMERATION) {
+                                                        DESCRIPTION 
+                An enumeration based on XDM's FType "Description" values.
+                See: XDM > Options > Metamodel > FType > Field type
+            
+                                                        FType(STRING) {
+                                                            Reserved
+                                                            Character
+                                                            StringOrReal
+                                                            Price
+                                                            SecurityDescription
+                                                            Date
+                                                            Time
+                                                            DateOrTime
+                                                            BulkFormat
+                                                            Month_Year
+                                                            Boolean
+                                                            Currency
+                                                            String
+                                                            Real
+                                                            LongCharacter
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        ELEMENT fieldError {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE ErrorInfo (SEQUENCE) {
+                                                DESCRIPTION seqErrorInfo
+                                                ELEMENT source {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT code {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE INT32
+                                                }
+                                                ELEMENT category {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT message {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT categorizedFieldSearchError {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE ErrorInfo (SEQUENCE) {
+                                DESCRIPTION seqErrorInfo
+                                ELEMENT source {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT code {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE INT32
+                                }
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT message {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+        OPERATION FieldListRequest = {
+            Request = {
+                ELEMENT fieldListRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldListRequest (SEQUENCE) {
+                        DESCRIPTION seqFieldListRequest
+                        ELEMENT fieldType {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE FieldType(ENUMERATION) {
+                                DESCRIPTION
+                                FieldType(STRING) {
+                                    All
+                                    RealTime
+                                    Static
+                                }
+                            }
+                        }
+                        ELEMENT returnFieldDocumentation {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT properties {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT language {
+                            DESCRIPTION Optional selector of the language in which the
+                    response is returned. Default is 'ENGLISH'. The response is
+                    encoded in UTF-8.
+                
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Language(ENUMERATION) {
+                                DESCRIPTION An enum of supported languages
+                                Language(STRING) {
+                                    ENGLISH
+                                    JAPANESE
+                                    FRENCH
+                                    GERMAN
+                                    SPANISH
+                                    PORTUGUESE
+                                    ITALIAN
+                                    CHINESE_TRAD
+                                    KOREAN
+                                    CHINESE_SIMP
+                                    RUSSIAN
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT fieldResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldResponse (CHOICE) {
+                        DESCRIPTION choiceFieldResponse
+                        ELEMENT fieldData {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldData (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldData
+                                ELEMENT id {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT fieldInfo {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldInfo (SEQUENCE) {
+                                        DESCRIPTION seqFieldInfo
+                                        ELEMENT mnemonic {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT description {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT datatype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE DataType(ENUMERATION) {
+                                                DESCRIPTION
+                                                DataType(STRING) {
+                                                    Bool
+                                                    Char
+                                                    Int16
+                                                    UInt16
+                                                    Int32
+                                                    UInt32
+                                                    Int64
+                                                    UInt64
+                                                    Float
+                                                    Double
+                                                    String
+                                                    Datetime
+                                                }
+                                            }
+                                        }
+                                        ELEMENT documentation {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT categoryName {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT property {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE Property (SEQUENCE)  [] {
+                                                DESCRIPTION seqProperty
+                                                ELEMENT id {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT value {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                            }
+                                        }
+                                        ELEMENT overrides {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT ftype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE FType(ENUMERATION) {
+                                                DESCRIPTION 
+                An enumeration based on XDM's FType "Description" values.
+                See: XDM > Options > Metamodel > FType > Field type
+            
+                                                FType(STRING) {
+                                                    Reserved
+                                                    Character
+                                                    StringOrReal
+                                                    Price
+                                                    SecurityDescription
+                                                    Date
+                                                    Time
+                                                    DateOrTime
+                                                    BulkFormat
+                                                    Month_Year
+                                                    Boolean
+                                                    Currency
+                                                    String
+                                                    Real
+                                                    LongCharacter
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldError {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ErrorInfo (SEQUENCE) {
+                                        DESCRIPTION seqErrorInfo
+                                        ELEMENT source {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT code {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE INT32
+                                        }
+                                        ELEMENT category {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT message {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT fieldSearchError {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE ErrorInfo (SEQUENCE) {
+                                DESCRIPTION seqErrorInfo
+                                ELEMENT source {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT code {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE INT32
+                                }
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT message {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+        OPERATION APITerminalFieldSearchRequest = {
+            Request = {
+                ELEMENT apiTerminalFieldSearchRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldSearchRequest (SEQUENCE) {
+                        DESCRIPTION seqFieldSearchRequest
+                        ELEMENT searchSpec {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT include {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Criteria (SEQUENCE) {
+                                DESCRIPTION seqCriteria
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE STRING [] 
+                                }
+                                ELEMENT productType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ProductType(ENUMERATION) {
+                                        DESCRIPTION
+                                        ProductType(STRING) {
+                                            All
+                                            Govt
+                                            Corp
+                                            Mtge
+                                            M-Mkt
+                                            Muni
+                                            Pfd
+                                            Equity
+                                            Cmdty
+                                            Index
+                                            Curncy
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldType(ENUMERATION) {
+                                        DESCRIPTION
+                                        FieldType(STRING) {
+                                            All
+                                            RealTime
+                                            Static
+                                        }
+                                    }
+                                }
+                                ELEMENT bpsRequirement {
+                                    DESCRIPTION Filter the fields returned by their requirement
+                    for a BPS subscription.
+                
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BpsRequirement(ENUMERATION) {
+                                        DESCRIPTION
+                                        BpsRequirement(STRING) {
+                                            All
+                                            BPS
+                                            NoBPS
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT exclude {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Criteria (SEQUENCE) {
+                                DESCRIPTION seqCriteria
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE STRING [] 
+                                }
+                                ELEMENT productType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ProductType(ENUMERATION) {
+                                        DESCRIPTION
+                                        ProductType(STRING) {
+                                            All
+                                            Govt
+                                            Corp
+                                            Mtge
+                                            M-Mkt
+                                            Muni
+                                            Pfd
+                                            Equity
+                                            Cmdty
+                                            Index
+                                            Curncy
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldType {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldType(ENUMERATION) {
+                                        DESCRIPTION
+                                        FieldType(STRING) {
+                                            All
+                                            RealTime
+                                            Static
+                                        }
+                                    }
+                                }
+                                ELEMENT bpsRequirement {
+                                    DESCRIPTION Filter the fields returned by their requirement
+                    for a BPS subscription.
+                
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE BpsRequirement(ENUMERATION) {
+                                        DESCRIPTION
+                                        BpsRequirement(STRING) {
+                                            All
+                                            BPS
+                                            NoBPS
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT returnFieldDocumentation {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT properties {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE STRING [] 
+                        }
+                        ELEMENT language {
+                            DESCRIPTION Optional selector of the language in which the
+                    response is returned. Default is 'ENGLISH'. The response is
+                    encoded in UTF-8.
+                
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE Language(ENUMERATION) {
+                                DESCRIPTION An enum of supported languages
+                                Language(STRING) {
+                                    ENGLISH
+                                    JAPANESE
+                                    FRENCH
+                                    GERMAN
+                                    SPANISH
+                                    PORTUGUESE
+                                    ITALIAN
+                                    CHINESE_TRAD
+                                    KOREAN
+                                    CHINESE_SIMP
+                                    RUSSIAN
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT fieldResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE FieldResponse (CHOICE) {
+                        DESCRIPTION choiceFieldResponse
+                        ELEMENT fieldData {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE FieldData (SEQUENCE)  [] {
+                                DESCRIPTION seqFieldData
+                                ELEMENT id {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT fieldInfo {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE FieldInfo (SEQUENCE) {
+                                        DESCRIPTION seqFieldInfo
+                                        ELEMENT mnemonic {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT description {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT datatype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE DataType(ENUMERATION) {
+                                                DESCRIPTION
+                                                DataType(STRING) {
+                                                    Bool
+                                                    Char
+                                                    Int16
+                                                    UInt16
+                                                    Int32
+                                                    UInt32
+                                                    Int64
+                                                    UInt64
+                                                    Float
+                                                    Double
+                                                    String
+                                                    Datetime
+                                                }
+                                            }
+                                        }
+                                        ELEMENT documentation {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT categoryName {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT property {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE Property (SEQUENCE)  [] {
+                                                DESCRIPTION seqProperty
+                                                ELEMENT id {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                                ELEMENT value {
+                                                    DESCRIPTION
+                                                    MIN VALUES 0
+                                                    MAX VALUES 1
+                                                    TYPE STRING
+                                                }
+                                            }
+                                        }
+                                        ELEMENT overrides {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 18446744073709551615
+                                            TYPE STRING [] 
+                                        }
+                                        ELEMENT ftype {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE FType(ENUMERATION) {
+                                                DESCRIPTION 
+                An enumeration based on XDM's FType "Description" values.
+                See: XDM > Options > Metamodel > FType > Field type
+            
+                                                FType(STRING) {
+                                                    Reserved
+                                                    Character
+                                                    StringOrReal
+                                                    Price
+                                                    SecurityDescription
+                                                    Date
+                                                    Time
+                                                    DateOrTime
+                                                    BulkFormat
+                                                    Month_Year
+                                                    Boolean
+                                                    Currency
+                                                    String
+                                                    Real
+                                                    LongCharacter
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ELEMENT fieldError {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE ErrorInfo (SEQUENCE) {
+                                        DESCRIPTION seqErrorInfo
+                                        ELEMENT source {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT code {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE INT32
+                                        }
+                                        ELEMENT category {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                        ELEMENT message {
+                                            DESCRIPTION
+                                            MIN VALUES 0
+                                            MAX VALUES 1
+                                            TYPE STRING
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ELEMENT fieldSearchError {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE ErrorInfo (SEQUENCE) {
+                                DESCRIPTION seqErrorInfo
+                                ELEMENT source {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT code {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE INT32
+                                }
+                                ELEMENT category {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT message {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+    } // End Operations
+} // End Service

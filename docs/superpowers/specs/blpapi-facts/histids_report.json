@@ -1,0 +1,77 @@
+{
+  "META US Equity | ['HISTORICAL_ID_TM_RANGE_START_DT', 'HISTORICAL_STARTING_IDENTIFIER']": [
+    {
+      "securityData": [
+        {
+          "security": "META US Equity",
+          "eidData": [],
+          "fieldExceptions": [],
+          "sequenceNumber": 0,
+          "fieldData": {
+            "HISTORICAL_IDS_TIME_RANGE": [
+              {
+                "Date": "2022-06-09",
+                "Old ID": "FB",
+                "New ID": "META",
+                "Old Exch": "US",
+                "New Exch": "US",
+                "Action ID": "228233742",
+                "Source": "ID Change"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "FB US Equity | ['HISTORICAL_ID_TM_RANGE_START_DT', 'HISTORICAL_STARTING_IDENTIFIER']": [
+    {
+      "securityData": [
+        {
+          "security": "FB US Equity",
+          "eidData": [],
+          "fieldExceptions": [],
+          "sequenceNumber": 0,
+          "fieldData": {
+            "HISTORICAL_IDS_TIME_RANGE": [
+              {
+                "Date": "2022-06-09",
+                "Old ID": "FB",
+                "New ID": "META",
+                "Old Exch": "US",
+                "New Exch": "US",
+                "Action ID": "228233742",
+                "Source": "ID Change"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "META US Equity | ['HISTORICAL_ID_TM_RANGE_START_DT']": [
+    {
+      "securityData": [
+        {
+          "security": "META US Equity",
+          "eidData": [],
+          "fieldExceptions": [],
+          "sequenceNumber": 0,
+          "fieldData": {
+            "HISTORICAL_IDS_TIME_RANGE": [
+              {
+                "Date": "2022-01-31",
+                "Old ID": "META",
+                "New ID": "METV",
+                "Old Exch": "US",
+                "New Exch": "US",
+                "Action ID": "229098374",
+                "Source": "ID Change"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

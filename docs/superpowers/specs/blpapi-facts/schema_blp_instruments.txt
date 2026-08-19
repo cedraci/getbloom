@@ -1,0 +1,415 @@
+Service //blp/instruments
+    Operations = {
+        OPERATION instrumentListRequest = {
+            Request = {
+                ELEMENT InstrumentListRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE InstrumentListRequest (SEQUENCE) {
+                        DESCRIPTION Instrument list request
+                        ELEMENT query {
+                            DESCRIPTION String with keywords
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT yellowKeyFilter {
+                            DESCRIPTION Yellow key filter
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE YellowKeyFilter(ENUMERATION) {
+                                DESCRIPTION
+                                YellowKeyFilter(STRING) {
+                                    YK_FILTER_NONE
+                                    YK_FILTER_CMDT
+                                    YK_FILTER_EQTY
+                                    YK_FILTER_MUNI
+                                    YK_FILTER_PRFD
+                                    YK_FILTER_CLNT
+                                    YK_FILTER_MMKT
+                                    YK_FILTER_GOVT
+                                    YK_FILTER_CORP
+                                    YK_FILTER_INDX
+                                    YK_FILTER_CURR
+                                    YK_FILTER_MTGE
+                                }
+                            }
+                        }
+                        ELEMENT languageOverride {
+                            DESCRIPTION Language override
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE LanguageOverride(ENUMERATION) {
+                                DESCRIPTION
+                                LanguageOverride(STRING) {
+                                    LANG_OVERRIDE_NONE
+                                    LANG_OVERRIDE_ENGLISH
+                                    LANG_OVERRIDE_KANJI
+                                    LANG_OVERRIDE_FRENCH
+                                    LANG_OVERRIDE_GERMAN
+                                    LANG_OVERRIDE_SPANISH
+                                    LANG_OVERRIDE_PORTUGUESE
+                                    LANG_OVERRIDE_ITALIAN
+                                    LANG_OVERRIDE_CHINESE_TRAD
+                                    LANG_OVERRIDE_KOREAN
+                                    LANG_OVERRIDE_CHINESE_SIMP
+                                    LANG_OVERRIDE_NONE_1
+                                    LANG_OVERRIDE_NONE_2
+                                    LANG_OVERRIDE_NONE_3
+                                    LANG_OVERRIDE_NONE_4
+                                    LANG_OVERRIDE_NONE_5
+                                    LANG_OVERRIDE_RUSSIAN
+                                }
+                            }
+                        }
+                        ELEMENT maxResults {
+                            DESCRIPTION Number of results requested
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT InstrumentListResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE InstrumentListResponse (SEQUENCE) {
+                        DESCRIPTION Instrument list response
+                        ELEMENT results {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE InstrumentRecord (SEQUENCE)  [] {
+                                DESCRIPTION Instrument record
+                                ELEMENT security {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT description {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+                ELEMENT ErrorResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE ErrorResponse (SEQUENCE) {
+                        DESCRIPTION seqErrorResponse
+                        ELEMENT description {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+        OPERATION curveListRequest = {
+            Request = {
+                ELEMENT CurveListRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE CurveListRequest (SEQUENCE) {
+                        DESCRIPTION Instrument list request
+                        ELEMENT query {
+                            DESCRIPTION String with keywords
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT maxResults {
+                            DESCRIPTION Number of results requested; 0 if all available results should be provided.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                        ELEMENT countryCode {
+                            DESCRIPTION Filter selecting only curves matching the two character country code.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT currencyCode {
+                            DESCRIPTION Filter selecting only curves matching the three character currency code.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT type {
+                            DESCRIPTION Filter selecting only curves matching the type.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE CurveCategoryEnum(ENUMERATION) {
+                                DESCRIPTION
+                                CurveCategoryEnum(STRING) {
+                                    INVALID
+                                    UNASSIGNED
+                                    IRS
+                                    GOVT
+                                    AGENCY
+                                    MUNI
+                                    CORP
+                                    MTGE
+                                    MMKT
+                                    CURNCY
+                                    COMDTY
+                                }
+                            }
+                        }
+                        ELEMENT subtype {
+                            DESCRIPTION Filter selecting only curves matching the subtype.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE CurveSubclassEnum(ENUMERATION) {
+                                DESCRIPTION
+                                CurveSubclassEnum(STRING) {
+                                    INVALID
+                                    UNASSIGNED
+                                    SENIOR
+                                    SUBORDINATED
+                                    ZERO
+                                    OIS
+                                    INFLATION
+                                    SPREAD
+                                    CDS
+                                    RATE
+                                    SECTOR
+                                    ISSUER
+                                }
+                            }
+                        }
+                        ELEMENT curveid {
+                            DESCRIPTION Filter selecting only the curve with the given curve ID.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT bbgid {
+                            DESCRIPTION Filter selecting only the curve with the given Bloomberg ID.
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT CurveListResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE CurveListResponse (SEQUENCE) {
+                        DESCRIPTION Curve list response
+                        ELEMENT results {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE CurveRecord (SEQUENCE)  [] {
+                                DESCRIPTION Curve record
+                                ELEMENT curve {
+                                    DESCRIPTION Ticker of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT description {
+                                    DESCRIPTION Description of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT country {
+                                    DESCRIPTION The curve's two letter country code.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT currency {
+                                    DESCRIPTION The curve's three letter currency code.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT curveid {
+                                    DESCRIPTION Unique identifier of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT type {
+                                    DESCRIPTION Type of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE CurveCategoryEnum(ENUMERATION)  [] {
+                                        DESCRIPTION
+                                        CurveCategoryEnum(STRING) {
+                                            INVALID
+                                            UNASSIGNED
+                                            IRS
+                                            GOVT
+                                            AGENCY
+                                            MUNI
+                                            CORP
+                                            MTGE
+                                            MMKT
+                                            CURNCY
+                                            COMDTY
+                                        }
+                                    }
+                                }
+                                ELEMENT subtype {
+                                    DESCRIPTION Subtype of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 18446744073709551615
+                                    TYPE CurveSubclassEnum(ENUMERATION)  [] {
+                                        DESCRIPTION
+                                        CurveSubclassEnum(STRING) {
+                                            INVALID
+                                            UNASSIGNED
+                                            SENIOR
+                                            SUBORDINATED
+                                            ZERO
+                                            OIS
+                                            INFLATION
+                                            SPREAD
+                                            CDS
+                                            RATE
+                                            SECTOR
+                                            ISSUER
+                                        }
+                                    }
+                                }
+                                ELEMENT publisher {
+                                    DESCRIPTION Publisher of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT bbgid {
+                                    DESCRIPTION Bloomberg identifier of the curve.
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+                ELEMENT ErrorResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE ErrorResponse (SEQUENCE) {
+                        DESCRIPTION seqErrorResponse
+                        ELEMENT description {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+        OPERATION govtListRequest = {
+            Request = {
+                ELEMENT GovtListRequest {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE GovtListRequest (SEQUENCE) {
+                        DESCRIPTION Govt list request
+                        ELEMENT query {
+                            DESCRIPTION String with keywords
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT ticker {
+                            DESCRIPTION Ticker filter
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                        ELEMENT partialMatch {
+                            DESCRIPTION If true do partial match, else do exact match
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE BOOL
+                        }
+                        ELEMENT maxResults {
+                            DESCRIPTION Number of results requested
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE INT32
+                        }
+                    }
+                }
+            } // End Request
+            Responses = {
+                ELEMENT GovtListResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE GovtListResponse (SEQUENCE) {
+                        DESCRIPTION Govt list response
+                        ELEMENT results {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 18446744073709551615
+                            TYPE GovtRecord (SEQUENCE)  [] {
+                                DESCRIPTION Govt record
+                                ELEMENT parseky {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT name {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                                ELEMENT ticker {
+                                    DESCRIPTION
+                                    MIN VALUES 0
+                                    MAX VALUES 1
+                                    TYPE STRING
+                                }
+                            }
+                        }
+                    }
+                }
+                ELEMENT ErrorResponse {
+                    DESCRIPTION
+                    MIN VALUES 0
+                    MAX VALUES 1
+                    TYPE ErrorResponse (SEQUENCE) {
+                        DESCRIPTION seqErrorResponse
+                        ELEMENT description {
+                            DESCRIPTION
+                            MIN VALUES 0
+                            MAX VALUES 1
+                            TYPE STRING
+                        }
+                    }
+                }
+            } // End Responses
+        } // End OPERATION
+    } // End Operations
+} // End Service
