@@ -36,6 +36,24 @@ pub const IDENTITY_FIELDS: [&str; 12] = [
     "INACTIVE_DATE",
 ];
 
+/// What one identity request is charged to `hit_ledger`.
+///
+/// One hit per security-field pair, which is how `budget::estimate_eod_hits`
+/// counts a reference request and what the whole estimator is calibrated
+/// against (the Excel add-in's accounting). Whether the Desktop API meters it
+/// identically is not established (P0 §10.5), so the project's standing
+/// over-count-is-safe policy applies.
+///
+/// Public and separate from the request itself so the accounting can be
+/// pinned by a test without a Terminal -- the number is a promise about the
+/// budget screen, not an implementation detail.
+pub fn identity_hit_cost(securities: usize) -> i64 {
+    (securities * IDENTITY_FIELDS.len()) as i64
+}
+
+/// One security, one (bulk) field.
+pub const HIST_IDS_HIT_COST: i64 = 1;
+
 pub const HIST_IDS_FIELD: &str = "HISTORICAL_IDS_TIME_RANGE";
 /// Overrides on HIST_IDS_FIELD, resolved from its own FieldInfoRequest (P0 §6.3).
 pub const HIST_IDS_ANCHOR: &str = "HISTORICAL_STARTING_IDENTIFIER";
@@ -258,13 +276,7 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             "obs_date": chrono::Local::now().date_naive().to_string(),
             "raw": true,
         })).await?;
-        // Counted the way `budget::estimate_eod_hits` counts a reference
-        // request -- one hit per security-field pair, the Excel add-in's own
-        // accounting, which the whole estimator is calibrated against. The
-        // over-count-is-safe policy applies: whether the Desktop API meters
-        // this identically is not established (P0 §10.5).
-        self.charge("resolve_identity",
-                    (securities.len() * IDENTITY_FIELDS.len()) as i64).await;
+        self.charge("resolve_identity", identity_hit_cost(securities.len())).await;
         let raw = resp["raw_messages"].clone();
         let parsed = parse_identity(&raw);
         Ok(Answered { parsed, raw })
@@ -287,8 +299,7 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             ],
             "raw": true,
         })).await?;
-        // One security, one (bulk) field.
-        self.charge("resolve_history", 1).await;
+        self.charge("resolve_history", HIST_IDS_HIT_COST).await;
         Ok(parse_hist_ids(&resp["raw_messages"]))
     }
 
@@ -475,6 +486,19 @@ mod tests {
                     and are filtered at scoring time");
         assert_eq!(cands[0].exchange.as_deref(), Some("US"),
                    "the exchange code is read off the security string");
+    }
+
+    /// The hit-ledger accounting is a promise the budget screen makes to the
+    /// user, so it is pinned rather than left to whatever the seam happens to
+    /// compute. One hit per security-field pair for a reference request,
+    /// matching `budget::estimate_eod_hits`; one for a bulk history request.
+    #[test]
+    fn the_wire_seam_charges_one_hit_per_security_field_pair() {
+        assert_eq!(IDENTITY_FIELDS.len(), 12);
+        assert_eq!(identity_hit_cost(1), 12, "one instrument resolved = 12 hits");
+        assert_eq!(identity_hit_cost(3), 36);
+        assert_eq!(identity_hit_cost(0), 0, "a request for nothing costs nothing");
+        assert_eq!(HIST_IDS_HIT_COST, 1);
     }
 
     #[tokio::test]

@@ -190,3 +190,38 @@ async fn an_empty_query_returns_nothing_rather_than_everything() {
     seed(&pool).await;
     assert!(search::local(&pool, "   ", 10).await.unwrap().is_empty());
 }
+
+/// The other half of the DISTINCT ON key. Two DIFFERENT instruments can
+/// legitimately wear one security string -- the same case `find_by_alias`
+/// refuses to guess between and the resolution engine sends to review. Keying
+/// only on the string collapsed them into a single row, so the one screen
+/// where a user could have spotted the ambiguity showed no ambiguity at all.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn two_instruments_wearing_one_security_string_are_two_rows() {
+    let pool = common::pool().await;
+    let security = format!("{} GY Equity", uniq("BMWS"));
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let inst = store::create(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
+            id_type: "bdp_security".into(), value: security.clone(),
+            exch_code: Some("GY".into()), valid_from: d("2000-01-01"), valid_to: None,
+            source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+        }).await.unwrap();
+        tx.commit().await.unwrap();
+        ids.push(inst.instrument_id);
+    }
+
+    let hits = search::local(&pool, &security, 10).await.unwrap();
+    let mut found: Vec<i64> = hits.iter()
+        .filter(|h| h.security.as_deref() == Some(security.as_str()))
+        .filter_map(|h| h.instrument_id)
+        .collect();
+    found.sort_unstable();
+    ids.sort_unstable();
+    assert_eq!(found, ids,
+               "both instruments must surface, not one of them arbitrarily: {hits:#?}");
+}

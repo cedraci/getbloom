@@ -34,11 +34,39 @@ Every task's requirements implicitly include this section.
 
 ## Deviations from the spec, and why
 
-Two, both stated here rather than buried in a task.
+Three, all stated here rather than buried in a task.
 
 **1. The fetch pipeline keeps working (Task 12).** Spec §2 puts all observation writing in P2 and says the `observation` table "stays empty" after P1. Taken literally, that leaves the application unable to fetch anything for a whole phase, and a plan is supposed to produce working software. Task 12 therefore pulls forward the smallest possible piece of P2: the sidecar sets all four adjustment flags to `false`, and ingest inserts append-only rows at `layer = 'raw'` with `basis_id` pointing at the seeded RAW basis. Point-in-time reads, supersession on correction, and every other layer remain P2. If P1 should instead leave the pipeline dark, drop Task 12's ingest steps and keep only its identity retargeting.
 
 **2. Local search uses per-table GIN indexes and a UNION, not one `search_text` column.** Spec §6.1 describes "a GIN trigram index covering a `search_text` built from" four sources. A single column would require either a materialised view (stale between refreshes — a newly added book entry would not be findable) or denormalisation triggers on four tables. Indexing each source in place and combining them in the query is fresh by construction. The behaviour §6.1 specifies — ranking by `similarity()`, a minimum threshold, results labelled by origin — is unchanged.
+
+**3. Identity was written only at instrument creation, and is now refreshed on
+every resolution.** This deviation is recorded after the fact, because it was
+not a decision — it was a defect, and the file table above implies otherwise.
+The table gives `resolution/engine.rs` the whole seven-step pipeline and
+`instrument/store.rs` the bitemporal writes, which reads as though a later
+resolution of an instrument already in the master updates what it knows. It did
+not. `bind_identity` was bind-**or-return-existing**: on finding the FIGI (or,
+with no FIGI, the `bdp_security` alias) already present, it returned the
+existing `instrument_id` **before any alias or attribute write at all**.
+`insert_alias` and `set_attr` ran only on the creation branch.
+
+The consequence was the phase's headline promise having no production path.
+An instrument bound while it wore `FB US Equity`, later resolved as
+`META US Equity`, found no local alias at step 2, got the same FIGI back at
+step 3, and had **nothing written**: `current_security` went on answering
+`FB US Equity`, `load_view` went on sending a dead ticker, and the series
+stopped without a single error. Every test that exercised a rename drove
+`history::apply` directly, so nothing caught it.
+
+`reconcile_identity` is the fix (Task C1 of the final fix wave): on the dedup
+path the current `bdp_security` period is closed at today and a new one
+inserted — never an `UPDATE` — and the creation path's attribute loop is re-run
+through a shared `write_attrs_tx`, inside one transaction. It also answers the
+`HISTORICAL_IDS_TIME_RANGE` bootstrap problem (P0 §6.5) in the only way
+available: a rename cannot be *discovered* from a field anchored on the chain's
+start, but it can be discovered from a FIGI we already hold now answering to a
+different security string.
 
 ---
 

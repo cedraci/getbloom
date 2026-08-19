@@ -123,16 +123,32 @@ best AS (
   -- instruments can legitimately wear the same security string (the BMW case
   -- in store.rs) or carry the same label, and keying on the string alone
   -- collapsed them into a single row -- hiding from the user the very
-  -- ambiguity the resolution engine would then send to review. Rows with no
-  -- instrument_id (candidate-cache entries) still collapse by string, which
-  -- is what that key is for.
+  -- ambiguity the resolution engine would then send to review, and making
+  -- the search screen the one place where two instruments look like one.
+  -- DISTINCT ON treats NULLs as equal, so every anonymous candidate-cache row
+  -- for a security still collapses to one.
   SELECT DISTINCT ON (coalesce(security, display), instrument_id)
          origin, security, display, description, instrument_id, similarity
     FROM strong
    ORDER BY coalesce(security, display), instrument_id, rank, similarity DESC
+),
+final AS (
+  -- ...but an ANONYMOUS row (a candidate-cache entry never linked to an
+  -- instrument) must still yield to a real instrument answering for the same
+  -- string, or an instrument in your book would be listed a second time as
+  -- merely "seen before". That is the guarantee `rank` exists for, and
+  -- adding instrument_id to the key above would silently drop it -- so it is
+  -- restated here as a filter instead of being smuggled into the key, where
+  -- the two rules would fight.
+  SELECT b.* FROM best b
+   WHERE b.instrument_id IS NOT NULL
+      OR NOT EXISTS (
+           SELECT 1 FROM best o
+            WHERE o.instrument_id IS NOT NULL
+              AND coalesce(o.security, o.display) = coalesce(b.security, b.display))
 )
 SELECT origin, security, display, description, instrument_id, similarity
-  FROM best ORDER BY similarity DESC, display LIMIT $3
+  FROM final ORDER BY similarity DESC, display LIMIT $3
 "#;
 
 pub async fn local(pool: &PgPool, query: &str, limit: i64) -> AppResult<Vec<SearchHit>> {

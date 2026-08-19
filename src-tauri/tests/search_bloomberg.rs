@@ -51,9 +51,25 @@ async fn the_raw_bloomberg_form_is_never_stored_as_a_security_string() {
                         identifier migration 0004 had to repair");
 }
 
+/// The ledger write moved OUT of this module and into the wire seam
+/// (`BlpapiMasterFetcher`), where a future call site cannot forget it -- four
+/// call sites in `resolution` already had. So what this test pins changed with
+/// it, and both halves matter:
+///
+///   * `search::bloomberg` itself writes nothing to `hit_ledger`. If it still
+///     did, every real search would be charged TWICE, once here and once at
+///     the seam.
+///   * it still reports the charge to its caller, because the UI shows the
+///     estimated cost of the button the user just pressed.
+///
+/// The accounting the seam actually applies is pinned by
+/// `master_fetch`'s `the_wire_seam_charges_one_hit_per_security_field_pair`;
+/// it cannot be exercised here because `MockMasterFetcher` has no pool and
+/// deliberately records nothing, which is what keeps every other test's
+/// ledger assertions honest.
 #[tokio::test]
 #[ignore = "requires postgres"]
-async fn the_call_is_recorded_in_the_hit_ledger() {
+async fn the_search_module_no_longer_writes_the_ledger_itself() {
     let pool = common::pool().await;
     let stem = uniq("AAPL");
     // Scope to rows THIS test creates: a global sum/count over hit_ledger is
@@ -65,20 +81,17 @@ async fn the_call_is_recorded_in_the_hit_ledger() {
 
     let out = search::bloomberg(&pool, &mock(&stem), &stem, "Equity").await.unwrap();
 
-    let new_hits: i64 = sqlx::query_scalar(
-        "SELECT coalesce(sum(estimated_hits),0)::bigint FROM hit_ledger
-          WHERE id > $1 AND purpose = 'search'")
+    let new_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM hit_ledger WHERE id > $1 AND purpose = 'search'")
         .bind(before_id)
         .fetch_one(&pool).await.unwrap();
-    assert_eq!(new_hits, out.estimated_hits);
+    assert_eq!(new_rows, 0,
+               "the ledger is charged at the wire seam; a second write here \
+                would double-count every real search");
+    assert_eq!(out.estimated_hits, getbloomdata_lib::budget::SEARCH_HIT_COST,
+               "the caller is still told what the button cost");
     assert!(out.estimated_hits > 0, "whether instrumentListRequest is metered is \
                                      unknown (spec §10 q2), so it is counted");
-
-    let purpose: String = sqlx::query_scalar(
-        "SELECT purpose FROM hit_ledger WHERE id > $1 ORDER BY id DESC LIMIT 1")
-        .bind(before_id)
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(purpose, "search");
 }
 
 #[tokio::test]

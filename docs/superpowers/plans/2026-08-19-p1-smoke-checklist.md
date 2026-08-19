@@ -15,15 +15,34 @@ Corrections from the draft, verified against the code (not asserted from
 memory) before this checklist was written — see `task-17-report.md` for the
 full trace of each:
 
-- The hit-budget numbers changed. Resolving a never-seen instrument via the
-  **unambiguous identity path** costs 2 calls (1 `ReferenceDataRequest` +
-  1 `HISTORICAL_IDS_TIME_RANGE`). Resolving via **search** costs 4: an
-  identity probe, `instrumentListRequest`, a second identity call for the
-  winner (because the search result is a name/description, never a FIGI —
-  `src-tauri/src/resolution/engine.rs:329`), then the history request. A
-  **locally** ambiguous identifier (two instruments already wearing it)
-  costs **zero** — it goes to review without ever calling `fetcher`
-  (`engine.rs:264-277`).
+- The hit-budget numbers changed, **twice** — the second time in the final fix
+  wave, which is the version that ships. Resolving a never-seen instrument via
+  the **unambiguous identity path** costs **1 call** (1 `ReferenceDataRequest`).
+  Resolving via **search** costs **3**: an identity probe,
+  `instrumentListRequest`, then a second identity call for the winner (because
+  the search result is a name/description, never a FIGI). A **locally**
+  ambiguous identifier (two instruments already wearing it) costs **zero** — it
+  goes to review without ever calling `fetcher`, and is now *closed* for zero
+  too, via the local re-point button.
+
+  The `HISTORICAL_IDS_TIME_RANGE` call that used to ride along on both paths is
+  gone. P0 §6.5 measured why: the field is anchored on the identifier the chain
+  **started** from, and resolution only ever knows the one it **ended** at, so
+  the automatic call returned a well-formed chain belonging to a different
+  company. It is now an explicit action in the instrument detail panel with a
+  user-supplied anchor (`commands::ingest_identifier_history`), costing 1 call
+  when the user asks for it.
+
+- **`hit_ledger` now sees resolution.** The ledger is written at the wire seam
+  in `BlpapiMasterFetcher`, not at call sites, under purposes
+  `resolve_identity`, `resolve_history` and `search`. §4's last box below — the
+  one that could not be verified because the ledger was blind to resolution —
+  is answerable now. Note the unit: an identity request is charged
+  `securities × IDENTITY_FIELDS` (12 per security), matching
+  `budget::estimate_eod_hits`' security-field accounting, so the ledger's
+  *hits* and the checklist's *calls* are deliberately different numbers.
+  `MockMasterFetcher` records nothing, so no automated test's ledger
+  assertions moved.
 - `SIMP_SEC_STATUS` was dropped entirely (`master_fetch.rs:17-23`, P0 §10.2)
   — the draft's line asking to note its distinct values is removed. The one
   remaining open question is whether `instrumentListRequest` is metered.
@@ -129,10 +148,21 @@ row through rather than deleting it (§7).
 
 ## 3. Identifier history
 
-- [ ] Add `META US` (Equity). Its detail panel shows `FB` ending
-      2022-06-09 and `META` from that date, with Action ID 228233742 and an
-      anchoring identifier. — **NOT reproduced live, and the reason is a
-      real finding, not a GUI gap.** Resolving `META US Equity` fresh calls
+- [ ] Add `META US` (Equity). **It costs one call and shows one identifier
+      period — resolution does not fetch identifier history at all any
+      more.** Then, in the detail panel, use **Fetch identifier history**
+      with anchor `FB US Equity` and a range start of 2012-05-18; the panel
+      must then show `FB` ending 2022-06-09 and `META` from that date, with
+      Action ID 228233742 and `FB US Equity` as the anchoring identifier.
+      — **needs the GUI.** The anchor is a user input now precisely because
+      of the finding below.
+- [x] ~~Add `META US` (Equity). Its detail panel shows `FB` ending
+      2022-06-09 automatically.~~ — **NOT reproduced live; the reason was a
+      real finding, and the final fix wave acted on it: both automatic
+      `history::ingest` calls were removed from `resolve()`, and the
+      writing arms of `history::apply` were gated on the New ID being
+      provably ours. The original finding follows.** Resolving
+      `META US Equity` fresh called
       `history::ingest` with `anchor = blocks[0].security = "META US
       Equity"` (the just-resolved, **post-rename** identifier —
       `engine.rs:296-299`). Probed directly against the Terminal:
@@ -167,12 +197,17 @@ row through rather than deleting it (§7).
       instead (confirmed: `ingest_issue` row
       `ambiguous_identifier_owner ... identifier=META anchor=META US Equity
       change_date=2022-01-31 action_id=229098374` was written, and no alias
-      was closed). **This needs re-testing on the genuinely clean
-      `bloomdata`** — it is exactly the scenario the "Before: count = 0"
-      step sets up, and I expect it to reproduce the corruption there
-      because no other instrument will own the bare ticker `META` to
-      trigger the Ambiguous guard. Flagged as the single highest-priority
-      item for the human GUI pass (§9).
+      was closed). ~~**This needs re-testing on the genuinely clean
+      `bloomdata`**~~ — the prediction was right, and it is now covered by
+      an automated test on a clean fixture rather than left to the GUI pass:
+      `identifier_history.rs`'s
+      `a_new_id_nobody_owns_never_closes_our_own_live_alias` builds exactly
+      this shape with `uniq()`-tagged tickers nobody else owns, and asserts
+      the live alias survives and an `unconfirmed_identifier_change`
+      `ingest_issue` is recorded instead. The gate is `new_own == Ours`:
+      only a New ID we provably already hold may drive a write.
+
+      *(End of the original finding.)*
 - [x] `SELECT count(*) FROM instrument_alias WHERE source = 'bloomberg_hist_ids'
       AND anchoring_identifier IS NULL;` returns 0. **Verified against
       `bloom_test`: 0 rows (of 176 `bloomberg_hist_ids`-sourced aliases).**
@@ -199,9 +234,26 @@ row through rather than deleting it (§7).
       AAPL/VFIAX/META (already bound from earlier in this session) resolved
       via `local_alias` for all three — **zero Bloomberg calls at all**,
       not merely zero `hit_ledger` writes.
-- [ ] Total hits for the session are at most 2 per never-seen instrument. —
-      **Cannot be verified via `hit_ledger`, and this is the most
-      significant finding of this task.** `hit_ledger` is written from
+- [ ] Total hits for the session are at most **1 call** per never-seen
+      instrument resolved unambiguously, **3** via search — and, unlike the
+      P1 pass below, this is now checkable against `hit_ledger`. Resolve one
+      never-seen instrument and confirm one row appears with
+      `purpose = 'resolve_identity'` and `estimated_hits = 12`
+      (one security × the twelve `IDENTITY_FIELDS`). Resolve one through the
+      search path and confirm three rows: `resolve_identity`, `search`,
+      `resolve_identity`. Press "Fetch identifier history" once in the
+      instrument detail panel and confirm one `resolve_history` row.
+      — **needs the GUI or a live Terminal.**
+- [x] ~~Total hits for the session are at most 2 per never-seen instrument.~~
+      — **FIXED in the final fix wave; the finding below is retained as the
+      record of what was wrong.** `hit_ledger` is now written at the wire
+      seam inside `BlpapiMasterFetcher` (`master_fetch.rs`), so every
+      security-master request that reaches Bloomberg is charged, whichever
+      call site made it, under purposes `resolve_identity`,
+      `resolve_history` and `search`. The duplicate call-site write in
+      `instrument/search.rs` was deleted. `MockMasterFetcher` deliberately
+      does not record, so no test's ledger assertions changed.
+      **The original finding, as written at the time:** `hit_ledger` is written from
       exactly two call sites in the whole crate: `budget::record_hits`
       (EOD/backfill runs, called from `orchestrator.rs:220`) and
       `budget::record_purpose_hits` (the Search Bloomberg button,
@@ -233,10 +285,25 @@ row through rather than deleting it (§7).
       `resolution.rs`'s review tests and Task 15's review.
 - [ ] In Review, open a **locally ambiguous** review (two instruments
       already in the book wearing the same bare ticker, e.g. two BMW
-      listings) and inspect the candidate rows before clicking anything. —
-      **needs the GUI, and do this one with care — do not click "This
-      one" yet.** Code-traced, high-confidence defect found here, not
-      exercised by any existing test:
+      listings). It must render its own branch: each existing instrument
+      listed by id with a **"This existing instrument (0 calls)"** button,
+      plus "None of these". Click one and confirm `hit_ledger` is
+      **unchanged** — a local re-point makes no Bloomberg call at all — and
+      that the review closes as `resolved` with a `manual` decision carrying
+      `local_repoint: true`. — **needs the GUI.** The engine half is covered
+      by `resolution.rs`'s
+      `a_local_ambiguity_is_re_pointed_at_an_existing_instrument_for_free`.
+
+      **FIXED in the final fix wave. The finding below is retained as the
+      record of what was wrong, and the "do not click" warning it ends with
+      no longer applies** — the branch is reachable, the button spends
+      nothing, and `resolve_review` now refuses any `chosen_security` that
+      `resolution::normalize` does not accept, so the placeholder is
+      unbindable even if the UI regresses
+      (`resolve_review_refuses_a_chosen_security_that_is_not_a_security_string`).
+
+      **The original finding, as written at the time** — code-traced,
+      high-confidence, not exercised by any existing test:
 
       `resolve()`'s local-ambiguity branch (`engine.rs:264-277`) writes
       `resolution_decision.candidates` as a `Vec<Scored>` — an **array** —
@@ -268,14 +335,14 @@ row through rather than deleting it (§7).
       literal string `"instrument #9"`**, bound into the book. This is the
       exact failure class the whole project exists to prevent — a
       confident, silent, wrong write — reachable through the one UI button
-      that exists specifically to resolve this class of review. **Do not
+      that exists specifically to resolve this class of review. ~~**Do not
       click "This one" on a locally-ambiguous review in the GUI pass**
-      until this is fixed; use "None of these" (reject) instead, or resolve
-      the ambiguity by editing the book directly, which is what the
-      screen's own text recommends for this shape
-      (`ReviewScreen.svelte:101-106`, the dead `isLocalAmbiguityNote`
-      branch's guidance — ironically correct advice attached to a branch
-      that can never render).
+      until this is fixed~~; the screen's own text for this shape
+      (`ReviewScreen.svelte`, the dead `isLocalAmbiguityNote` branch's
+      guidance) was ironically correct advice attached to a branch that
+      could never render.
+
+      *(End of the original finding.)*
 
 ## 6. Instrument detail panel — rename as two validity periods (new)
 
