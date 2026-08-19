@@ -45,6 +45,7 @@ import time
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8194
 REFDATA_SERVICE = "//blp/refdata"
+INSTRUMENTS_SERVICE = "//blp/instruments"
 
 EXIT_OK, EXIT_TIMEOUT, EXIT_SESSION, EXIT_BADINPUT = 0, 2, 3, 4
 
@@ -147,12 +148,21 @@ def validate_request_spec(spec, where="request"):
     """Structural validation. Returns a list of human-readable errors."""
     errors = []
     kind = spec.get("kind")
-    if kind not in ("history", "reference"):
+    if kind not in ("history", "reference", "bulk_reference", "instrument_list"):
         return [f"{where}: unknown request kind: {kind!r}"]
+
+    if kind == "instrument_list":
+        if not str(spec.get("query") or "").strip():
+            errors.append(f"{where}: instrument_list needs a non-empty query")
+        return errors
+
     if not spec.get("securities"):
         errors.append(f"{where}: no securities")
     if not spec.get("fields"):
         errors.append(f"{where}: no fields")
+    for i, ov in enumerate(spec.get("overrides") or []):
+        if not ov.get("fieldId") or ov.get("value") is None:
+            errors.append(f"{where}: overrides[{i}] needs fieldId and value")
     if kind == "history":
         start, end = iso_date(spec.get("start")), iso_date(spec.get("end"))
         if start is None:
@@ -161,7 +171,7 @@ def validate_request_spec(spec, where="request"):
             errors.append(f"{where}: invalid end date {spec.get('end')!r}")
         if start and end and start > end:
             errors.append(f"{where}: start {start} after end {end}")
-    elif iso_date(spec.get("obs_date")) is None:
+    elif kind == "reference" and iso_date(spec.get("obs_date")) is None:
         errors.append(f"{where}: invalid obs_date {spec.get('obs_date')!r}")
     return errors
 
@@ -296,13 +306,68 @@ def parse_reference_message(req, msg, obs_out, prob_out):
                                         "field absent from response"))
 
 
+def parse_bulk_message(spec, msg, rows_out, problems_out):
+    """Bulk (table-valued) reference fields.
+
+    P0 5: a field whose ftype is 'BulkFormat' returns a LIST OF DICTS, not a
+    scalar. Reading it with the scalar path would coerce a whole corporate-action
+    table into one meaningless string, so bulk fields get their own kind and
+    their own output section.
+    """
+    for sec_data in msg.get("securityData", []):
+        security = sec_data.get("security")
+        sec_err = sec_data.get("securityError")
+        if sec_err:
+            problems_out.append(problem(
+                security, None, None, classify_security_error(sec_err),
+                sec_err.get("message", "")))
+            continue
+        failed = {}
+        for exc in sec_data.get("fieldExceptions", []):
+            info = exc.get("errorInfo") or {}
+            failed[exc.get("fieldId")] = info
+            problems_out.append(problem(
+                security, exc.get("fieldId"), None, "field_error",
+                info.get("message", "")))
+        fdata = sec_data.get("fieldData") or {}
+        for f in spec.get("fields", []):
+            if f in failed:
+                continue
+            value = fdata.get(f)
+            if not value:
+                problems_out.append(problem(
+                    security, f, None, "no_data", "bulk field absent or empty"))
+                continue
+            # toPy() gives a list of dicts for a bulk field. A scalar here means
+            # the field is not actually bulk, which is worth saying out loud.
+            if not isinstance(value, list):
+                problems_out.append(problem(
+                    security, f, None, "not_bulk",
+                    f"expected a table, got {type(value).__name__}"))
+                continue
+            rows_out.append({"security": security, "field": f,
+                             "rows": [dict(r) for r in value]})
+
+
+def parse_instrument_list_message(msg, out):
+    """instrumentListRequest results, kept exactly as returned.
+
+    The 'AAPL US<equity>' form is NOT normalised here: Rust owns that rule and
+    its regression test, and a sidecar that silently rewrote identifiers would
+    put the conversion beyond the reach of those tests.
+    """
+    for r in msg.get("results", []):
+        out.append({"security": r.get("security"),
+                    "description": r.get("description", "")})
+
+
 def parse_capture(capture):
-    """capture -> (observations, problems, fatal_detail_or_None).
+    """capture -> (observations, problems, bulk_rows, list_results, fatal|None).
 
     `capture` is {"run_id":.., "captured":[{"request":{..},"messages":[..]}]}
     -- exactly what --raw-out writes and --replay reads.
     """
-    observations, problems = [], []
+    observations, problems, bulk_rows, list_results = [], [], [], []
     for item in capture.get("captured", []):
         req = item.get("request") or {}
         kind = req.get("kind")
@@ -310,20 +375,24 @@ def parse_capture(capture):
         # produce observations stamped with impossible dates.
         spec_errors = validate_request_spec(req)
         if spec_errors:
-            return observations, problems, "; ".join(spec_errors)
+            return observations, problems, bulk_rows, list_results, "; ".join(spec_errors)
         for msg in item.get("messages", []):
             resp_err = msg.get("responseError")
             if resp_err:
                 # Request-level failure: not attributable to any one security,
                 # so it is fatal rather than a per-cell problem.
-                return observations, problems, (
+                return observations, problems, bulk_rows, list_results, (
                     f"responseError {resp_err.get('category', '')}: "
                     f"{resp_err.get('message', '')}")
             if kind == "history":
                 parse_history_message(req, msg, observations, problems)
-            else:
+            elif kind == "reference":
                 parse_reference_message(req, msg, observations, problems)
-    return observations, problems, None
+            elif kind == "bulk_reference":
+                parse_bulk_message(req, msg, bulk_rows, problems)
+            else:
+                parse_instrument_list_message(msg, list_results)
+    return observations, problems, bulk_rows, list_results, None
 
 
 # --------------------------------------------------------------------------
@@ -364,6 +433,9 @@ def open_session(blpapi, host, port):
         raise SessionError(
             f"openService('{REFDATA_SERVICE}') failed -- the session connected "
             "but the refdata service was refused (entitlement?)")
+    # Optional: only instrument_list needs it, and a run that never searches
+    # should not fail because the search service is unavailable.
+    session.openService(INSTRUMENTS_SERVICE)
     return session
 
 
@@ -377,8 +449,15 @@ def build_request(blpapi, service, spec):
         # Holidays must come back as *absent* rows, not as filled-forward
         # values -- that is what makes the `no_data` issue honest.
         r.set("nonTradingDayFillOption", "ACTIVE_DAYS_ONLY")
-    elif kind == "reference":
+    elif kind in ("reference", "bulk_reference"):
         r = service.createRequest("ReferenceDataRequest")
+    elif kind == "instrument_list":
+        r = service.createRequest("instrumentListRequest")
+        r.set("query", spec["query"])
+        if spec.get("yellow_key_filter"):
+            r.set("yellowKeyFilter", spec["yellow_key_filter"])
+        r.set("maxResults", int(spec.get("max_results", 20)))
+        return r
     else:
         raise SessionError(f"unknown request kind: {kind!r}")
 
@@ -386,6 +465,17 @@ def build_request(blpapi, service, spec):
         r.getElement("securities").appendValue(s)
     for f in spec.get("fields", []):
         r.getElement("fields").appendValue(f)
+
+    # Field overrides. HISTORICAL_IDS_TIME_RANGE needs
+    # HISTORICAL_STARTING_IDENTIFIER; without it Bloomberg answers about a
+    # different instrument that once wore the same ticker (P0 6.4).
+    overrides = spec.get("overrides") or []
+    if overrides:
+        ov = r.getElement("overrides")
+        for o in overrides:
+            e = ov.appendElement()
+            e.setElement("fieldId", o["fieldId"])
+            e.setElement("value", str(o["value"]))
     return r
 
 
@@ -422,8 +512,15 @@ def run_fetch(payload, raw_out):
                            int(payload.get("port", DEFAULT_PORT)))
     captured = []
     try:
-        service = session.getService(REFDATA_SERVICE)
+        refdata_service = session.getService(REFDATA_SERVICE)
         for spec in payload.get("requests", []):
+            # instrument_list lives on //blp/instruments, not //blp/refdata --
+            # a request built against the wrong service object fails at the
+            # blpapi layer with an opaque error, so route it explicitly.
+            if spec.get("kind") == "instrument_list":
+                service = session.getService(INSTRUMENTS_SERVICE)
+            else:
+                service = refdata_service
             req = build_request(blpapi, service, spec)
             log(f"  -> {spec.get('kind')}: {len(spec.get('securities', []))} "
                 f"securities x {len(spec.get('fields', []))} fields")
@@ -447,31 +544,36 @@ def run_fetch(payload, raw_out):
 # Output protocol
 # --------------------------------------------------------------------------
 
-def emit(status, seconds, detail, observations, problems, code):
+def emit(status, seconds, detail, observations, problems, code,
+        bulk_rows=None, list_results=None):
     print(json.dumps({
         "status": status,
         "seconds": round(seconds, 2),
         "detail": detail or "",
         "observations": observations,
         "problems": problems,
+        "bulk_rows": bulk_rows or [],
+        "list_results": list_results or [],
     }, separators=(",", ":")))
     sys.stdout.flush()
     return code
 
 
 def finish(capture, started):
-    observations, problems, fatal = parse_capture(capture)
+    observations, problems, bulk_rows, list_results, fatal = parse_capture(capture)
     seconds = time.monotonic() - started
     if fatal:
         return emit("error", seconds, fatal, [], [], EXIT_SESSION)
-    if not observations and not problems:
+    if not observations and not problems and not bulk_rows and not list_results:
         # Structurally impossible for a well-formed request. Treated as a
         # fault so a silent no-op can never look like a successful run.
         return emit("empty", seconds,
                     "response contained neither observations nor problems",
                     [], [], EXIT_SESSION)
-    log(f"{len(observations)} observations, {len(problems)} problems")
-    return emit("ok", seconds, "", observations, problems, EXIT_OK)
+    log(f"{len(observations)} observations, {len(problems)} problems, "
+        f"{len(bulk_rows)} bulk rows, {len(list_results)} list results")
+    return emit("ok", seconds, "", observations, problems, EXIT_OK,
+               bulk_rows, list_results)
 
 
 # --------------------------------------------------------------------------
@@ -513,7 +615,7 @@ def do_probe(args):
         except Exception:
             pass
 
-    obs, probs, fatal = parse_capture(
+    obs, probs, _bulk_rows, _list_results, fatal = parse_capture(
         {"captured": [{"request": spec, "messages": messages}]})
     if fatal:
         print(f"  [FAIL] {fatal}")

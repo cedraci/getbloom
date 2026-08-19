@@ -91,8 +91,8 @@ class RealEodTests(unittest.TestCase):
     """Live capture: 2 securities x 2 history fields + NAME, obs_date 2026-08-17."""
 
     def setUp(self):
-        self.obs, self.probs, self.fatal = blp_fetch.parse_capture(
-            load("real_eod.json"))
+        (self.obs, self.probs, self.bulk_rows, self.list_results,
+         self.fatal) = blp_fetch.parse_capture(load("real_eod.json"))
         self.got = by_key(self.obs)
 
     def test_clean_run_has_no_problems(self):
@@ -122,8 +122,8 @@ class RealEodTests(unittest.TestCase):
 
 class RealProblemTests(unittest.TestCase):
     def setUp(self):
-        self.obs, self.probs, self.fatal = blp_fetch.parse_capture(
-            load("real_problems.json"))
+        (self.obs, self.probs, self.bulk_rows, self.list_results,
+         self.fatal) = blp_fetch.parse_capture(load("real_problems.json"))
         self.p = by_key(self.probs)
 
     def test_partial_run_still_returns_good_data(self):
@@ -155,8 +155,8 @@ class RealBadSecurityTests(unittest.TestCase):
     """A genuinely unknown ticker DOES produce securityError, on both kinds."""
 
     def setUp(self):
-        self.obs, self.probs, self.fatal = blp_fetch.parse_capture(
-            load("real_bad_security.json"))
+        (self.obs, self.probs, self.bulk_rows, self.list_results,
+         self.fatal) = blp_fetch.parse_capture(load("real_bad_security.json"))
 
     def test_no_observations_and_all_problems_are_invalid_security(self):
         self.assertIsNone(self.fatal)
@@ -179,7 +179,8 @@ class RealBadSecurityTests(unittest.TestCase):
 
 class RealBackfillTests(unittest.TestCase):
     def test_multiday_rows_all_ingested_in_order(self):
-        obs, probs, fatal = blp_fetch.parse_capture(load("real_backfill.json"))
+        obs, probs, _bulk_rows, _list_results, fatal = blp_fetch.parse_capture(
+            load("real_backfill.json"))
         self.assertIsNone(fatal)
         self.assertEqual(probs, [])
         self.assertEqual([o["date"] for o in obs],
@@ -198,7 +199,7 @@ class RealBackfillTests(unittest.TestCase):
             "messages": [{"securityData": {
                 "security": "AAPL US Equity", "fieldExceptions": [],
                 "fieldData": []}}]}]}
-        obs, probs, fatal = blp_fetch.parse_capture(capture)
+        obs, probs, _bulk_rows, _list_results, fatal = blp_fetch.parse_capture(capture)
         self.assertIsNone(fatal)
         self.assertEqual((obs, probs), ([], []))
 
@@ -208,7 +209,8 @@ class FatalTests(unittest.TestCase):
         # Live capture of start=end=20261301. Bloomberg returned an empty
         # fieldData and NO error, so without validation this would have become
         # a `no_data` issue dated 2026-13-01 on an exit-0 run.
-        obs, probs, fatal = blp_fetch.parse_capture(load("real_bad_date.json"))
+        obs, probs, _bulk_rows, _list_results, fatal = blp_fetch.parse_capture(
+            load("real_bad_date.json"))
         self.assertIsNotNone(fatal)
         self.assertIn("invalid start date", fatal)
         self.assertEqual((obs, probs), ([], []))
@@ -216,12 +218,13 @@ class FatalTests(unittest.TestCase):
     def test_response_error_is_fatal_not_per_cell(self):
         # A request-level failure is not attributable to any one security, so
         # it must fail the run rather than becoming warnings.
-        obs, probs, fatal = blp_fetch.parse_capture(load("response_error.json"))
+        obs, probs, _bulk_rows, _list_results, fatal = blp_fetch.parse_capture(
+            load("response_error.json"))
         self.assertIsNotNone(fatal)
         self.assertIn("Invalid start date", fatal)
 
     def test_unknown_request_kind_is_fatal(self):
-        obs, probs, fatal = blp_fetch.parse_capture(
+        obs, probs, _bulk_rows, _list_results, fatal = blp_fetch.parse_capture(
             {"captured": [{"request": {"kind": "intraday"},
                            "messages": [{"securityData": {}}]}]})
         self.assertIsNotNone(fatal)
