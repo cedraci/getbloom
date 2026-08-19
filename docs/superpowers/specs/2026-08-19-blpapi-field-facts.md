@@ -367,5 +367,14 @@ must be anchored.
 3. Whether Desktop API bulk CA requests are metered differently from price
    requests — the hit-budget estimator is still calibrated to the Excel add-in's
    accounting and remains provisional.
-4. Licensing (carried from A2 §11): the probe proves technical reachability, not
-   that programmatic Desktop API use is contractually permitted. Still one email.
+**Closed since first writing:**
+
+4. ~~Licensing (carried from A2 §11)~~ — **settled 2026-08-19.** The user holds a
+   BLPAPI licence permitting programmatic Desktop API use, with a daily allowance
+   of **500,000 hits**. Two consequences. The design constraint "call Bloomberg
+   only when needed" stands on its own merits and is unchanged — a resolved
+   instrument is never re-resolved, and typing never calls out. But the *margin*
+   is far wider than the estimator was tuned for: the A2 hit accounting was
+   calibrated against the Excel add-in and treats the budget as scarce. Nothing
+   in P1 depends on that calibration, so it is left alone here; the soft limit is
+   a user setting and can be raised whenever the estimator is revisited.

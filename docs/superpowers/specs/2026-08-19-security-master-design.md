@@ -505,9 +505,9 @@ metered at all is unknown (§10).
    Counted conservatively until observed.
 3. **`SIMP_SEC_STATUS` value domain.** Its codes were not enumerated; needed
    before status drives any behaviour beyond display.
-4. **Licensing**, carried from A2 §11 and still open: the probe proves technical
-   reachability, not that programmatic Desktop API use is contractually
-   permitted.
+4. ~~**Licensing**~~ — **settled 2026-08-19**: the user holds a BLPAPI licence for
+   programmatic Desktop API use, 500,000 hits/day. The "call only when needed"
+   constraint is unchanged; only the margin is wider than assumed.
 
 ---
 
