@@ -86,10 +86,20 @@ pub fn forever() -> NaiveDate {
 }
 
 pub async fn create(pool: &PgPool) -> AppResult<Instrument> {
+    let mut tx = pool.begin().await?;
+    let inst = create_tx(&mut tx).await?;
+    tx.commit().await?;
+    Ok(inst)
+}
+
+/// Same as `create`, but inside a transaction the caller controls -- for a
+/// caller (resolution::engine::bind_identity) that must commit the new
+/// instrument together with its identity or not at all.
+pub async fn create_tx(tx: &mut Tx<'_>) -> AppResult<Instrument> {
     Ok(sqlx::query_as::<_, Instrument>(
         "INSERT INTO instrument DEFAULT VALUES
          RETURNING instrument_id, id_bb_global, id_bb_unique")
-        .fetch_one(pool).await?)
+        .fetch_one(&mut **tx).await?)
 }
 
 /// Fill the Bloomberg identifiers once they are known. The trigger refuses any
@@ -98,13 +108,24 @@ pub async fn set_bloomberg_ids(pool: &PgPool, instrument_id: i64,
                                figi: Option<&str>, bbg_unique: Option<&str>)
     -> AppResult<()>
 {
+    let mut tx = pool.begin().await?;
+    set_bloomberg_ids_tx(&mut tx, instrument_id, figi, bbg_unique).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Same as `set_bloomberg_ids`, but inside a transaction the caller controls.
+pub async fn set_bloomberg_ids_tx(tx: &mut Tx<'_>, instrument_id: i64,
+                                  figi: Option<&str>, bbg_unique: Option<&str>)
+    -> AppResult<()>
+{
     sqlx::query(
         "UPDATE instrument
             SET id_bb_global = COALESCE($2, id_bb_global),
                 id_bb_unique = COALESCE($3, id_bb_unique)
           WHERE instrument_id = $1")
         .bind(instrument_id).bind(figi).bind(bbg_unique)
-        .execute(pool).await?;
+        .execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -295,6 +316,23 @@ pub async fn set_attr(tx: &mut Tx<'_>, instrument_id: i64, attr: &str, value: &s
         .bind(instrument_id).bind(attr).bind(value).bind(valid_from)
         .bind(valid_to).bind(source).bind(decision_id)
         .execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// The instrument's lifecycle ended on `at`. Every attribute still open past
+/// that date is capped there -- the durable way to say "this stopped being
+/// true," mirroring what `close_alias` already does for identifiers.
+/// `valid_from < $2` is required rather than assumed: a caller passing an
+/// `at` that does not postdate a period's start must not be allowed to
+/// produce a row that fails `CHECK (valid_from < valid_to)`.
+pub async fn close_attrs_at(tx: &mut Tx<'_>, instrument_id: i64, at: NaiveDate)
+    -> AppResult<()>
+{
+    sqlx::query(
+        "UPDATE instrument_attr SET valid_to = $2
+          WHERE instrument_id = $1 AND system_to = 'infinity'
+            AND valid_to > $2 AND valid_from < $2")
+        .bind(instrument_id).bind(at).execute(&mut **tx).await?;
     Ok(())
 }
 

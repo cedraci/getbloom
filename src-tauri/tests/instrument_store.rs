@@ -413,3 +413,51 @@ async fn bloomberg_ids_can_be_filled_once_and_never_changed() {
         .await.unwrap_err();
     assert!(err.to_string().contains("write-once"), "got: {err}");
 }
+
+/// close_attrs_at is the attribute-side counterpart of close_alias: the
+/// durable way to say an instrument's lifecycle ended, since set_attr alone
+/// always leaves a period open (forever, absent a later one).
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn close_attrs_at_caps_every_current_attribute_at_the_given_date() {
+    let pool = common::pool().await;
+    let inst = store::create(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "TEST CO",
+                    d("2000-01-01"), "bloomberg", None).await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "currency", "USD",
+                    d("2000-01-01"), "bloomberg", None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    store::close_attrs_at(&mut tx, inst.instrument_id, d("2010-06-30")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let before = store::attrs(&pool, inst.instrument_id, d("2005-01-01")).await.unwrap();
+    assert_eq!(before.len(), 2, "still current before the close date");
+    let after = store::attrs(&pool, inst.instrument_id, d("2015-01-01")).await.unwrap();
+    assert!(after.is_empty(), "nothing reads as current past the close date");
+}
+
+/// A close date that does not postdate a period's start must not be allowed
+/// to produce a row failing CHECK (valid_from < valid_to) -- the guard is
+/// `valid_from < $2` in the UPDATE itself, not caller discipline.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn close_attrs_at_leaves_a_period_alone_when_the_date_does_not_postdate_it() {
+    let pool = common::pool().await;
+    let inst = store::create(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    store::set_attr(&mut tx, inst.instrument_id, "name", "TEST CO",
+                    d("2000-01-01"), "bloomberg", None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    // A close date before this period even starts must be a no-op, not a
+    // constraint violation.
+    store::close_attrs_at(&mut tx, inst.instrument_id, d("1999-01-01")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let still_open = store::attrs(&pool, inst.instrument_id, d("2020-01-01")).await.unwrap();
+    assert_eq!(still_open.len(), 1, "the period is untouched, still open-ended");
+}

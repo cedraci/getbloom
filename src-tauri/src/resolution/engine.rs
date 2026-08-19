@@ -13,7 +13,7 @@
 //! ticker (BMW in Frankfurt and in the US), and a Bloomberg call cannot
 //! resolve an ambiguity that is entirely local.
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::instrument::store::{self, NewAlias};
 use crate::master_fetch::{IdentityBlock, MasterFetcher};
 use crate::resolution::normalize::{build_security, detect_id_kind};
@@ -88,12 +88,56 @@ async fn record_decision(pool: &PgPool, input: &ResolveInput, normalized: &str,
         .fetch_one(pool).await?)
 }
 
+/// The day before `d` -- used to derive an honest floor for a validity
+/// period when only an end date is known. Falls back to `d` itself only at
+/// chrono::NaiveDate's own minimum, which no real Bloomberg date reaches.
+fn day_before(d: NaiveDate) -> NaiveDate {
+    d.pred_opt().unwrap_or(d)
+}
+
+/// A validity period that is always non-empty, satisfying every alias/attr
+/// row's `CHECK (valid_from < valid_to)`.
+///
+/// LISTING_DATE is the honest start when it actually precedes INACTIVE_DATE.
+/// A delisted security can have INACTIVE_DATE with no LISTING_DATE at all
+/// (routine outside cash equities), or -- more rarely -- a LISTING_DATE that
+/// is not strictly before INACTIVE_DATE (equal, or Bloomberg data that is
+/// simply wrong). Either would otherwise produce `valid_from >= valid_to`
+/// and the insert would die on SQLSTATE 23514 after the decision row (and,
+/// pre-fix, the FIGI) were already committed. When INACTIVE_DATE is known but
+/// cannot anchor a period from LISTING_DATE, the day before it is the honest
+/// floor: we know the instrument existed then, because it had not yet died.
+fn validity_period(listing_date: Option<NaiveDate>, inactive_date: Option<NaiveDate>,
+                   as_of: NaiveDate) -> (NaiveDate, Option<NaiveDate>)
+{
+    match (listing_date, inactive_date) {
+        (Some(listed), Some(inactive)) if listed < inactive => (listed, Some(inactive)),
+        (Some(listed), None) => (listed, None),
+        (_, Some(inactive)) => (day_before(inactive), Some(inactive)),
+        (None, None) => (as_of, None),
+    }
+}
+
 /// Write an identity block into the master: one instrument, its aliases, its
-/// attributes. Idempotent on re-resolution because find_by_alias runs first.
+/// attributes. Idempotent on re-resolution:
+/// - a FIGI already in the master identifies the same instrument, not a new
+///   one -- the common case, since almost every IDENTITY_FIELDS response
+///   carries one;
+/// - when there is no FIGI (the resolve_review fallback path), the same
+///   bdp_security alias does instead, so a double-submit or two reviews
+///   resolved to the same security while Bloomberg stays silent cannot mint
+///   two instruments wearing one identifier. A genuine local ambiguity here
+///   (more than one existing match) is not this function's call to
+///   arbitrate -- find_by_alias answers None and a fresh instrument is
+///   created, same as if nothing had matched.
+///
+/// The lookup and the write happen inside one transaction so the instrument
+/// row, its Bloomberg ids, its aliases and its attributes commit or vanish
+/// together -- never a FIGI permanently claimed by an empty shell because a
+/// later statement in this function failed.
 async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
                        as_of: NaiveDate) -> AppResult<i64>
 {
-    // A FIGI already in the master is the same instrument, not a new one.
     if let Some(figi) = block.figi.as_deref() {
         if let Some(existing) = sqlx::query_scalar::<_, i64>(
             "SELECT instrument_id FROM instrument WHERE id_bb_global = $1")
@@ -101,17 +145,19 @@ async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
         {
             return Ok(existing);
         }
+    } else if let Some(existing) = store::find_by_alias(
+        pool, "bdp_security", &block.security, as_of).await?
+    {
+        return Ok(existing);
     }
-    let inst = store::create(pool).await?;
-    store::set_bloomberg_ids(pool, inst.instrument_id, block.figi.as_deref(),
-                             block.bbg_unique.as_deref()).await?;
 
-    // Listing date is the honest start of every identifier's validity; without
-    // one, today is the only date we can defend.
-    let from = block.listing_date.unwrap_or(as_of);
-    let to = block.inactive_date;
+    let (from, to) = validity_period(block.listing_date, block.inactive_date, as_of);
 
     let mut tx = pool.begin().await?;
+    let inst = store::create_tx(&mut tx).await?;
+    store::set_bloomberg_ids_tx(&mut tx, inst.instrument_id, block.figi.as_deref(),
+                                block.bbg_unique.as_deref()).await?;
+
     let alias = |id_type: &str, value: &str| NewAlias {
         id_type: id_type.into(), value: value.into(),
         exch_code: block.exch_code.clone(), valid_from: from, valid_to: to,
@@ -141,13 +187,18 @@ async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
         ("instrument_type", &block.security_typ2),
         ("asset_class", &block.market_sector),
         // No "status": P0 §10.2 -- SIMP_SEC_STATUS is a trading-session state,
-        // not a lifecycle one. INACTIVE_DATE above already closes the validity
-        // periods, which is the durable way to say an instrument has ended.
+        // not a lifecycle one. INACTIVE_DATE closes the validity periods
+        // instead -- for aliases via `to` above, and for attributes via
+        // close_attrs_at below -- which is the durable way to say an
+        // instrument has ended.
     ] {
         if let Some(v) = value {
             store::set_attr(&mut tx, inst.instrument_id, attr, v, from,
                             "bloomberg", Some(decision_id)).await?;
         }
+    }
+    if let Some(inactive) = block.inactive_date {
+        store::close_attrs_at(&mut tx, inst.instrument_id, inactive).await?;
     }
     tx.commit().await?;
     Ok(inst.instrument_id)
@@ -236,6 +287,15 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
             pool, input, &security, "bloomberg_ref", None,
             &serde_json::json!([&blocks[0]]), Some(&raw_identity)).await?;
         let iid = bind_identity(pool, &blocks[0], decision_id, input.as_of).await?;
+        // Not fixed, deliberately: a crash between bind_identity committing
+        // and this UPDATE leaves the decision row with chosen_instrument_id
+        // still NULL even though the instrument exists. That is recoverable,
+        // not silently wrong -- step 2's find_by_alias/find_all_by_alias
+        // heals it on the very next resolve of the same identifier (the
+        // instrument is found and bound, or FIGI/bdp_security dedup in
+        // bind_identity above returns the same instrument again), and no
+        // resolution_review is opened on this path, so the "nothing binds
+        // silently" property never depends on this UPDATE completing.
         sqlx::query("UPDATE resolution_decision SET chosen_instrument_id = $2 WHERE id = $1")
             .bind(decision_id).bind(iid).execute(pool).await?;
         return Ok(Resolution::Bound {
@@ -268,6 +328,8 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                 pool, input, &security, "bloomberg_list", None,
                 &candidates_json, Some(&raw_identity)).await?;
             let iid = bind_identity(pool, &block, decision_id, input.as_of).await?;
+            // See the identical UPDATE in step 3 above: a crash here is
+            // recoverable on the next resolve, not silently wrong.
             sqlx::query("UPDATE resolution_decision SET chosen_instrument_id = $2 WHERE id = $1")
                 .bind(decision_id).bind(iid).execute(pool).await?;
             Ok(Resolution::Bound {
@@ -302,6 +364,14 @@ pub async fn pending_reviews(pool: &PgPool) -> AppResult<Vec<PendingReview>> {
         .fetch_all(pool).await?)
 }
 
+#[derive(sqlx::FromRow)]
+struct ReviewContext {
+    decision_id: i64,
+    raw_input: String,
+    status: String,
+    candidates: serde_json::Value,
+}
+
 /// A human picked a candidate. The chosen security is resolved for real -- it
 /// is not bound from the search result, because a search result is a name,
 /// not an identity (spec §6.2: "Selecting a suggestion runs the full §5
@@ -313,14 +383,26 @@ pub async fn pending_reviews(pool: &PgPool) -> AppResult<Vec<PendingReview>> {
 /// is still recorded and bound from a bare block -- refusing here would
 /// discard a human decision over a transient Bloomberg gap -- but the
 /// fallback is flagged in the decision's `candidates` JSON so it stays
-/// visible to later audits.
+/// visible to later audits, alongside the original candidate list and a link
+/// back to the review and the decision it came from -- without those, a
+/// bound instrument's manual decision would record what was chosen but not
+/// what it was chosen from or rejected against.
+///
+/// Refuses a review that is not currently `pending`: resolving twice, or
+/// resolving a review someone already rejected, must not mint a second
+/// instrument for the same identifier out from under the first.
 pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review_id: i64,
                                               chosen_security: &str, by: &str) -> AppResult<i64>
 {
-    let raw_input: String = sqlx::query_scalar(
-        "SELECT d.raw_input FROM resolution_review r
-           JOIN resolution_decision d ON d.id = r.decision_id WHERE r.id = $1")
+    let ctx: ReviewContext = sqlx::query_as(
+        "SELECT d.id AS decision_id, d.raw_input, r.status, d.candidates
+           FROM resolution_review r JOIN resolution_decision d ON d.id = r.decision_id
+          WHERE r.id = $1")
         .bind(review_id).fetch_one(pool).await?;
+    if ctx.status != "pending" {
+        return Err(AppError::Validation(format!(
+            "review {review_id} is not pending (status: {})", ctx.status)));
+    }
 
     let sec = chosen_security.to_string();
     let answered = fetcher.identity(std::slice::from_ref(&sec)).await?;
@@ -332,17 +414,22 @@ pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review
     let candidates = serde_json::json!({
         "chosen_security": chosen_security,
         "bloomberg_fallback": fell_back,
+        "review_id": review_id,
+        "source_decision_id": ctx.decision_id,
+        "original_candidates": ctx.candidates,
     });
 
     let manual_id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO resolution_decision
            (raw_input, normalized, method, candidates, bbg_response, decided_by)
          VALUES ($1,$2,'manual',$3,$4,$5) RETURNING id")
-        .bind(&raw_input).bind(chosen_security).bind(&candidates).bind(&raw_identity).bind(by)
+        .bind(&ctx.raw_input).bind(chosen_security).bind(&candidates).bind(&raw_identity).bind(by)
         .fetch_one(pool).await?;
 
     let iid = bind_identity(pool, &block, manual_id,
                             chrono::Local::now().date_naive()).await?;
+    // See the identical UPDATE in resolve()'s step 3: a crash here is
+    // recoverable on the next resolve, not silently wrong.
     sqlx::query("UPDATE resolution_decision SET chosen_instrument_id = $2 WHERE id = $1")
         .bind(manual_id).bind(iid).execute(pool).await?;
     sqlx::query("UPDATE resolution_review SET status = 'resolved', closed_at = now(),
