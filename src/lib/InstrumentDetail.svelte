@@ -15,6 +15,11 @@
   const OPEN_ENDED = "9999-12-31";
   const until = (d: string) => (d >= OPEN_ENDED ? "present" : d);
 
+  let anchor = $state("");
+  let rangeStart = $state("2000-01-01");
+  let histBusy = $state(false);
+  let histNotice = $state("");
+
   async function load() {
     error = "";
     try {
@@ -23,6 +28,19 @@
     } catch (e) { error = String(e); }
   }
   $effect(() => { load(); });
+
+  async function fetchHistory() {
+    error = ""; histNotice = "";
+    if (!anchor.trim()) { error = "An anchoring identifier is required."; return; }
+    histBusy = true;
+    try {
+      const out = await api.ingestIdentifierHistory(instrumentId, anchor.trim(), rangeStart);
+      histNotice = `${out.aliases_added} identifier period(s) added, `
+        + `${out.links_proposed.length} link proposal(s) opened.`;
+      await load();
+    } catch (e) { error = String(e); }
+    finally { histBusy = false; }
+  }
 </script>
 
 <div class="backdrop">
@@ -52,6 +70,23 @@
     <p class="thin">Two rows for the same type are a change, not a duplicate:
        the earlier one ended when the later one began.</p>
 
+    <h4>Fetch identifier history from Bloomberg</h4>
+    <p class="thin">The anchor must be the identifier the chain <em>started</em>
+       from — the oldest ticker you know this instrument by, not its current
+       one — because Bloomberg reads it as the start of the chain and answers
+       about whoever wore it then. Costs one Bloomberg call.</p>
+    <div class="hist">
+      <label>Anchor
+        <input bind:value={anchor} placeholder="FB US Equity" />
+      </label>
+      <label>From
+        <input type="date" bind:value={rangeStart} />
+      </label>
+      <button onclick={fetchHistory} disabled={histBusy}>
+        {histBusy ? "Asking Bloomberg…" : "Fetch identifier history"}</button>
+    </div>
+    {#if histNotice}<p class="thin">{histNotice}</p>{/if}
+
     <h4>Attributes</h4>
     <table>
       <thead><tr><th>Attribute</th><th>Value</th><th>From</th><th>Until</th>
@@ -78,6 +113,9 @@
   .error { color: #c00; }
   .sec { font-family: ui-monospace, monospace; }
   .thin { color: #666; font-size: 0.9em; }
+  .hist { display: flex; gap: 0.75rem; align-items: flex-end; flex-wrap: wrap;
+          margin-bottom: 0.5rem; }
+  .hist label { display: flex; flex-direction: column; font-size: 0.9em; }
   table { border-collapse: collapse; width: 100%; margin-bottom: 0.5rem; }
   th, td { border-bottom: 1px solid #eee; padding: 0.25rem 0.5rem; text-align: left; }
 </style>

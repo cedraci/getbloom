@@ -101,9 +101,21 @@ export interface ScoredCandidate {
     asset_class?: string | null; figi?: string | null;
   };
   score: number; disqualified: boolean; reasons: string[];
+  /// Present ONLY on a local-ambiguity entry: the existing instrument this
+  /// row stands for. It is what the review screen hands back, because the
+  /// `security` field above may be `instrument #42` -- a placeholder for an
+  /// instrument with no current security string, which Bloomberg cannot
+  /// resolve and which must never become an alias value.
+  instrument_id?: number | null;
 }
+/// A bare identifier already matches more than one instrument already in the
+/// database. No Bloomberg call can resolve that, so none was made -- and none
+/// is needed to close it: the user points at one of the instruments and the
+/// review is re-pointed locally, for free.
 export interface LocalAmbiguityNote {
+  local_ambiguity: true;
   matched: string; bloomberg_calls: number;
+  candidates: ScoredCandidate[];
 }
 export interface ManualResolutionNote {
   chosen_security: string; bloomberg_fallback: boolean;
@@ -111,6 +123,18 @@ export interface ManualResolutionNote {
 }
 export type ReviewCandidates =
   | ScoredCandidate[] | LocalAmbiguityNote | ManualResolutionNote | unknown;
+
+/// What `history::ingest` did with one anchored response.
+export interface HistoryOutcome {
+  aliases_added: number;
+  links_proposed: number[];
+}
+
+/// A stretch of weekdays ONE instrument in a view is missing. Per instrument,
+/// not per view: one member reporting on a date says nothing about the others.
+export interface GapRow {
+  instrument_id: number; label: string; start: string; end: string;
+}
 
 export interface PendingReview {
   review_id: number; decision_id: number; raw_input: string; normalized: string;
@@ -180,8 +204,18 @@ export const api = {
   listPendingReviews: () => invoke<PendingReview[]>("list_pending_reviews"),
   resolveReview: (reviewId: number, chosenSecurity: string) =>
     invoke<number>("resolve_review", { reviewId, chosenSecurity }),
+  /// Closes a LOCALLY ambiguous review by pointing at an instrument that
+  /// already exists. Zero Bloomberg calls, by construction.
+  resolveReviewLocal: (reviewId: number, instrumentId: number) =>
+    invoke<number>("resolve_review_local", { reviewId, instrumentId }),
   rejectReview: (reviewId: number, note: string) =>
     invoke<void>("reject_review", { reviewId, note }),
+  /// One anchored HISTORICAL_IDS_TIME_RANGE request. The anchor is the
+  /// identifier the chain STARTED from and only the user can know it -- see
+  /// `commands::ingest_identifier_history`.
+  ingestIdentifierHistory: (instrumentId: number, anchor: string, rangeStart: string) =>
+    invoke<HistoryOutcome>("ingest_identifier_history",
+                           { instrumentId, anchor, rangeStart }),
   listLinkProposals: () => invoke<LinkProposal[]>("list_link_proposals"),
   confirmLink: (linkId: number) => invoke<void>("confirm_link", { linkId }),
   instrumentAliases: (instrumentId: number) =>
@@ -211,7 +245,7 @@ export const api = {
     invoke<RunOutcome>("run_backfill_now", { viewId, start, end, confirmed }),
   listRuns: (limit: number) => invoke<RunRow[]>("list_runs", { limit }),
   listIssues: (runId: number) => invoke<IssueRow[]>("list_issues", { runId }),
-  detectViewGaps: (viewId: number) => invoke<[string, string][]>("detect_view_gaps", { viewId }),
+  detectViewGaps: (viewId: number) => invoke<GapRow[]>("detect_view_gaps", { viewId }),
   listSchedules: () => invoke<ScheduleRow[]>("list_schedules"),
   upsertSchedule: (viewId: number, windowStart: string, windowEnd: string, active: boolean) =>
     invoke<void>("upsert_schedule", { viewId, windowStart, windowEnd, active }),

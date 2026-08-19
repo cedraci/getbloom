@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { api, type EstimateOut, type IssueRow, type RunRow, type View } from "./api";
+  import { api, type EstimateOut, type GapRow, type IssueRow, type RunRow, type View } from "./api";
 
   let views = $state<View[]>([]);
   let selectedViewId = $state<number | null>(null);
   let estimate = $state<EstimateOut | null>(null);
-  let gaps = $state<[string, string][]>([]);
+  let gaps = $state<GapRow[]>([]);
   let runs = $state<RunRow[]>([]);
   let selectedRun = $state<RunRow | null>(null);
   let issues = $state<IssueRow[]>([]);
@@ -126,13 +126,17 @@
   {/if}
 
   <h2>Gaps (last 30 days)</h2>
+  <p class="thin">Per instrument, not per view: one member reporting on a date
+     says nothing about the others. Backfilling runs the whole view for the
+     range shown.</p>
+  {#if !gaps.length}<p class="thin">No gaps.</p>{/if}
   <table>
-    <thead><tr><th>Start</th><th>End</th><th></th></tr></thead>
+    <thead><tr><th>Instrument</th><th>Start</th><th>End</th><th></th></tr></thead>
     <tbody>
-      {#each gaps as [start, end]}
+      {#each gaps as g}
         <tr>
-          <td>{start}</td><td>{end}</td>
-          <td><button onclick={() => backfillRange(start, end)} disabled={inFlight}>Backfill</button></td>
+          <td>{g.label}</td><td>{g.start}</td><td>{g.end}</td>
+          <td><button onclick={() => backfillRange(g.start, g.end)} disabled={inFlight}>Backfill</button></td>
         </tr>
       {/each}
     </tbody>
@@ -178,6 +182,7 @@
 <style>
   .error { color: #c00; }
   .error-detail { color: #c00; font-size: 0.85em; }
+  .thin { color: #666; font-size: 0.9em; }
   section { padding: 1rem; }
   h2 { margin-top: 1.5rem; }
   table { border-collapse: collapse; margin-top: 0.5rem; width: 100%; }
