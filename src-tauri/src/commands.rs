@@ -127,6 +127,45 @@ pub async fn reject_review(state: State<'_, AppState>, review_id: i64, note: Str
     engine::reject_review(&state.pool, review_id, &note).await
 }
 
+/// Bloomberg exposes no successor field (P0 7.2), so every `instrument_link`
+/// row is inferred, not asserted. A row with `confirmed_by IS NULL` is a
+/// proposal: no query may follow it (see `store::confirmed_successors`) until
+/// a human agrees. `predecessor_label`/`successor_label` come from
+/// `book_entry` and are `None` for an instrument never added to the book --
+/// the proposal is still shown, by instrument id, rather than dropped.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct LinkProposal {
+    pub id: i64,
+    pub predecessor_id: i64,
+    pub successor_id: i64,
+    pub predecessor_label: Option<String>,
+    pub successor_label: Option<String>,
+    pub link_type: String,
+    pub effective_date: chrono::NaiveDate,
+    pub evidence: serde_json::Value,
+}
+
+#[tauri::command]
+pub async fn list_link_proposals(state: State<'_, AppState>)
+    -> Result<Vec<LinkProposal>, AppError> {
+    Ok(sqlx::query_as::<_, LinkProposal>(
+        "SELECT l.id, l.predecessor_id, l.successor_id,
+                bp.label AS predecessor_label, bs.label AS successor_label,
+                l.link_type, l.effective_date, l.evidence
+           FROM instrument_link l
+           LEFT JOIN book_entry bp ON bp.instrument_id = l.predecessor_id
+           LEFT JOIN book_entry bs ON bs.instrument_id = l.successor_id
+          WHERE l.confirmed_by IS NULL
+          ORDER BY l.effective_date DESC")
+        .fetch_all(&state.pool).await?)
+}
+
+#[tauri::command]
+pub async fn confirm_link(state: State<'_, AppState>, link_id: i64)
+    -> Result<(), AppError> {
+    crate::instrument::store::confirm_link(&state.pool, link_id, "user").await
+}
+
 // ---------------------------------------------------------------------------
 // Fields
 // ---------------------------------------------------------------------------

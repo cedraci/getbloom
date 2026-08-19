@@ -70,12 +70,61 @@ export interface SearchHit {
 export interface BloombergSearch {
   hits: SearchHit[]; estimated_hits: number; cached: number;
 }
+// resolution/engine.rs's `PendingReview.candidates` is a bare
+// `serde_json::Value` in Rust, not a typed column -- and `resolution_decision
+// .candidates` is written by three different code paths that each shape it
+// differently (see engine.rs `resolve` and `resolve_review`):
+//
+// 1. Scored candidates -- what both review-opening paths (a local alias
+//    matching more than one live instrument, and an ambiguous Bloomberg
+//    search) actually write today via `serde_json::to_value(&Vec<Scored>)`.
+//    This is the shape a *pending* review's candidates have as the code
+//    stands, and the only one with enough structure for "pick this one"
+//    buttons.
+// 2. The local single-match note `{"matched": <id_type>, "bloomberg_calls":
+//    0}`, written when a bare identifier resolves to exactly one instrument
+//    (`Resolution::Bound`, no review opened).
+// 3. The manual-resolution note written by `resolve_review` itself --
+//    `{chosen_security, bloomberg_fallback, review_id, source_decision_id,
+//    original_candidates}` -- for the *new* decision row a human's choice
+//    creates, not the review being closed.
+//
+// Shapes 2 and 3 do not currently reach a *pending* review (neither writes a
+// `resolution_review` row), but nothing enforces that from the type system on
+// either side -- `candidates` is `Value` in Rust precisely because it isn't
+// one shape. Declaring only shape 1 here would be a lie the compiler cannot
+// catch. Render every shape defensively; never assume which one arrived.
+export interface ScoredCandidate {
+  candidate: {
+    security: string; description: string; exchange: string | null;
+    country?: string | null; currency?: string | null;
+    asset_class?: string | null; figi?: string | null;
+  };
+  score: number; disqualified: boolean; reasons: string[];
+}
+export interface LocalAmbiguityNote {
+  matched: string; bloomberg_calls: number;
+}
+export interface ManualResolutionNote {
+  chosen_security: string; bloomberg_fallback: boolean;
+  review_id: number; source_decision_id: number; original_candidates: unknown;
+}
+export type ReviewCandidates =
+  | ScoredCandidate[] | LocalAmbiguityNote | ManualResolutionNote | unknown;
+
 export interface PendingReview {
   review_id: number; decision_id: number; raw_input: string; normalized: string;
-  candidates: Array<{ candidate: { security: string; description: string;
-                                   exchange: string | null };
-                      score: number; disqualified: boolean; reasons: string[] }>;
+  candidates: ReviewCandidates;
   bbg_response: unknown | null; opened_at: string;
+}
+
+/// Bloomberg exposes no successor field, so every `instrument_link` row is
+/// inferred (see `commands::LinkProposal`). One with `confirmed_by IS NULL`
+/// is a proposal no query may follow until a human confirms it.
+export interface LinkProposal {
+  id: number; predecessor_id: number; successor_id: number;
+  predecessor_label: string | null; successor_label: string | null;
+  link_type: string; effective_date: string; evidence: unknown;
 }
 export interface AliasRow {
   id: number; id_type: string; value: string; exch_code: string | null;
@@ -133,6 +182,8 @@ export const api = {
     invoke<number>("resolve_review", { reviewId, chosenSecurity }),
   rejectReview: (reviewId: number, note: string) =>
     invoke<void>("reject_review", { reviewId, note }),
+  listLinkProposals: () => invoke<LinkProposal[]>("list_link_proposals"),
+  confirmLink: (linkId: number) => invoke<void>("confirm_link", { linkId }),
   instrumentAliases: (instrumentId: number) =>
     invoke<AliasRow[]>("instrument_aliases", { instrumentId }),
   instrumentAttrs: (instrumentId: number) =>
