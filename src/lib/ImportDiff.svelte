@@ -49,6 +49,18 @@
                                               needsCount ? plan.removals.length : null);
       const counts = summarizeCounts(res);
       const summary = counts ? `Imported (${counts}).` : "Imported.";
+      if (!plan.has_id_column) {
+        // Nothing failed here: a sheet with no id column is one the user wrote
+        // themselves, so apply_assets_import deliberately leaves it alone
+        // rather than replacing their file with a full registry export. It
+        // reports workbook_refreshed false because the file genuinely was not
+        // rewritten, which is why this case must be told apart from the locked
+        // one below -- the advice is completely different.
+        onclose(true, `${summary} Your sheet was left exactly as you wrote it. `
+                    + "Export the workbook if you want a copy carrying the ids, "
+                    + "and edit that one from now on.");
+        return;
+      }
       if (!res.workbook_refreshed) {
         // The import COMMITTED. Only the write-back of the new ids into the
         // workbook failed, and the file is almost always locked because the
