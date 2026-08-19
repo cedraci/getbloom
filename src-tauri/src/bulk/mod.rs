@@ -25,8 +25,15 @@ pub struct ImportResult {
     pub edited: i64,
     pub retired: i64,
     pub reactivated: i64,
-    pub membership_updated: i64,
+    /// Count of ASSETS whose view membership changed, not of memberships --
+    /// an asset that gains two views and loses one still counts once here.
+    pub membership_assets_updated: i64,
     pub removed: i64,
+    /// Whether the post-commit re-export of the workbook (see `apply_import`)
+    /// actually landed on disk. `false` means the committed changes are real
+    /// but the file the user is looking at is now stale and must be
+    /// re-exported before the next preview/apply.
+    pub workbook_refreshed: bool,
 }
 
 /// Every asset, flattened to the names the sheet and the differ speak in.
@@ -101,7 +108,12 @@ pub async fn preview_import(pool: &PgPool, path: &Path) -> AppResult<ImportPlan>
 /// The hash check is the point of the two phases: a plan the user reviewed can
 /// never be applied against a file that changed underneath it. The re-diff
 /// matters just as much -- the database may have moved on even when the file
-/// has not.
+/// has not. Every `removal_modes` entry must name a removal actually present
+/// in the fresh plan, and every fresh removal must be named in
+/// `removal_modes`: nothing is applied against a removal set the caller did
+/// not review. Once the transaction commits, the workbook is re-exported over
+/// `path` best-effort -- see the comment at that call site for why a failed
+/// refresh still returns `Ok`.
 pub async fn apply_import(
     pool: &PgPool,
     path: &Path,
@@ -116,6 +128,15 @@ pub async fn apply_import(
         });
     }
     let plan = plan_for(pool, path).await?;
+    // `plan_for` re-reads and re-hashes the file itself. Checking its hash too
+    // closes the gap between the read above and this one -- a file that
+    // changed in that window must not be applied either -- and the second
+    // read already paid for the comparison, so this costs nothing extra.
+    if plan.file_hash != file_hash {
+        return Err(AppError::ImportRejected {
+            reason: "the file changed since it was previewed; preview it again".into(),
+        });
+    }
     if !plan.invalid_rows.is_empty() {
         return Err(AppError::ImportRejected {
             reason: format!("{} invalid row(s); nothing was applied", plan.invalid_rows.len()),
@@ -132,6 +153,22 @@ pub async fn apply_import(
     }
 
     let modes: HashMap<i64, DeleteMode> = removal_modes.iter().copied().collect();
+
+    // Every removal about to be applied must be one the caller actually
+    // reviewed. Without this, an asset that vanished from the sheet only
+    // because another writer changed the registry between preview and apply
+    // -- never something the user looked at -- would silently fall back to
+    // Retire below. A stale plan must be refused outright, not partially
+    // honoured with a guessed mode.
+    let unreviewed = plan.removals.iter().filter(|r| !modes.contains_key(&r.id)).count();
+    if unreviewed > 0 {
+        return Err(AppError::ImportRejected {
+            reason: format!(
+                "{unreviewed} removal(s) were not part of the reviewed plan; \
+                 the registry changed since this sheet was previewed -- preview it again"),
+        });
+    }
+
     let classes: HashMap<String, i64> = {
         let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM asset_class")
             .fetch_all(pool).await?;
@@ -207,7 +244,7 @@ pub async fn apply_import(
             sqlx::query("DELETE FROM view_asset WHERE view_id = $1 AND asset_id = $2")
                 .bind(view_id(v)?).bind(m.id).execute(&mut *tx).await?;
         }
-        res.membership_updated += 1;
+        res.membership_assets_updated += 1;
     }
 
     for r in &plan.retires {
@@ -222,7 +259,8 @@ pub async fn apply_import(
     }
 
     // Removals last, so a purge never pulls the rug from under an edit above.
-    // Retire is the default for anything the user did not decide explicitly.
+    // The check above guarantees every id here is a key in `modes`; the
+    // fallback to Retire is defensive only and should never actually fire.
     for r in &plan.removals {
         match modes.get(&r.id).copied().unwrap_or(DeleteMode::Retire) {
             DeleteMode::Retire => {
@@ -246,7 +284,19 @@ pub async fn apply_import(
     // membership marks, retires and reactivations all come from data the file
     // already held -- so adds are the only reason this step is required, but
     // it is cheap and correct to do unconditionally.
-    export_assets_xlsx(pool, path).await?;
+    //
+    // This MUST be best-effort. The transaction above already committed: the
+    // change is real and the caller must be told it succeeded no matter what
+    // happens next. The file can be locked by the user's own open copy of it
+    // in Excel (a sharing violation, `os error 5` on Windows) or by anything
+    // else transient; none of that may turn a landed write into a reported
+    // failure, which would both lie to the caller and leave a retry stuck --
+    // a removal-only retry would keep re-committing an empty transaction and
+    // keep failing on the same locked file forever, and an add-bearing retry
+    // would be flatly rejected as invalid (the blank-id row now collides with
+    // the asset it already created), reading exactly like "you pasted a
+    // duplicate, delete this row" when the real fix is "export again".
+    res.workbook_refreshed = export_assets_xlsx(pool, path).await.is_ok();
 
     Ok(res)
 }

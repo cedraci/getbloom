@@ -214,12 +214,24 @@ pub fn diff(
 
         // A security that belongs to a DIFFERENT asset would violate the unique
         // index. The same asset keeping its own security is fine.
+        //
+        // This also fires, deliberately, for a blank-id row whose security
+        // matches an asset THIS SAME IMPORT just created on an earlier apply
+        // -- the sheet on disk still shows a blank id for a row the database
+        // has since assigned a real one to. The message below is written for
+        // that reader: the fix is "export again", not "delete this row". The
+        // alternative -- matching a blank-id row to an existing asset by
+        // security instead of rejecting it -- was rejected: a user pasting a
+        // ticker that already exists, meaning to add a genuinely new asset,
+        // would then silently rename the existing one instead of being told.
         if let Some(owner) = db.iter().find(|a| a.bdp_security == security) {
             if Some(owner.id) != r.id {
                 plan.invalid_rows.push(InvalidRow {
                     row_number: r.row_number,
                     reason: format!(
-                        "security '{security}' already belongs to '{}'", owner.label),
+                        "security '{security}' already belongs to asset #{} '{}'; \
+                         if you just imported this sheet, export it again to pick up the new ids",
+                        owner.id, owner.label),
                 });
                 continue;
             }
@@ -579,7 +591,8 @@ mod tests {
                    "only the renamed row should be invalid, got {:?}", p.invalid_rows);
         assert_eq!(p.invalid_rows[0].row_number, 2);
         assert_eq!(p.invalid_rows[0].reason,
-                   "security 'MSFT US Equity' already belongs to 'Microsoft'");
+                   "security 'MSFT US Equity' already belongs to asset #2 'Microsoft'; \
+                    if you just imported this sheet, export it again to pick up the new ids");
     }
 
     /// The collision and within-sheet-duplicate checks apply to add rows
@@ -602,7 +615,8 @@ mod tests {
         assert_eq!(p.invalid_rows.len(), 1);
         assert_eq!(p.invalid_rows[0].row_number, 2);
         assert_eq!(p.invalid_rows[0].reason,
-                   "security 'AAPL US Equity' already belongs to 'Apple'");
+                   "security 'AAPL US Equity' already belongs to asset #1 'Apple'; \
+                    if you just imported this sheet, export it again to pick up the new ids");
 
         // Two adds in the same sheet claiming the same brand-new security.
         let mut add1 = row_from(&db[0]);
