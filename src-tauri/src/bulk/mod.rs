@@ -108,12 +108,22 @@ pub async fn preview_import(pool: &PgPool, path: &Path) -> AppResult<ImportPlan>
 /// The hash check is the point of the two phases: a plan the user reviewed can
 /// never be applied against a file that changed underneath it. The re-diff
 /// matters just as much -- the database may have moved on even when the file
-/// has not. Every `removal_modes` entry must name a removal actually present
-/// in the fresh plan, and every fresh removal must be named in
-/// `removal_modes`: nothing is applied against a removal set the caller did
-/// not review. Once the transaction commits, the workbook is re-exported over
-/// `path` best-effort -- see the comment at that call site for why a failed
-/// refresh still returns `Ok`.
+/// has not. Every fresh removal must be named in `removal_modes`, or the
+/// whole call is refused: nothing is applied against a removal the caller
+/// never reviewed. `removal_modes` also may not name the same id twice with
+/// conflicting intent -- see the duplicate-key check below.
+///
+/// The reverse direction is deliberately NOT checked: an extra, stale key in
+/// `removal_modes` naming an id that is no longer a removal in the fresh plan
+/// is harmless and ignored. The sheet itself cannot have changed without
+/// invalidating the file hash above, so the only way an id can drop out of
+/// the removal set between preview and apply is another writer deleting that
+/// asset from the database first -- and a mode for an asset that is already
+/// gone simply has nothing left to act on.
+///
+/// Once the transaction commits, the workbook is re-exported over `path`
+/// best-effort -- see the comment at that call site for why a failed refresh
+/// still returns `Ok`.
 pub async fn apply_import(
     pool: &PgPool,
     path: &Path,
@@ -152,7 +162,21 @@ pub async fn apply_import(
         });
     }
 
-    let modes: HashMap<i64, DeleteMode> = removal_modes.iter().copied().collect();
+    // Built by hand rather than `.collect()`-ed into a HashMap: collecting
+    // would let a later duplicate `(id, mode)` pair silently overwrite an
+    // earlier one for the same id, so slice order alone would decide whether
+    // a given asset is retired or purged. A caller that names the same asset
+    // twice with conflicting intent must be told, not guessed at.
+    let mut modes: HashMap<i64, DeleteMode> = HashMap::with_capacity(removal_modes.len());
+    for &(id, mode) in removal_modes {
+        if let Some(prev) = modes.insert(id, mode) {
+            return Err(AppError::ImportRejected {
+                reason: format!(
+                    "removal mode for asset #{id} was given twice ({prev:?} then {mode:?}); \
+                     decide once and resubmit"),
+            });
+        }
+    }
 
     // Every removal about to be applied must be one the caller actually
     // reviewed. Without this, an asset that vanished from the sheet only

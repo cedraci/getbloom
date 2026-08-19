@@ -1056,6 +1056,64 @@ async fn apply_import_refuses_a_removal_the_caller_never_reviewed() {
     assert_eq!(label, "Keep", "nothing else may move either -- this is an all-or-nothing refusal");
 }
 
+/// Fix round 2, item 2: `removal_modes` naming the same asset twice with
+/// conflicting intent must be refused outright, not resolved by slice order.
+/// Collecting straight into a `HashMap` would let `(id, Purge)` silently win
+/// or lose against an earlier `(id, Retire)` depending only on which came
+/// last in the slice -- exactly the kind of silent decision a destructive
+/// action must never make on the caller's behalf.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_refuses_conflicting_duplicate_removal_modes() {
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::deletion::DeleteMode;
+    use getbloomdata_lib::error::AppError;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let keep = mk_asset(&pool, class.id, "Keep", "KEP US").await;
+    let drop = mk_asset(&pool, class.id, "Drop", "DRP US").await;
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    let data = read_assets_sheet(&path).unwrap();
+    let rows: Vec<ExportRow> = data.rows.iter()
+        .filter(|r| r.id != Some(drop))
+        .map(|r| ExportRow {
+            id: r.id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
+            id_kind: r.id_kind.clone(), ticker: r.ticker.clone(), isin: r.isin.clone(),
+            yellow_key: r.yellow_key.clone(), active: r.active,
+            security: String::new(), views: r.views.clone(),
+        }).collect();
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert_eq!(plan.removals.len(), 1);
+    assert_eq!(plan.removals[0].id, drop);
+    assert!(!plan.requires_typed_confirmation, "1 of 2 active is not over half");
+
+    // Two entries for the SAME id, opposite destructive intent.
+    let conflicting = [(drop, DeleteMode::Retire), (drop, DeleteMode::Purge)];
+    let err = getbloomdata_lib::bulk::apply_import(
+        &pool, &path, &plan.file_hash, &conflicting, None).await.unwrap_err();
+    let AppError::ImportRejected { reason } = &err else {
+        panic!("conflicting duplicate removal modes must be refused with ImportRejected, got {err:?}");
+    };
+    assert!(reason.contains(&drop.to_string()),
+            "the refusal must name the duplicated asset id, got {reason:?}");
+
+    // Nothing moved: neither retired nor purged.
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1 AND active")
+        .bind(drop).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "a call refused for conflicting modes must leave the asset untouched");
+    let (label,): (String,) = sqlx::query_as("SELECT label FROM asset WHERE id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(label, "Keep");
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn a_large_removal_set_needs_the_typed_count() {

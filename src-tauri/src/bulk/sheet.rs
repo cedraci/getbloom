@@ -95,7 +95,31 @@ pub fn write_assets_sheet(
     // (Equity, Corp, Index, Curncy, Comdty, Govt, ...) and constraining it
     // would block a legitimate key nobody thought to list.
 
-    book.save(path).map_err(xlsx_err)?;
+    // `Workbook::save` truncates its target (`File::create`, then streams the
+    // zip) before writing a single byte of sheet content, so a failure
+    // partway through -- disk full, a network share dropping, the process
+    // being killed -- would otherwise leave the user's workbook a corrupt,
+    // truncated zip. Writing beside the target and renaming over it on
+    // success means the destination is only ever replaced by a complete
+    // file. The temp file must live in the SAME directory as `path`: a
+    // rename across volumes is not atomic (and can silently degrade to a
+    // copy+delete, reopening the exact same window this is meant to close),
+    // and `%TEMP%`/`/tmp` may well be on a different drive or filesystem
+    // than the target.
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name()
+        .ok_or_else(|| AppError::Validation(format!("not a file path: {}", path.display())))?
+        .to_string_lossy();
+    let tmp_path = dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
+
+    if let Err(e) = book.save(&tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(xlsx_err(e));
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::Io(e));
+    }
     Ok(())
 }
 
@@ -270,6 +294,56 @@ mod tests {
         // Proven properly in the reader task; here it is enough that the file
         // writes without turning 0 into a number the reader would parse.
         assert!(path.exists());
+    }
+
+    #[test]
+    fn a_successful_write_replaces_an_existing_target_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assets.xlsx");
+        // Simulate re-exporting over the user's existing workbook.
+        std::fs::write(&path, b"OLD CONTENT, NOT A REAL XLSX").unwrap();
+
+        write_assets_sheet(&path, &sample(), &["Daily".to_string()], &["Equity".to_string()])
+            .unwrap();
+
+        let data = read_assets_sheet(&path).unwrap();
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].label, "Apple");
+
+        // Exactly the target file, no `.assets.xlsx.tmp-<pid>` left behind.
+        let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["assets.xlsx".to_string()],
+                   "a successful write must leave exactly the target, no temp leftovers");
+    }
+
+    #[test]
+    fn a_failed_temp_write_never_touches_an_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assets.xlsx");
+
+        // Seed a target file with recognizable bytes, standing in for the
+        // user's existing workbook -- it must survive byte-for-byte.
+        std::fs::write(&path, b"ORIGINAL BYTES, MUST SURVIVE").unwrap();
+
+        // Pre-occupy the exact temp path `write_assets_sheet` will try to
+        // create, with a DIRECTORY of that name. `Workbook::save`'s internal
+        // file creation cannot succeed against a path that is already a
+        // directory, so this forces the temp-write step to fail before the
+        // real target is ever opened -- without a lock, a full disk, or a
+        // killed process, none of which are reproducible deterministically.
+        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+        let tmp_path = dir.path().join(format!(".{file_name}.tmp-{}", std::process::id()));
+        std::fs::create_dir(&tmp_path).unwrap();
+
+        let err = write_assets_sheet(&path, &sample(), &[], &["Equity".to_string()])
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        let survived = std::fs::read(&path).unwrap();
+        assert_eq!(survived, b"ORIGINAL BYTES, MUST SURVIVE",
+                   "a failed temp write must never touch the existing target");
     }
 
     #[test]
