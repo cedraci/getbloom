@@ -433,3 +433,23 @@ pub async fn search_bloomberg(state: State<'_, AppState>, query: String,
     let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
     search::bloomberg(&state.pool, &fetcher, &query, &yellow_key).await
 }
+
+// ---------------------------------------------------------------------------
+// Instrument detail (aliases & attributes)
+// ---------------------------------------------------------------------------
+//
+// Thin wrappers over `instrument::store`, exposed now so `api.ts` can stay a
+// single unit; Task 16's InstrumentDetail panel is the first consumer.
+
+#[tauri::command]
+pub async fn instrument_aliases(state: State<'_, AppState>, instrument_id: i64)
+    -> Result<Vec<crate::instrument::store::Alias>, AppError> {
+    crate::instrument::store::aliases(&state.pool, instrument_id).await
+}
+
+#[tauri::command]
+pub async fn instrument_attrs(state: State<'_, AppState>, instrument_id: i64)
+    -> Result<Vec<crate::instrument::store::Attr>, AppError> {
+    let today = chrono::Local::now().date_naive();
+    crate::instrument::store::attrs(&state.pool, instrument_id, today).await
+}

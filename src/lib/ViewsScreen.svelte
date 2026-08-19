@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { api, type Asset, type AssetClass, type BookEntry, type EntityKind, type EstimateOut, type FieldDef, type View } from "./api";
+  import { api, type AssetClass, type BookEntry, type EntityKind, type EstimateOut, type FieldDef, type View } from "./api";
   import DeleteDialog from "./DeleteDialog.svelte";
 
   let views = $state<View[]>([]);
-  let assets = $state<Asset[]>([]);
+  let book = $state<BookEntry[]>([]);
   let fields = $state<FieldDef[]>([]);
   let classes = $state<AssetClass[]>([]);
   let estimates = $state<Record<number, EstimateOut>>({});
@@ -32,6 +32,7 @@
 
   let newViewName = $state("");
   let newViewDescription = $state("");
+  let newClassName = $state("");
 
   let selectedViewId = $state<number | null>(null);
   let selectedAssetIds = $state<number[]>([]);
@@ -47,7 +48,7 @@
   async function reload() {
     try {
       views = await api.listViews();
-      assets = await api.listAssets();
+      book = await api.listBook();
       fields = await api.listFields();
       classes = await api.listAssetClasses();
       if (classes.length && !newField.asset_class_id) newField.asset_class_id = classes[0].id;
@@ -93,6 +94,14 @@
       await api.setViewFields(selectedViewId, selectedFieldIds);
       await reload();
     } catch (e) { error = String(e); }
+  }
+
+  // Asset-class creation lived on the deleted AssetsScreen. It stays here
+  // rather than moving to BookScreen because this is the only other place a
+  // class is a hard prerequisite -- a field cannot be created without one.
+  async function addClass() {
+    try { await api.createAssetClass(newClassName, ""); newClassName = ""; await reload(); }
+    catch (e) { error = String(e); }
   }
 
   async function addField() {
@@ -142,12 +151,12 @@
       <div>
         <h3>Assets</h3>
         <ul>
-          {#each assets as a}
+          {#each book as b}
             <li>
-              <label class:retired={!a.active}>
-                <input type="checkbox" checked={selectedAssetIds.includes(a.id)}
-                       onchange={() => toggleAsset(a.id)} />
-                {a.label} ({a.bdp_security}){#if !a.active} &mdash; retired{/if}
+              <label class:retired={!b.active}>
+                <input type="checkbox" checked={selectedAssetIds.includes(b.instrument_id)}
+                       onchange={() => toggleAsset(b.instrument_id)} />
+                {b.label} ({b.security ?? "—"}){#if !b.active} &mdash; retired{/if}
               </label>
             </li>
           {/each}
@@ -171,10 +180,26 @@
     <button onclick={saveAssignments}>Save</button>
   {/if}
 
+  <h2>Asset classes</h2>
+  <p class="note">
+    A class groups securities that share a field set (Equity, Corp, Index).
+    Every book entry and every field belongs to one.
+  </p>
+  <input bind:value={newClassName} placeholder="e.g. Equity" />
+  <button onclick={addClass} disabled={!newClassName}>Add class</button>
+  <ul class="classes">
+    {#each classes as c}
+      <li>{c.name}
+        <button class="x" title="Remove class"
+                onclick={() => (pending = { kind: "asset_class", id: c.id })}>&times;</button>
+      </li>
+    {/each}
+  </ul>
+
   <h2>Fields</h2>
   {#if !classes.length}
     <p class="hint">
-      No asset class exists yet. Create one on the <strong>Assets</strong> tab first —
+      No asset class exists yet. Create one above first —
       a field is always defined for a class.
     </p>
   {/if}
@@ -223,6 +248,10 @@
 <style>
   .error { color: #c00; }
   .hint { color: #a60; margin: 0.5rem 0 0; }
+  .note { color: #555; margin: 0.2rem 0 0.6rem; max-width: 46rem; }
+  .classes { list-style: none; padding: 0; margin: 0.5rem 0 0;
+             display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .classes li { border: 1px solid #ccc; border-radius: 3px; padding: 0.1rem 0.5rem; }
   .x { border: none; background: none; color: #c00; cursor: pointer;
        font-size: 1rem; line-height: 1; padding: 0 0.3rem; }
   section { padding: 1rem; }

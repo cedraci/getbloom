@@ -6,8 +6,8 @@
   } = $props();
 
   // Retire is the default: the reversible option should never require a click.
-  // Seeded once per plan by construction: AssetsScreen wraps this component in
-  // {#key plan}, so a new plan always mounts a fresh ImportDiff instance and
+  // Seeded once per plan by construction: the caller (BookScreen) wraps this
+  // component in {#key plan}, so a new plan always mounts a fresh ImportDiff instance and
   // this initializer reruns -- it is never left holding modes for ids that
   // belonged to a plan that has since been replaced.
   let modes = $state<Record<number, DeleteMode>>(

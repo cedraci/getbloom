@@ -89,6 +89,7 @@ pub fn run() {
             commands::export_assets_xlsx, commands::preview_assets_import,
             commands::apply_assets_import,
             commands::search_local, commands::search_bloomberg,
+            commands::instrument_aliases, commands::instrument_attrs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

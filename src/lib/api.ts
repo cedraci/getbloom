@@ -1,15 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface AssetClass { id: number; name: string; description: string; }
-export interface Asset {
-  id: number; asset_class_id: number; label: string; id_kind: string;
-  ticker: string | null; isin: string | null; yellow_key: string;
-  bdp_security: string; active: boolean;
-}
-export interface NewAsset {
-  asset_class_id: number; label: string; id_kind: string;
-  ticker: string | null; isin: string | null; yellow_key: string;
-}
 export interface FieldDef {
   id: number; asset_class_id: number; mnemonic: string;
   label: string; value_kind: string;
@@ -62,6 +53,40 @@ export interface BookEntry {
   security: string | null;
 }
 
+export interface AddToBook {
+  raw: string; yellow_key: string; asset_class_id: number; label: string;
+  hints: { exchange?: string | null; country?: string | null;
+           currency?: string | null; asset_class?: string | null };
+}
+export type AddOutcome =
+  | { Added: BookEntry }
+  | { NeedsReview: { review_id: number } }
+  | "NotFound";
+export type SearchOrigin = "book" | "instrument" | "candidate";
+export interface SearchHit {
+  origin: SearchOrigin; security: string | null; display: string;
+  description: string; instrument_id: number | null; similarity: number;
+}
+export interface BloombergSearch {
+  hits: SearchHit[]; estimated_hits: number; cached: number;
+}
+export interface PendingReview {
+  review_id: number; decision_id: number; raw_input: string; normalized: string;
+  candidates: Array<{ candidate: { security: string; description: string;
+                                   exchange: string | null };
+                      score: number; disqualified: boolean; reasons: string[] }>;
+  bbg_response: unknown | null; opened_at: string;
+}
+export interface AliasRow {
+  id: number; id_type: string; value: string; exch_code: string | null;
+  valid_from: string; valid_to: string; source: string;
+  bbg_action_id: string | null; anchoring_identifier: string | null;
+}
+export interface AttrRow {
+  id: number; attr: string; value: string;
+  valid_from: string; valid_to: string; source: string;
+}
+
 export interface AssetRef { id: number; label: string; security: string; }
 export interface AddRow {
   row_number: number; label: string; class: string; id_kind: string;
@@ -95,10 +120,23 @@ export const api = {
   listAssetClasses: () => invoke<AssetClass[]>("list_asset_classes"),
   createAssetClass: (name: string, description: string) =>
     invoke<AssetClass>("create_asset_class", { name, description }),
-  listAssets: () => invoke<Asset[]>("list_assets"),
-  createAsset: (newAsset: NewAsset) => invoke<Asset>("create_asset", { new: newAsset }),
-  setAssetActive: (assetId: number, active: boolean) =>
-    invoke<void>("set_asset_active", { assetId, active }),
+  listBook: () => invoke<BookEntry[]>("list_book"),
+  addToBook: (req: AddToBook) => invoke<AddOutcome>("add_to_book", { req }),
+  setBookActive: (instrumentId: number, active: boolean) =>
+    invoke<void>("set_book_active", { instrumentId, active }),
+  searchLocal: (query: string, limit = 12) =>
+    invoke<SearchHit[]>("search_local", { query, limit }),
+  searchBloomberg: (query: string, yellowKey: string) =>
+    invoke<BloombergSearch>("search_bloomberg", { query, yellowKey }),
+  listPendingReviews: () => invoke<PendingReview[]>("list_pending_reviews"),
+  resolveReview: (reviewId: number, chosenSecurity: string) =>
+    invoke<number>("resolve_review", { reviewId, chosenSecurity }),
+  rejectReview: (reviewId: number, note: string) =>
+    invoke<void>("reject_review", { reviewId, note }),
+  instrumentAliases: (instrumentId: number) =>
+    invoke<AliasRow[]>("instrument_aliases", { instrumentId }),
+  instrumentAttrs: (instrumentId: number) =>
+    invoke<AttrRow[]>("instrument_attrs", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),
   createField: (assetClassId: number, mnemonic: string, label: string, valueKind: string,
                 bbgFtype: string | null = null, bbgDatatype: string | null = null,
