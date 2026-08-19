@@ -367,6 +367,26 @@ async fn a_ticker_owned_by_two_different_instruments_is_left_alone() {
     assert_eq!(out.aliases_added, 0, "cannot tell which chain we are in");
     assert!(out.links_proposed.is_empty(), "an ambiguous owner proposes nothing");
     let _ = (owner_a, owner_b);
+
+    // Safe (no wrong write), but not silent: a durable, queryable record --
+    // this module's own precedent for "cannot decide automatically" is an
+    // unconfirmed instrument_link, and an ambiguity that doesn't fit that
+    // shape gets the same standard via ingest_issue.
+    let issues: Vec<(String,)> = sqlx::query_as(
+        "SELECT detail FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'ambiguous_identifier_owner'")
+        .bind(processing.instrument_id).fetch_all(&pool).await.unwrap();
+    assert_eq!(issues.len(), 1, "exactly one issue, scoped to this instrument");
+    assert!(issues[0].0.contains(&ticker), "the ambiguous identifier is named in the detail");
+
+    // Re-ingesting the same response does not pile up a second issue.
+    let again = history::apply(&pool, processing.instrument_id, "TEST Anchor", &rows).await.unwrap();
+    assert_eq!(again.aliases_added, 0);
+    let issues_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'ambiguous_identifier_owner'")
+        .bind(processing.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(issues_after, 1, "no duplicate issue on re-ingest");
 }
 
 /// M4: a row with no Action ID must still be idempotent on re-ingest,

@@ -111,11 +111,22 @@ pub async fn apply(pool: &PgPool, instrument_id: i64, anchor: &str, rows: &[Hist
         use Ownership::*;
         match (new_own, old_own) {
             // More than one instrument has ever worn one of the two
-            // identifiers -- cannot tell which chain this row belongs to,
-            // so nothing is asserted.
+            // identifiers -- cannot tell which chain this row belongs to, so
+            // nothing is asserted. Safe (no wrong write), but silently
+            // dropping it would leave a completeness gap only stderr could
+            // see -- so it gets the same durable-record treatment as an
+            // instrument_link proposal, via ingest_issue instead.
             (Ambiguous, _) | (_, Ambiguous) => {
                 eprintln!("identifier history: ambiguous ownership for {} -> {} on {} \
-                           (anchor {anchor}), skipping", row.old_id, row.new_id, row.date);
+                           (anchor {anchor}), recording an issue", row.old_id, row.new_id, row.date);
+                if new_own == Ambiguous {
+                    record_ambiguous_owner_issue(pool, instrument_id, anchor, row,
+                                                 &row.new_id, new_owners.clone()).await?;
+                }
+                if old_own == Ambiguous {
+                    record_ambiguous_owner_issue(pool, instrument_id, anchor, row,
+                                                 &row.old_id, old_owners.clone()).await?;
+                }
             }
             // Both ends already belong to two DIFFERENT other instruments.
             // Neither is us -- this row is evidence about them, not about
@@ -345,6 +356,44 @@ async fn propose_link_if_new(pool: &PgPool, predecessor_id: i64, successor_id: i
     }
     Ok(Some(store::propose_link(pool, predecessor_id, successor_id, link_type,
                                 effective_date, evidence).await?))
+}
+
+/// More than one instrument has ever worn `id` -- `owner_of` cannot tell
+/// which chain this row belongs to. Nothing is written to `instrument_alias`
+/// or `instrument_link`: an N-ary ambiguity does not fit `instrument_link`'s
+/// predecessor/successor shape, and this module does not stretch it to fit.
+/// But silently dropping the row would leave a completeness gap only stderr
+/// could see, so it gets `ingest_issue` -- this module's other durable,
+/// queryable record for "cannot decide automatically". `severity = 'warn'`:
+/// nothing is wrong, something is merely unresolved.
+///
+/// Idempotent the same way the rest of this module is: `detail` fully
+/// encodes the row's identity (the identifier, the anchor, the change date,
+/// the Action ID if any, and the sorted owner list), so an exact match on
+/// (instrument_id, code, detail) is the natural key for "already recorded",
+/// the same way `propose_link_if_new` matches on its own tuple.
+async fn record_ambiguous_owner_issue(pool: &PgPool, instrument_id: i64, anchor: &str,
+                                      row: &HistIdRow, id: &str, mut owners: Vec<i64>)
+    -> AppResult<()>
+{
+    owners.sort_unstable();
+    let detail = format!(
+        "identifier={id} anchor={anchor} change_date={} action_id={} owners={owners:?}",
+        row.date, row.action_id.as_deref().unwrap_or("none"));
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'ambiguous_identifier_owner' AND detail = $2")
+        .bind(instrument_id).bind(&detail).fetch_optional(pool).await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
+         VALUES (NULL, $1, 'warn', 'ambiguous_identifier_owner', $2)")
+        .bind(instrument_id).bind(&detail)
+        .execute(pool).await?;
+    Ok(())
 }
 
 /// `bind_identity` wrote the current identifier's own `bdp_security` alias

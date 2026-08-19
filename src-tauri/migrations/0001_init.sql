@@ -387,7 +387,10 @@ CREATE TRIGGER observation_append_only BEFORE UPDATE ON observation
 
 CREATE TABLE ingest_issue (
   id            BIGSERIAL PRIMARY KEY,
-  run_id        BIGINT NOT NULL REFERENCES run(id),
+  -- Nullable: an issue can arise outside a run. Identifier-history ingestion
+  -- happens during resolution, which has no run_id, and an event we could not
+  -- apply must still be visible to the user rather than only to stderr.
+  run_id        BIGINT REFERENCES run(id),
   instrument_id BIGINT REFERENCES instrument(instrument_id),
   field_id      BIGINT REFERENCES field_def(id),
   obs_date      DATE,
