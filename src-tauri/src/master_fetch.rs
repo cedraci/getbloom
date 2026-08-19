@@ -72,9 +72,22 @@ pub struct HistIdRow {
     pub source: Option<String>,
 }
 
+/// A parsed response paired with the wire JSON it came from.
+///
+/// The parsed form is what callers use; `raw` is what gets written to
+/// resolution_decision.bbg_response. An IdentityBlock is a lossy projection --
+/// it drops fieldExceptions (including entitlement failures), securityError
+/// detail, and every field we did not ask for -- so the audit trail must keep
+/// the response itself, not our reading of it.
+#[derive(Debug, Clone)]
+pub struct Answered<T> {
+    pub parsed: T,
+    pub raw: serde_json::Value,
+}
+
 pub trait MasterFetcher {
     fn identity(&self, securities: &[String])
-        -> impl std::future::Future<Output = AppResult<Vec<IdentityBlock>>> + Send;
+        -> impl std::future::Future<Output = AppResult<Answered<Vec<IdentityBlock>>>> + Send;
 
     /// `anchor` is mandatory, not optional. P0 §6.4: without
     /// HISTORICAL_STARTING_IDENTIFIER the answer may describe a different
@@ -84,7 +97,7 @@ pub trait MasterFetcher {
 
     fn instrument_list(&self, query: &str, yellow_key_filter: Option<&str>,
                        max_results: u32)
-        -> impl std::future::Future<Output = AppResult<Vec<Candidate>>> + Send;
+        -> impl std::future::Future<Output = AppResult<Answered<Vec<Candidate>>>> + Send;
 }
 
 // ------------------------------------------------------------------ parsing
@@ -208,7 +221,7 @@ impl BlpapiMasterFetcher<'_> {
 }
 
 impl MasterFetcher for BlpapiMasterFetcher<'_> {
-    async fn identity(&self, securities: &[String]) -> AppResult<Vec<IdentityBlock>> {
+    async fn identity(&self, securities: &[String]) -> AppResult<Answered<Vec<IdentityBlock>>> {
         let resp = self.call(serde_json::json!({
             "kind": "reference",
             "securities": securities,
@@ -216,7 +229,9 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             "obs_date": chrono::Local::now().date_naive().to_string(),
             "raw": true,
         })).await?;
-        Ok(parse_identity(&resp["raw_messages"]))
+        let raw = resp["raw_messages"].clone();
+        let parsed = parse_identity(&raw);
+        Ok(Answered { parsed, raw })
     }
 
     async fn hist_ids(&self, security: &str, anchor: &str, start: NaiveDate)
@@ -240,7 +255,7 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
     }
 
     async fn instrument_list(&self, query: &str, yellow_key_filter: Option<&str>,
-                             max_results: u32) -> AppResult<Vec<Candidate>>
+                             max_results: u32) -> AppResult<Answered<Vec<Candidate>>>
     {
         let resp = self.call(serde_json::json!({
             "kind": "instrument_list",
@@ -249,7 +264,9 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             "max_results": max_results,
             "raw": true,
         })).await?;
-        Ok(parse_list(&resp["raw_messages"]))
+        let raw = resp["raw_messages"].clone();
+        let parsed = parse_list(&raw);
+        Ok(Answered { parsed, raw })
     }
 }
 
@@ -298,9 +315,9 @@ impl MockMasterFetcher {
 }
 
 impl MasterFetcher for MockMasterFetcher {
-    async fn identity(&self, securities: &[String]) -> AppResult<Vec<IdentityBlock>> {
+    async fn identity(&self, securities: &[String]) -> AppResult<Answered<Vec<IdentityBlock>>> {
         self.record(&format!("identity:{}", securities.join(",")));
-        Ok(parse_identity(&self.identity_raw))
+        Ok(Answered { parsed: parse_identity(&self.identity_raw), raw: self.identity_raw.clone() })
     }
 
     async fn hist_ids(&self, security: &str, anchor: &str, _start: NaiveDate)
@@ -315,10 +332,10 @@ impl MasterFetcher for MockMasterFetcher {
     }
 
     async fn instrument_list(&self, query: &str, _yk: Option<&str>, _max: u32)
-        -> AppResult<Vec<Candidate>>
+        -> AppResult<Answered<Vec<Candidate>>>
     {
         self.record(&format!("instrument_list:{query}"));
-        Ok(parse_list(&self.list_raw))
+        Ok(Answered { parsed: parse_list(&self.list_raw), raw: self.list_raw.clone() })
     }
 }
 
