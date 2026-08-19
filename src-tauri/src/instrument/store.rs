@@ -1,0 +1,254 @@
+//! The only supported way to write identity.
+//!
+//! Every change is close-and-insert. There is no update path for a value, and
+//! the database enforces that independently (see migration 0001's triggers) so
+//! that a mistake here fails loudly rather than quietly rewriting history.
+//!
+//! Two time axes:
+//!   valid_from/valid_to   when the fact was true in the world
+//!   system_from/system_to when we believed it
+//! Closing valid_to records a real-world change (a ticker was renamed).
+//! Closing system_to records a correction (we had it wrong).
+
+use crate::error::AppResult;
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Postgres, Transaction};
+
+pub type Tx<'a> = Transaction<'a, Postgres>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Instrument {
+    pub instrument_id: i64,
+    pub id_bb_global: Option<String>,
+    pub id_bb_unique: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Alias {
+    pub id: i64,
+    pub instrument_id: i64,
+    pub id_type: String,
+    pub value: String,
+    pub exch_code: Option<String>,
+    pub valid_from: NaiveDate,
+    pub valid_to: NaiveDate,
+    pub source: String,
+    pub bbg_action_id: Option<String>,
+    pub anchoring_identifier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Attr {
+    pub id: i64,
+    pub instrument_id: i64,
+    pub attr: String,
+    pub value: String,
+    pub valid_from: NaiveDate,
+    pub valid_to: NaiveDate,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewAlias {
+    pub id_type: String,
+    pub value: String,
+    pub exch_code: Option<String>,
+    pub valid_from: NaiveDate,
+    /// None means open-ended.
+    pub valid_to: Option<NaiveDate>,
+    pub source: String,
+    pub bbg_action_id: Option<String>,
+    /// REQUIRED when source is 'bloomberg_hist_ids'; the database refuses
+    /// otherwise. See P0 6.4.
+    pub anchoring_identifier: Option<String>,
+}
+
+/// Stand-in for "open-ended" on the Rust side.
+///
+/// Postgres' DATE 'infinity' is not a date chrono can represent: sqlx decodes a
+/// binary DATE by adding the day count to 2000-01-01, and Postgres encodes
+/// 'infinity' as i32::MAX days -- about 5.9 million years -- which overflows
+/// chrono::NaiveDate's range and panics on decode. NaiveDate::MAX (262143-12-31)
+/// is a real, finite date far enough out to behave as "forever" for every
+/// comparison this module does, and because it is finite it round-trips through
+/// Postgres cleanly. So this module never writes the literal SQL 'infinity' into
+/// a column it later decodes as NaiveDate (valid_to on alias/attr rows): every
+/// open-ended insert below binds `forever()` explicitly instead of relying on
+/// the column default. The column default is left in place for the schema's own
+/// documentation value and for system_to (a TIMESTAMPTZ this module never reads
+/// back into Rust), but identity rows written through here are never actually
+/// Postgres-infinite in valid_to.
+pub fn forever() -> NaiveDate {
+    NaiveDate::MAX
+}
+
+pub async fn create(pool: &PgPool) -> AppResult<Instrument> {
+    Ok(sqlx::query_as::<_, Instrument>(
+        "INSERT INTO instrument DEFAULT VALUES
+         RETURNING instrument_id, id_bb_global, id_bb_unique")
+        .fetch_one(pool).await?)
+}
+
+/// Fill the Bloomberg identifiers once they are known. The trigger refuses any
+/// attempt to change a value that is already set.
+pub async fn set_bloomberg_ids(pool: &PgPool, instrument_id: i64,
+                               figi: Option<&str>, bbg_unique: Option<&str>)
+    -> AppResult<()>
+{
+    sqlx::query(
+        "UPDATE instrument
+            SET id_bb_global = COALESCE($2, id_bb_global),
+                id_bb_unique = COALESCE($3, id_bb_unique)
+          WHERE instrument_id = $1")
+        .bind(instrument_id).bind(figi).bind(bbg_unique)
+        .execute(pool).await?;
+    Ok(())
+}
+
+pub async fn insert_alias(tx: &mut Tx<'_>, instrument_id: i64, new: &NewAlias)
+    -> AppResult<i64>
+{
+    let valid_to = new.valid_to.unwrap_or_else(forever);
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO instrument_alias
+           (instrument_id, id_type, value, exch_code, valid_from, valid_to,
+            source, bbg_action_id, anchoring_identifier)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING id")
+        .bind(instrument_id).bind(&new.id_type).bind(&new.value)
+        .bind(&new.exch_code).bind(new.valid_from).bind(valid_to)
+        .bind(&new.source).bind(&new.bbg_action_id).bind(&new.anchoring_identifier)
+        .fetch_one(&mut **tx).await?;
+    Ok(id)
+}
+
+/// The identifier stopped being true in the world on `valid_to`.
+pub async fn close_alias(tx: &mut Tx<'_>, alias_id: i64, valid_to: NaiveDate)
+    -> AppResult<()>
+{
+    sqlx::query("UPDATE instrument_alias SET valid_to = $2 WHERE id = $1")
+        .bind(alias_id).bind(valid_to).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// We were wrong about the identifier. The row stays on disk; it stops being
+/// current. This is what makes a point-in-time read of a past belief possible.
+pub async fn supersede_alias(tx: &mut Tx<'_>, alias_id: i64) -> AppResult<()> {
+    sqlx::query("UPDATE instrument_alias SET system_to = now()
+                  WHERE id = $1 AND system_to = 'infinity'")
+        .bind(alias_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// Which instrument wore this identifier on this date, as best we know today.
+pub async fn find_by_alias(pool: &PgPool, id_type: &str, value: &str, as_of: NaiveDate)
+    -> AppResult<Option<i64>>
+{
+    Ok(sqlx::query_scalar(
+        "SELECT instrument_id FROM instrument_alias
+          WHERE id_type = $1 AND lower(value) = lower($2)
+            AND valid_from <= $3 AND valid_to > $3
+            AND system_to = 'infinity'
+          ORDER BY valid_from DESC LIMIT 1")
+        .bind(id_type).bind(value).bind(as_of)
+        .fetch_optional(pool).await?)
+}
+
+pub async fn aliases(pool: &PgPool, instrument_id: i64) -> AppResult<Vec<Alias>> {
+    Ok(sqlx::query_as::<_, Alias>(
+        "SELECT id, instrument_id, id_type, value, exch_code, valid_from, valid_to,
+                source, bbg_action_id, anchoring_identifier
+           FROM instrument_alias
+          WHERE instrument_id = $1 AND system_to = 'infinity'
+          ORDER BY valid_from, id_type")
+        .bind(instrument_id).fetch_all(pool).await?)
+}
+
+/// The security string to send to Bloomberg for this instrument on this date.
+/// Derived from the alias valid then -- never stored on the book entry, because
+/// one instrument wears several security strings over its life.
+pub async fn current_security(pool: &PgPool, instrument_id: i64, as_of: NaiveDate)
+    -> AppResult<Option<String>>
+{
+    Ok(sqlx::query_scalar(
+        "SELECT value FROM instrument_alias
+          WHERE instrument_id = $1 AND id_type = 'bdp_security'
+            AND valid_from <= $2 AND valid_to > $2
+            AND system_to = 'infinity'
+          ORDER BY valid_from DESC LIMIT 1")
+        .bind(instrument_id).bind(as_of)
+        .fetch_optional(pool).await?)
+}
+
+/// Record an attribute for a validity period. If we already believe something
+/// else about that exact period, the earlier belief is superseded first --
+/// which is what the partial unique index would otherwise refuse.
+pub async fn set_attr(tx: &mut Tx<'_>, instrument_id: i64, attr: &str, value: &str,
+                      valid_from: NaiveDate, source: &str, decision_id: Option<i64>)
+    -> AppResult<()>
+{
+    sqlx::query(
+        "UPDATE instrument_attr SET system_to = now()
+          WHERE instrument_id = $1 AND attr = $2 AND valid_from = $3
+            AND system_to = 'infinity'")
+        .bind(instrument_id).bind(attr).bind(valid_from)
+        .execute(&mut **tx).await?;
+    // valid_to is bound explicitly (forever(), not the column default) for the
+    // same reason insert_alias does -- see the comment on forever().
+    sqlx::query(
+        "INSERT INTO instrument_attr
+           (instrument_id, attr, value, valid_from, valid_to, source, decision_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)")
+        .bind(instrument_id).bind(attr).bind(value).bind(valid_from)
+        .bind(forever()).bind(source).bind(decision_id)
+        .execute(&mut **tx).await?;
+    Ok(())
+}
+
+pub async fn attrs(pool: &PgPool, instrument_id: i64, as_of: NaiveDate)
+    -> AppResult<Vec<Attr>>
+{
+    Ok(sqlx::query_as::<_, Attr>(
+        "SELECT id, instrument_id, attr, value, valid_from, valid_to, source
+           FROM instrument_attr
+          WHERE instrument_id = $1
+            AND valid_from <= $2 AND valid_to > $2
+            AND system_to = 'infinity'
+          ORDER BY attr")
+        .bind(instrument_id).bind(as_of).fetch_all(pool).await?)
+}
+
+/// Propose a predecessor/successor relationship. Always a proposal: P0 7.2
+/// established that Bloomberg exposes no successor field, so every link here is
+/// inferred and a human must agree before anything follows it.
+pub async fn propose_link(pool: &PgPool, predecessor_id: i64, successor_id: i64,
+                          link_type: &str, effective_date: NaiveDate,
+                          evidence: serde_json::Value) -> AppResult<i64>
+{
+    Ok(sqlx::query_scalar(
+        "INSERT INTO instrument_link
+           (predecessor_id, successor_id, link_type, effective_date, evidence)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id")
+        .bind(predecessor_id).bind(successor_id).bind(link_type)
+        .bind(effective_date).bind(evidence)
+        .fetch_one(pool).await?)
+}
+
+pub async fn confirm_link(pool: &PgPool, link_id: i64, by: &str) -> AppResult<()> {
+    sqlx::query("UPDATE instrument_link SET confirmed_by = $2, confirmed_at = now()
+                  WHERE id = $1")
+        .bind(link_id).bind(by).execute(pool).await?;
+    Ok(())
+}
+
+/// Only confirmed links are ever followed.
+pub async fn confirmed_successor(pool: &PgPool, instrument_id: i64)
+    -> AppResult<Option<i64>>
+{
+    Ok(sqlx::query_scalar(
+        "SELECT successor_id FROM instrument_link
+          WHERE predecessor_id = $1 AND confirmed_by IS NOT NULL
+          ORDER BY effective_date DESC LIMIT 1")
+        .bind(instrument_id).fetch_optional(pool).await?)
+}
