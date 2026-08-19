@@ -1260,6 +1260,10 @@ fn compare(name: &str, hint: Option<&String>, value: Option<&String>)
 {
     match (hint, value) {
         (None, _) => (0, false, None),
+        // A hint the user typed into and then cleared arrives as Some("") from a
+        // UI text field, not None. Treating it as a real hint would disqualify
+        // every candidate that says anything at all -- so a blank hint is no hint.
+        (Some(h), _) if h.trim().is_empty() => (0, false, None),
         // The candidate is silent: absence of evidence is not evidence.
         (Some(_), None) => (0, false, Some(format!("{name}: candidate is silent"))),
         (Some(h), Some(v)) if h.trim().eq_ignore_ascii_case(v.trim()) => {
