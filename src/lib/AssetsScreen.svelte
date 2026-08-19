@@ -1,7 +1,8 @@
 <script lang="ts">
   import { api, type Asset, type AssetClass, type NewAsset } from "./api";
   import DeleteDialog from "./DeleteDialog.svelte";
-  import type { EntityKind } from "./api";
+  import ImportDiff from "./ImportDiff.svelte";
+  import type { EntityKind, ImportPlan } from "./api";
   let classes = $state<AssetClass[]>([]);
   let assets = $state<Asset[]>([]);
   let error = $state("");
@@ -10,9 +11,40 @@
   let newClassName = $state("");
   let pending = $state<{ kind: EntityKind; id: number } | null>(null);
 
+  let sheetPath = $state("");
+  let plan = $state<ImportPlan | null>(null);
+  let notice = $state("");
+
   function afterDelete(changed: boolean) {
     pending = null;
     if (changed) reload();
+  }
+
+  $effect(() => {
+    if (!sheetPath) {
+      api.getSettings()
+        .then((c) => (sheetPath = `${c.data_dir}\\assets.xlsx`))
+        .catch(() => (sheetPath = "assets.xlsx"));
+    }
+  });
+
+  async function exportSheet() {
+    notice = ""; error = "";
+    try {
+      await api.exportAssetsXlsx(sheetPath);
+      notice = `Written to ${sheetPath}`;
+    } catch (e) { error = String(e); }
+  }
+  async function previewSheet() {
+    notice = ""; error = "";
+    try { plan = await api.previewAssetsImport(sheetPath); }
+    catch (e) { error = String(e); }
+  }
+  // `msg` is set by ImportDiff for both the workbook_refreshed success and
+  // failure cases -- both are notices, never an error, per spec §8.2.
+  function afterImport(applied: boolean, msg?: string) {
+    plan = null;
+    if (applied) { notice = msg ?? "Import applied."; reload(); }
   }
 
   async function reload() {
@@ -98,10 +130,28 @@
       {/each}
     </tbody>
   </table>
+
+  <h2>Bulk edit in Excel</h2>
+  <p class="note">
+    Export writes every asset, its class and identifier, and one column per view.
+    Edit it in Excel, then Preview to see exactly what would change before anything
+    is applied. Leave <code>id</code> blank on a row to add an asset; delete a row
+    to propose removing it. A sheet with no <code>id</code> column can only add and
+    edit, never remove.
+  </p>
+  <div class="bulk">
+    <input bind:value={sheetPath} size="48" />
+    <button onclick={exportSheet}>Export</button>
+    <button onclick={previewSheet}>Preview import</button>
+  </div>
+  {#if notice}<p class="notice">{notice}</p>{/if}
 </section>
 
 {#if pending}
   <DeleteDialog kind={pending.kind} id={pending.id} onclose={afterDelete} />
+{/if}
+{#if plan}
+  <ImportDiff path={sheetPath} {plan} onclose={afterImport} />
 {/if}
 
 <style>
@@ -109,6 +159,8 @@
   .hint { color: #a60; margin: 0.5rem 0 0; }
   .note { color: #555; margin: 0.2rem 0 0.6rem; max-width: 46rem; }
   .preview { font-family: monospace; color: #060; }
+  .bulk { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+  .notice { color: #060; }
   .classes { list-style: none; padding: 0; margin: 0.5rem 0 0;
              display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .classes li { border: 1px solid #ccc; border-radius: 3px; padding: 0.1rem 0.5rem; }
