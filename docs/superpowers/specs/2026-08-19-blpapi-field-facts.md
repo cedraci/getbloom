@@ -259,6 +259,49 @@ Action ID 228233742 | Source "ID Change"
 `Action ID` is a Bloomberg-side event identifier — the natural key for detecting
 amendments to an identifier change.
 
+### 6.5 CORRECTION (2026-08-19, live) — the anchor is the chain's START, and §6.4 read it backwards
+
+§6.3 and §6.4 are correct about *what was captured* but were **misread when the
+design was written**, and the misreading is the more dangerous half.
+
+`HISTORICAL_STARTING_IDENTIFIER` means exactly what it says: the identifier the
+chain **starts** from — not the instrument you are asking about. The P0 probe
+that produced the committed capture anchored on **`FB US Equity`**, the *old*
+ticker. Nothing in §6.3 recorded that, so the design passed the *resolved current
+security* instead, which is the chain's **end**.
+
+Measured live, same request in every other respect, `META US Equity` as the
+security, range start `20120101`:
+
+| `HISTORICAL_STARTING_IDENTIFIER` | Result |
+|---|---|
+| `FB US Equity` (the chain's start) | `FB → META`, Action ID 228233742 — Facebook's real rename |
+| `META US Equity` (the current identifier) | `META → METV`, Action ID 229098374 — **the Roundhill ETF** |
+
+**The range start date matters just as much.** Anchored on `FB US Equity` but
+with the range opened to `20000101`, the answer becomes `FB → (blank)`,
+"Delisted", 2002-04-10 — a different company that held `FB` before Facebook
+existed. Widening the window pulls in whoever wore the string earlier.
+
+**Consequences.**
+
+1. Anchoring is **necessary but not sufficient**. Both the anchor and the window
+   must be right, and getting the anchor wrong does not fail loudly — it returns
+   a well-formed chain belonging to someone else.
+2. There is a **bootstrap problem with no clean answer**: you cannot know a
+   chain's starting identifier until you have fetched the chain. This field
+   therefore **cannot discover a rename you do not already know about**. It can
+   only confirm one.
+3. So a returned row is **evidence, not a fact**. Nothing may write an alias from
+   it automatically. A row whose `New ID` is not already an identifier this
+   instrument holds must be refused and surfaced for a human, exactly as an
+   ambiguous ownership already is.
+
+This does not weaken §6.4 — it strengthens it. The trap is real and is reachable
+from *both* directions: omit the anchor and you get another company's chain; pass
+the wrong anchor and you get another company's chain. Evidence:
+`blpapi-facts/anchor_semantics.json`.
+
 ### 6.4 Finding — one omitted override crosses two unrelated instruments
 
 The same field, asked about `META US Equity` **without**

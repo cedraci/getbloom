@@ -1,0 +1,35 @@
+{
+  "anchored, start 2012-01-01 (P0's window)": [
+    {
+      "Date": "2022-01-31",
+      "Old ID": "META",
+      "New ID": "METV",
+      "Old Exch": "US",
+      "New Exch": "US",
+      "Action ID": "229098374",
+      "Source": "ID Change"
+    }
+  ],
+  "anchored, start 2000-01-01 (a listing-date-ish floor)": [
+    {
+      "Date": "2002-04-26",
+      "Old ID": "META",
+      "New ID": "",
+      "Old Exch": "US",
+      "New Exch": "",
+      "Action ID": "8041072",
+      "Source": "Delisted"
+    }
+  ],
+  "anchored on the OLD identifier": [
+    {
+      "Date": "2002-04-10",
+      "Old ID": "FB",
+      "New ID": "",
+      "Old Exch": "US",
+      "New Exch": "",
+      "Action ID": "7971180",
+      "Source": "Delisted"
+    }
+  ]
+}
