@@ -1,0 +1,94 @@
+mod common;
+
+use common::uniq;
+use getbloomdata_lib::instrument::search;
+use getbloomdata_lib::master_fetch::MockMasterFetcher;
+
+/// `tests/` shares one database across parallel threads and across repeated
+/// runs with no cleanup. `instrument_candidate.security` is TEXT UNIQUE, so
+/// every security this mock returns must carry a unique stem -- a literal
+/// "AAPL US<equity>" would collide with every other run of this suite.
+fn mock(stem: &str) -> MockMasterFetcher {
+    let a = format!("{stem} US<equity>");
+    let b = format!("{stem} LN<equity>");
+    let c = format!("{stem} US 08/21/26 C400<equity>");
+    MockMasterFetcher {
+        list_raw: serde_json::json!([{"results": [
+            {"security": a, "description": "Apple Inc"},
+            {"security": b, "description": "Apple Inc"},
+            {"security": c, "description": "Apple call"}]}]),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_bloomberg_search_caches_every_result_permanently() {
+    let pool = common::pool().await;
+    let stem = uniq("AAPL");
+    let m = mock(&stem);
+    let out = search::bloomberg(&pool, &m, &stem, "Equity").await.unwrap();
+    assert_eq!(m.call_count(), 1, "exactly one instrumentListRequest");
+    assert!(out.cached >= 2);
+
+    // The point of the cache: the same search now needs no call at all.
+    let local = search::local(&pool, &stem, 10).await.unwrap();
+    assert!(local.iter().any(|h| h.security.as_deref() == Some(&format!("{stem} US Equity"))));
+    assert!(local.iter().any(|h| h.security.as_deref() == Some(&format!("{stem} LN Equity"))));
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn the_raw_bloomberg_form_is_never_stored_as_a_security_string() {
+    let pool = common::pool().await;
+    let stem = uniq("AAPL");
+    search::bloomberg(&pool, &mock(&stem), &stem, "Equity").await.unwrap();
+    let bad: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instrument_candidate WHERE security LIKE $1 AND security LIKE '%<%'")
+        .bind(format!("{stem}%"))
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(bad, 0, "pasting the raw form produces exactly the malformed \
+                        identifier migration 0004 had to repair");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn the_call_is_recorded_in_the_hit_ledger() {
+    let pool = common::pool().await;
+    let stem = uniq("AAPL");
+    // Scope to rows THIS test creates: a global sum/count over hit_ledger is
+    // a race under parallel execution (a book_entry count once came back 45
+    // vs 44 this way), so capture the high-water mark before the call and
+    // assert only on ids above it.
+    let before_id: i64 = sqlx::query_scalar("SELECT coalesce(max(id),0) FROM hit_ledger")
+        .fetch_one(&pool).await.unwrap();
+
+    let out = search::bloomberg(&pool, &mock(&stem), &stem, "Equity").await.unwrap();
+
+    let new_hits: i64 = sqlx::query_scalar(
+        "SELECT coalesce(sum(estimated_hits),0)::bigint FROM hit_ledger
+          WHERE id > $1 AND purpose = 'search'")
+        .bind(before_id)
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(new_hits, out.estimated_hits);
+    assert!(out.estimated_hits > 0, "whether instrumentListRequest is metered is \
+                                     unknown (spec §10 q2), so it is counted");
+
+    let purpose: String = sqlx::query_scalar(
+        "SELECT purpose FROM hit_ledger WHERE id > $1 ORDER BY id DESC LIMIT 1")
+        .bind(before_id)
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(purpose, "search");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_empty_query_never_reaches_bloomberg() {
+    let pool = common::pool().await;
+    let stem = uniq("AAPL");
+    let m = mock(&stem);
+    let out = search::bloomberg(&pool, &m, "   ", "Equity").await.unwrap();
+    assert_eq!(m.call_count(), 0);
+    assert!(out.hits.is_empty());
+    assert_eq!(out.estimated_hits, 0);
+}

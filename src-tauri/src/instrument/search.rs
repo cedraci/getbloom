@@ -18,6 +18,7 @@
 //! than the query saves.
 
 use crate::error::AppResult;
+use crate::master_fetch::MasterFetcher;
 use crate::resolution::score::Candidate;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -199,4 +200,53 @@ pub async fn link_candidate(pool: &PgPool, security: &str, instrument_id: i64) -
     sqlx::query("UPDATE instrument_candidate SET instrument_id = $2 WHERE security = $1")
         .bind(security).bind(instrument_id).execute(pool).await?;
     Ok(())
+}
+
+/// The Bloomberg search tier. Spec §6.2: one button, one call, cached forever.
+/// This is the ONLY place in the search feature allowed to reach Bloomberg --
+/// nothing in `search::local`'s callers may route typing, focus or navigation
+/// here. `query` is trimmed and, if empty, the function returns without
+/// touching the fetcher at all: an accidental call with nothing typed must
+/// not spend a hit.
+#[derive(Debug, Serialize)]
+pub struct BloombergSearch {
+    pub hits: Vec<SearchHit>,
+    pub estimated_hits: i64,
+    pub cached: usize,
+}
+
+pub async fn bloomberg<F: MasterFetcher>(
+    pool: &PgPool, fetcher: &F, query: &str, yellow_key: &str,
+) -> AppResult<BloombergSearch> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(BloombergSearch { hits: Vec::new(), estimated_hits: 0, cached: 0 });
+    }
+
+    let filter = crate::resolution::engine::yellow_key_filter(yellow_key);
+    let answered = fetcher.instrument_list(q, filter, 20).await?;
+
+    // Spec §10 q2: whether instrumentListRequest is metered at all is not
+    // established, so it is counted -- the project's existing
+    // over-count-is-safe policy applied to a new call site. Charged even
+    // though the search may come back with zero matches: the call was still
+    // made.
+    crate::budget::record_purpose_hits(pool, "search", crate::budget::SEARCH_HIT_COST).await?;
+
+    // `answered.parsed` is already normalised by `parse_list` --
+    // "AAPL US<equity>" became "AAPL US Equity" on the way in, so the raw
+    // Bloomberg form can never reach instrument_candidate.security. Pasting
+    // the raw form there once required a database migration (0004) to
+    // repair; `remember_candidates` must never be handed `answered.raw`.
+    let cached = remember_candidates(pool, &answered.parsed).await?;
+
+    // Answer from the local tier so the caller sees one consistent shape,
+    // with book and known-instrument results ranked above the new arrivals
+    // this call just cached.
+    let hits = local(pool, q, 20).await?;
+    Ok(BloombergSearch {
+        hits,
+        estimated_hits: crate::budget::SEARCH_HIT_COST,
+        cached,
+    })
 }

@@ -410,3 +410,14 @@ pub async fn search_local(state: State<'_, AppState>, query: String, limit: i64)
     -> Result<Vec<search::SearchHit>, AppError> {
     search::local(&state.pool, &query, limit.clamp(1, 50)).await
 }
+
+/// Explicit Bloomberg search. The UI must call this only from the
+/// "Search Bloomberg" button -- never on input, focus or navigation.
+#[tauri::command]
+pub async fn search_bloomberg(state: State<'_, AppState>, query: String,
+                              yellow_key: String)
+    -> Result<search::BloombergSearch, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
+    search::bloomberg(&state.pool, &fetcher, &query, &yellow_key).await
+}

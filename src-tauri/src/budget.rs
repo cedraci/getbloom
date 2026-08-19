@@ -57,6 +57,21 @@ pub async fn record_hits(pool: &PgPool, run_id: i64, estimated: i64) -> AppResul
     Ok(())
 }
 
+/// What one instrumentListRequest is charged. Whether this request is metered
+/// at all is not established (Bloomberg does not document it) -- it is
+/// counted, the existing over-count-is-safe policy applied to a new call site.
+pub const SEARCH_HIT_COST: i64 = 1;
+
+/// Record a metered call that belongs to no run -- an explicit search rather
+/// than a scheduled or manual EOD/backfill pull. `run_id` is nullable in the
+/// schema for exactly this: `hit_ledger.purpose` distinguishes the two.
+pub async fn record_purpose_hits(pool: &PgPool, purpose: &str, hits: i64) -> AppResult<()> {
+    sqlx::query("INSERT INTO hit_ledger (run_id, purpose, estimated_hits)
+                 VALUES (NULL, $1, $2)")
+        .bind(purpose).bind(hits).execute(pool).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

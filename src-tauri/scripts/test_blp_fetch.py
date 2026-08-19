@@ -204,6 +204,60 @@ class RealBackfillTests(unittest.TestCase):
         self.assertEqual((obs, probs), ([], []))
 
 
+class EmptyResultTests(unittest.TestCase):
+    """A response containing literally nothing means different things for
+    different request kinds. history/reference/bulk_reference always name a
+    security, so silence about all of them is structurally impossible for a
+    well-formed request and stays a fault. instrument_list is a text search:
+    "no security matches this text" is itself a normal answer, so an empty
+    instrumentListRequest result must not be confused with a session fault."""
+
+    def run_finish(self, capture):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = blp_fetch.finish(capture, 0.0)
+        return code, json.loads(buf.getvalue())
+
+    def test_an_empty_instrument_list_response_is_a_clean_success(self):
+        capture = {"captured": [{
+            "request": {"kind": "instrument_list", "query": "ZZZZNOPE",
+                        "max_results": 20},
+            "messages": [{"results": []}]}]}
+        code, out = self.run_finish(capture)
+        self.assertEqual(code, blp_fetch.EXIT_OK)
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["list_results"], [])
+
+    def test_an_instrument_list_response_with_no_messages_at_all_is_also_ok(self):
+        # Belt and suspenders: even if Bloomberg's response never produced a
+        # message (as opposed to one message with an empty results array),
+        # a legitimate zero-match search must not be reported as EXIT_SESSION.
+        capture = {"captured": [{
+            "request": {"kind": "instrument_list", "query": "ZZZZNOPE",
+                        "max_results": 20},
+            "messages": []}]}
+        code, out = self.run_finish(capture)
+        self.assertEqual(code, blp_fetch.EXIT_OK)
+        self.assertEqual(out["status"], "ok")
+
+    def test_an_empty_history_response_still_faults(self):
+        # The check this test guards was written for exactly this case: a
+        # history/reference/bulk_reference response with nothing in it at all
+        # really does indicate something wrong upstream, and must keep
+        # exiting EXIT_SESSION rather than being laundered into a success by
+        # the instrument_list carve-out above.
+        capture = {"captured": [{
+            "request": {"kind": "history", "securities": ["AAPL US Equity"],
+                        "fields": ["PX_LAST"], "start": "20260701",
+                        "end": "20260701"},
+            "messages": []}]}
+        code, out = self.run_finish(capture)
+        self.assertEqual(code, blp_fetch.EXIT_SESSION)
+        self.assertEqual(out["status"], "empty")
+
+
 class FatalTests(unittest.TestCase):
     def test_bad_date_is_rejected_before_it_can_be_mistaken_for_a_holiday(self):
         # Live capture of start=end=20261301. Bloomberg returned an empty

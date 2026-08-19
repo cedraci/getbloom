@@ -582,8 +582,20 @@ def finish(capture, started):
     if fatal:
         return emit("error", seconds, fatal, [], [], EXIT_SESSION)
     raw_messages = collect_raw_messages(capture)
+    # A response with nothing in it is a fault for history/reference/
+    # bulk_reference -- those kinds always describe a security, and silence
+    # about every security asked for is structurally impossible for a
+    # well-formed request. instrumentListRequest is different: "no security
+    # matches this text" is itself the answer, not a sign the request failed.
+    # A responseError (session/service fault) is still caught above via
+    # `fatal`, so treating an empty instrument_list as success does not mask
+    # a real transport problem -- it only stops confusing "no matches" with
+    # "no data".
+    kinds = {(item.get("request") or {}).get("kind")
+            for item in capture.get("captured", [])}
+    only_instrument_list = kinds == {"instrument_list"}
     if not observations and not problems and not bulk_rows and not list_results \
-            and not raw_messages:
+            and not raw_messages and not only_instrument_list:
         # Structurally impossible for a well-formed request. Treated as a
         # fault so a silent no-op can never look like a successful run.
         return emit("empty", seconds,
