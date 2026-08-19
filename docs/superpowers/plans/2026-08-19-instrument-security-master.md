@@ -440,7 +440,10 @@ CREATE TABLE instrument_alias (
 -- HISTORICAL_STARTING_IDENTIFIER was supplied. An alias whose anchor is unknown
 -- cannot be trusted, so storing one is made impossible.
 ALTER TABLE instrument_alias ADD CONSTRAINT alias_anchor_required
-  CHECK (source <> 'bloomberg_hist_ids' OR anchoring_identifier IS NOT NULL);
+  CHECK (source <> 'bloomberg_hist_ids'
+    OR (anchoring_identifier IS NOT NULL AND btrim(anchoring_identifier) <> ''));
+-- The IS NOT NULL half is load-bearing: btrim(NULL) is NULL, and a CHECK that
+-- evaluates to NULL passes. An empty string is not an anchor.
 
 CREATE INDEX instrument_alias_lookup ON instrument_alias (id_type, lower(value));
 CREATE INDEX instrument_alias_by_instrument ON instrument_alias (instrument_id);
@@ -456,7 +459,13 @@ BEGIN
      OR NEW.id_type <> OLD.id_type
      OR NEW.instrument_id <> OLD.instrument_id
      OR NEW.valid_from <> OLD.valid_from
-     OR NEW.source <> OLD.source THEN
+     OR NEW.source <> OLD.source
+     -- Provenance, not state. anchoring_identifier in particular is what the
+     -- whole META/Roundhill defence rests on: rewriting it in place would
+     -- launder an unanchored alias into a trusted one.
+     OR NEW.anchoring_identifier IS DISTINCT FROM OLD.anchoring_identifier
+     OR NEW.bbg_action_id IS DISTINCT FROM OLD.bbg_action_id
+     OR NEW.exch_code IS DISTINCT FROM OLD.exch_code THEN
     RAISE EXCEPTION
       'instrument_alias identity columns are immutable; close valid_to/system_to and insert a new row';
   END IF;
@@ -471,7 +480,8 @@ BEGIN
   IF NEW.value <> OLD.value
      OR NEW.attr <> OLD.attr
      OR NEW.instrument_id <> OLD.instrument_id
-     OR NEW.valid_from <> OLD.valid_from THEN
+     OR NEW.valid_from <> OLD.valid_from
+     OR NEW.source <> OLD.source THEN
     RAISE EXCEPTION
       'instrument_attr identity columns are immutable; close system_to and insert a new row';
   END IF;
@@ -640,12 +650,27 @@ CREATE TABLE observation (
   CONSTRAINT observation_one_value
     CHECK ((value_num IS NULL) <> (value_text IS NULL)),
   CONSTRAINT observation_granularity_time
-    CHECK ((granularity = 'eod') = (obs_time IS NULL))
+    CHECK ((granularity = 'eod') = (obs_time IS NULL)),
+  -- Spec 4.8: adjustment basis is recorded, not assumed. Only numeric prices
+  -- carry a basis; text-valued fields (NAME and similar) legitimately have none.
+  CONSTRAINT observation_numeric_needs_basis
+    CHECK (value_num IS NULL OR basis_id IS NOT NULL),
+  -- Spec 4.8 requires a new granularity to be addable as a new value, not a
+  -- schema change, so the case is normalised rather than enumerated --
+  -- otherwise 'EOD' and 'eod' silently partition observation_current's key.
+  CONSTRAINT observation_granularity_lower
+    CHECK (granularity = lower(granularity) AND granularity <> '')
 );
 
 -- One current row per logical series; the superseded history accumulates beneath.
+-- NULLS NOT DISTINCT is load-bearing, not decoration: obs_time is NULL for every
+-- EOD row (see observation_granularity_time) and basis_id is NULL for
+-- text-valued fields, so under Postgres' default NULL-is-distinct rule this
+-- index would let unlimited "current" rows through for exactly the series it
+-- exists to protect. Requires PostgreSQL 15+; this project is on 17.
 CREATE UNIQUE INDEX observation_current ON observation
   (instrument_id, field_id, obs_date, obs_time, granularity, layer, basis_id)
+  NULLS NOT DISTINCT
   WHERE system_to = 'infinity';
 CREATE INDEX observation_by_date ON observation (obs_date);
 
@@ -656,8 +681,11 @@ BEGIN
      OR NEW.instrument_id <> OLD.instrument_id
      OR NEW.field_id <> OLD.field_id
      OR NEW.obs_date <> OLD.obs_date
+     OR NEW.obs_time IS DISTINCT FROM OLD.obs_time
+     OR NEW.granularity <> OLD.granularity
      OR NEW.layer <> OLD.layer
-     OR NEW.basis_id IS DISTINCT FROM OLD.basis_id THEN
+     OR NEW.basis_id IS DISTINCT FROM OLD.basis_id
+     OR NEW.run_id <> OLD.run_id THEN
     RAISE EXCEPTION
       'observations are append-only; close system_to and insert a corrected row';
   END IF;
