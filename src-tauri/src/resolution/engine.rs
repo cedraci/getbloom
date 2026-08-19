@@ -287,9 +287,12 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
             pool, input, &security, "bloomberg_ref", None,
             &serde_json::json!([&blocks[0]]), Some(&raw_identity)).await?;
         let iid = bind_identity(pool, &blocks[0], decision_id, input.as_of).await?;
-        // Spec §5.1: one anchored history request per instrument, ever. A
-        // failure here must not undo a good binding -- the identifiers we
-        // have are still correct, we simply know less about the past.
+        // Spec §5.1: an anchored identifier-history request once per
+        // successful bind (not once per instrument, ever -- a later resolve
+        // of an already-bound instrument never reaches this branch at all,
+        // since step 2's local alias lookup returns first). A failure here
+        // must not undo a good binding -- the identifiers we have are still
+        // correct, we simply know less about the past.
         let hist_start = blocks[0].listing_date
             .unwrap_or_else(|| NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
         if let Err(e) = crate::instrument::history::ingest(

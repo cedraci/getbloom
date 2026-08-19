@@ -191,6 +191,12 @@ CREATE TABLE instrument_link (
 );
 CREATE INDEX instrument_link_pred ON instrument_link (predecessor_id);
 CREATE INDEX instrument_link_succ ON instrument_link (successor_id);
+-- Without this, re-ingesting the same HISTORICAL_IDS_TIME_RANGE response
+-- (nothing here keys a proposal to Bloomberg's Action ID the way
+-- instrument_alias does) would open a fresh, identical proposal every time,
+-- piling up duplicates in the review queue forever.
+CREATE UNIQUE INDEX instrument_link_unique
+  ON instrument_link (predecessor_id, successor_id, link_type, effective_date);
 
 CREATE TABLE resolution_review (
   id            BIGSERIAL PRIMARY KEY,
