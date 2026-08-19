@@ -6,6 +6,10 @@
   } = $props();
 
   // Retire is the default: the reversible option should never require a click.
+  // Seeded once per plan by construction: AssetsScreen wraps this component in
+  // {#key plan}, so a new plan always mounts a fresh ImportDiff instance and
+  // this initializer reruns -- it is never left holding modes for ids that
+  // belonged to a plan that has since been replaced.
   let modes = $state<Record<number, DeleteMode>>(
     Object.fromEntries(plan.removals.map((r) => [r.id, "retire" as DeleteMode])));
   let typed = $state("");
@@ -51,7 +55,14 @@
 <div class="backdrop">
   <div class="dialog">
     <h3>Import preview</h3>
-    {#if error}<p class="error">{error}</p>{/if}
+
+    {#if !plan.has_id_column}
+      <p class="warn">
+        This sheet has no <code>id</code> column, so nothing can be removed by
+        importing it &mdash; only additions and edits are possible. Export the
+        workbook and edit that copy if you want to propose removals.
+      </p>
+    {/if}
 
     {#if blocked}
       <p class="error">
@@ -94,6 +105,7 @@
       {#if plan.removals.length}
         <h4>Missing from the sheet ({plan.removals.length})</h4>
         <table>
+          <thead><tr><th>Label</th><th>Security</th><th>Mode</th></tr></thead>
           <tbody>
             {#each plan.removals as r}
               <tr>
@@ -119,10 +131,13 @@
     {/if}
 
     <div class="actions">
+      {#if error}<p class="error">{error}</p>{/if}
       {#if !blocked && !nothingToDo}
         <button onclick={apply} disabled={busy || !countOk}>Apply</button>
       {/if}
-      <button onclick={() => onclose(false)} disabled={busy}>Cancel</button>
+      <button onclick={() => onclose(false)} disabled={busy}>
+        {blocked || nothingToDo ? "Close" : "Cancel"}
+      </button>
     </div>
   </div>
 </div>
@@ -140,6 +155,7 @@
   .warn { color: #a60; }
   .mono { font-family: monospace; }
   table { border-collapse: collapse; margin-top: 0.3rem; }
-  td { border: 1px solid #ccc; padding: 0.2rem 0.5rem; }
-  .actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  td, th { border: 1px solid #ccc; padding: 0.2rem 0.5rem; text-align: left; }
+  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 1rem; }
+  .actions .error { flex-basis: 100%; margin: 0 0 0.3rem; }
 </style>

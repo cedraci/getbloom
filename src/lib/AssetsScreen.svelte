@@ -20,13 +20,16 @@
     if (changed) reload();
   }
 
-  $effect(() => {
-    if (!sheetPath) {
-      api.getSettings()
-        .then((c) => (sheetPath = `${c.data_dir}\\assets.xlsx`))
-        .catch(() => (sheetPath = "assets.xlsx"));
-    }
-  });
+  // Seeds sheetPath exactly once, at mount. Deliberately does not read
+  // sheetPath itself, so the effect has no reactive dependency on it and
+  // never re-runs when the user edits or clears the box -- an effect that
+  // read `sheetPath` to decide whether to seed it would re-fire on every
+  // keystroke and reassert the default over whatever the user typed.
+  async function seedSheetPath() {
+    try { sheetPath = `${(await api.getSettings()).data_dir}\\assets.xlsx`; }
+    catch { sheetPath = "assets.xlsx"; }
+  }
+  $effect(() => { seedSheetPath(); });
 
   async function exportSheet() {
     notice = ""; error = "";
@@ -35,10 +38,12 @@
       notice = `Written to ${sheetPath}`;
     } catch (e) { error = String(e); }
   }
+  let previewBusy = $state(false);
   async function previewSheet() {
-    notice = ""; error = "";
+    previewBusy = true; notice = ""; error = "";
     try { plan = await api.previewAssetsImport(sheetPath); }
     catch (e) { error = String(e); }
+    finally { previewBusy = false; }
   }
   // `msg` is set by ImportDiff for both the workbook_refreshed success and
   // failure cases -- both are notices, never an error, per spec §8.2.
@@ -142,7 +147,7 @@
   <div class="bulk">
     <input bind:value={sheetPath} size="48" />
     <button onclick={exportSheet}>Export</button>
-    <button onclick={previewSheet}>Preview import</button>
+    <button onclick={previewSheet} disabled={previewBusy}>Preview import</button>
   </div>
   {#if notice}<p class="notice">{notice}</p>{/if}
 </section>
@@ -151,7 +156,9 @@
   <DeleteDialog kind={pending.kind} id={pending.id} onclose={afterDelete} />
 {/if}
 {#if plan}
-  <ImportDiff path={sheetPath} {plan} onclose={afterImport} />
+  {#key plan}
+    <ImportDiff path={sheetPath} {plan} onclose={afterImport} />
+  {/key}
 {/if}
 
 <style>
