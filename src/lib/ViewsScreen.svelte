@@ -10,9 +10,24 @@
   let error = $state("");
   let pending = $state<{ kind: EntityKind; id: number } | null>(null);
 
-  function afterDelete(changed: boolean) {
+  // A deletion can retire a row (it survives, just inactive) or purge it
+  // (it's gone). Only purge invalidates a selection that points at it, so
+  // reload first and then check whether the deleted id still exists before
+  // clearing anything -- a plain retire should never silently uncheck a
+  // selection the user didn't touch. Purging the selected view invalidates
+  // everything the assign panel was showing, so that case clears all three.
+  async function afterDelete(changed: boolean) {
+    const deleted = pending;
     pending = null;
-    if (changed) reload();
+    if (!changed || !deleted) return;
+    await reload();
+    if (deleted.kind === "view" && !views.some((v) => v.id === deleted.id)) {
+      selectedViewId = null;
+      selectedAssetIds = [];
+      selectedFieldIds = [];
+    } else if (deleted.kind === "field" && !fields.some((f) => f.id === deleted.id)) {
+      selectedFieldIds = selectedFieldIds.filter((id) => id !== deleted.id);
+    }
   }
 
   let newViewName = $state("");
@@ -119,10 +134,10 @@
         <ul>
           {#each assets as a}
             <li>
-              <label>
+              <label class:retired={!a.active}>
                 <input type="checkbox" checked={selectedAssetIds.includes(a.id)}
                        onchange={() => toggleAsset(a.id)} />
-                {a.label} ({a.bdp_security})
+                {a.label} ({a.bdp_security}){#if !a.active} &mdash; retired{/if}
               </label>
             </li>
           {/each}
@@ -133,13 +148,11 @@
         <ul>
           {#each fields as f}
             <li>
-              <label>
+              <label class:retired={!f.active}>
                 <input type="checkbox" checked={selectedFieldIds.includes(f.id)}
                        onchange={() => toggleField(f.id)} />
-                {f.mnemonic} — {f.label}
+                {f.mnemonic} — {f.label}{#if !f.active} &mdash; retired{/if}
               </label>
-              <button class="x" title="Remove field"
-                      onclick={() => (pending = { kind: "field", id: f.id })}>&times;</button>
             </li>
           {/each}
         </ul>
@@ -154,6 +167,26 @@
       No asset class exists yet. Create one on the <strong>Assets</strong> tab first —
       a field is always defined for a class.
     </p>
+  {/if}
+  <!-- Deliberately not gated on selectedViewId: this is the only place a
+       field can be removed, and a field must be removable even before any
+       view exists (e.g. a fresh database with just a typo'd field). -->
+  {#if fields.length}
+    <table>
+      <thead><tr><th>Mnemonic</th><th>Label</th><th>Class</th><th>Active</th><th></th></tr></thead>
+      <tbody>
+        {#each fields as f}
+          <tr>
+            <td>{f.mnemonic}</td>
+            <td>{f.label}</td>
+            <td>{classes.find((c) => c.id === f.asset_class_id)?.name}</td>
+            <td><input type="checkbox" checked={f.active} disabled title="Retire/purge to change" /></td>
+            <td><button class="x" title="Remove field"
+                        onclick={() => (pending = { kind: "field", id: f.id })}>&times;</button></td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   {/if}
   <form onsubmit={(e) => { e.preventDefault(); addField(); }}>
     <select bind:value={newField.asset_class_id} disabled={!classes.length}>
@@ -188,4 +221,5 @@
   form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
   .columns { display: flex; gap: 2rem; }
   .columns ul { list-style: none; padding: 0; margin: 0; max-height: 16rem; overflow-y: auto; }
+  .retired { color: #888; font-style: italic; }
 </style>

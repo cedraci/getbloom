@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type DeleteMode, type ImportPlan } from "./api";
+  import { api, type DeleteMode, type ImportPlan, type ImportResult } from "./api";
 
   let { path, plan, onclose }: {
     path: string; plan: ImportPlan; onclose: (applied: boolean, notice?: string) => void;
@@ -24,6 +24,20 @@
     plan.retires.length === 0 && plan.reactivations.length === 0 &&
     plan.membership_changes.length === 0);
 
+  // Renders the six ImportResult counts as a compact, comma-joined clause,
+  // omitting zero terms -- so an import that only added two rows reads as
+  // "2 added", not a wall of "0 edited, 0 retired, ...".
+  function summarizeCounts(res: ImportResult): string {
+    const parts: string[] = [];
+    if (res.added) parts.push(`${res.added} added`);
+    if (res.edited) parts.push(`${res.edited} edited`);
+    if (res.retired) parts.push(`${res.retired} retired`);
+    if (res.reactivated) parts.push(`${res.reactivated} reactivated`);
+    if (res.membership_assets_updated) parts.push(`${res.membership_assets_updated} membership update(s)`);
+    if (res.removed) parts.push(`${res.removed} removed`);
+    return parts.join(", ");
+  }
+
   async function apply() {
     busy = true; error = "";
     try {
@@ -33,12 +47,14 @@
       const pairs = plan.removals.map((r) => [r.id, modes[r.id]] as [number, DeleteMode]);
       const res = await api.applyAssetsImport(path, plan.file_hash, pairs,
                                               needsCount ? plan.removals.length : null);
+      const counts = summarizeCounts(res);
+      const summary = counts ? `Imported (${counts}).` : "Imported.";
       if (!res.workbook_refreshed) {
         // The import COMMITTED. Only the write-back of the new ids into the
         // workbook failed, and the file is almost always locked because the
         // user still has it open in Excel. Say what happened and what to do,
         // and never phrase this as a failed import.
-        onclose(true, "Imported. The workbook could not be updated with the new "
+        onclose(true, `${summary} The workbook could not be updated with the new `
                     + "ids -- close it in Excel and export again before your next "
                     + "import, or the added rows will look like deletions.");
         return;
@@ -46,7 +62,7 @@
       // The rewrite succeeded, so the file on disk now carries the committed
       // ids -- but the copy in the user's own Excel window, if still open, does
       // not. One Ctrl-S from that stale window would restore the blank-id row.
-      onclose(true, "Imported. The workbook was updated with the new ids -- "
+      onclose(true, `${summary} The workbook was updated with the new ids -- `
                   + "close and reopen it in Excel before editing it again.");
     } catch (e) { error = String(e); busy = false; }
   }
