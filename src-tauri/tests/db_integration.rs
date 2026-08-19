@@ -878,6 +878,63 @@ async fn apply_import_adds_edits_and_purges_in_one_transaction() {
     assert!(replay.is_empty(), "the refreshed workbook must match the database, got {replay:?}");
 }
 
+/// Finding I5: a hand-built sheet (no `id` column) has no ids to write back
+/// and, per guardrail 1, can never propose a removal -- so overwriting it
+/// with a full registry export is not a service to the user, it is
+/// destroying a file they wrote by hand (their own column order, their own
+/// extra notes, whatever they pasted). The apply must skip the rewrite
+/// entirely for such a sheet: the file on disk must be untouched, byte for
+/// byte, and `workbook_refreshed` must honestly report `false`, even though
+/// the database changes land exactly as they would for an export-produced
+/// sheet.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_from_a_hand_built_sheet_leaves_the_file_untouched() {
+    use getbloomdata_lib::bulk::sheet::SHEET_NAME;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pasted.xlsx");
+
+    getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test").await.unwrap();
+
+    // Built the way a user would in Excel: no `id` column at all, only the
+    // columns they bothered to fill in.
+    let mut book = rust_xlsxwriter::Workbook::new();
+    let s = book.add_worksheet();
+    s.set_name(SHEET_NAME).unwrap();
+    for (c, h) in ["label", "class", "id_kind", "ticker", "yellow_key"].iter().enumerate() {
+        s.write_string(0, c as u16, *h).unwrap();
+    }
+    s.write_string(1, 0, "Hand Built").unwrap();
+    s.write_string(1, 1, "Equity").unwrap();
+    s.write_string(1, 2, "ticker").unwrap();
+    s.write_string(1, 3, "HB US").unwrap();
+    s.write_string(1, 4, "Equity").unwrap();
+    book.save(&path).unwrap();
+
+    let before_bytes = std::fs::read(&path).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert!(!plan.has_id_column, "a hand-built sheet has no id column");
+    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
+    assert_eq!(plan.adds.len(), 1);
+
+    let res = getbloomdata_lib::bulk::apply_import(&pool, &path, &plan.file_hash, &[], None)
+        .await.unwrap();
+    assert!(!res.workbook_refreshed,
+            "a hand-built sheet must not be overwritten by the post-apply export");
+
+    let after_bytes = std::fs::read(&path).unwrap();
+    assert_eq!(before_bytes, after_bytes,
+               "the user's own file must survive an apply byte-for-byte untouched");
+
+    let (added,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM asset WHERE bdp_security = 'HB US Equity'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(added, 1, "the database changes must still land even though the file did not move");
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn apply_import_refuses_a_stale_hash() {

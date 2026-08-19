@@ -299,28 +299,46 @@ pub async fn apply_import(
     tx.commit().await?;
 
     // Re-export over the same path so the file on disk matches what was just
-    // committed. Without this, a blank-id add row keeps its blank id on disk
-    // after the database has assigned it a real one, so re-previewing the same
-    // file would read the now-persisted asset as both an invalid duplicate
-    // claim on its own security and a removal (its id never appears as
-    // "present" in a sheet where its row still has no id). Every other kind of
-    // change already leaves the file matching the database post-apply -- edits,
-    // membership marks, retires and reactivations all come from data the file
-    // already held -- so adds are the only reason this step is required, but
-    // it is cheap and correct to do unconditionally.
+    // committed -- but ONLY when the sheet carries an `id` column, i.e. only
+    // for a file this app produced by Export. Without this narrowing, a
+    // hand-built or pasted sheet -- no `id` column, therefore guardrail-1-safe
+    // and never able to propose a removal -- would get replaced wholesale by
+    // a full registry export after every apply, destroying whatever the user
+    // built by hand (their own column order, their own extra columns) even
+    // though nothing about their file demanded it.
     //
-    // This MUST be best-effort. The transaction above already committed: the
-    // change is real and the caller must be told it succeeded no matter what
-    // happens next. The file can be locked by the user's own open copy of it
-    // in Excel (a sharing violation, `os error 5` on Windows) or by anything
-    // else transient; none of that may turn a landed write into a reported
-    // failure, which would both lie to the caller and leave a retry stuck --
-    // a removal-only retry would keep re-committing an empty transaction and
-    // keep failing on the same locked file forever, and an add-bearing retry
-    // would be flatly rejected as invalid (the blank-id row now collides with
-    // the asset it already created), reading exactly like "you pasted a
-    // duplicate, delete this row" when the real fix is "export again".
-    res.workbook_refreshed = export_assets_xlsx(pool, path).await.is_ok();
+    // A file with an `id` column DOES need the rewrite: a blank-id add row
+    // keeps its blank id on disk after the database has assigned it a real
+    // one, so re-previewing the same file would read the now-persisted asset
+    // as both an invalid duplicate claim on its own security and a removal
+    // (its id never appears as "present" in a sheet where its row still has
+    // no id). Every other kind of change already leaves the file matching the
+    // database post-apply -- edits, membership marks, retires and
+    // reactivations all come from data the file already held -- so adds are
+    // the only reason this step is required for an id-bearing file.
+    //
+    // Skipping the rewrite for a hand-built sheet is safe: such a sheet has no
+    // ids to write back, cannot propose a removal under guardrail 1, and its
+    // next preview fails loudly with the existing "already belongs to asset
+    // #N ... export it again" invalid-row message rather than destructively.
+    //
+    // When it does run, this MUST be best-effort. The transaction above
+    // already committed: the change is real and the caller must be told it
+    // succeeded no matter what happens next. The file can be locked by the
+    // user's own open copy of it in Excel (a sharing violation, `os error 5`
+    // on Windows) or by anything else transient; none of that may turn a
+    // landed write into a reported failure, which would both lie to the
+    // caller and leave a retry stuck -- a removal-only retry would keep
+    // re-committing an empty transaction and keep failing on the same locked
+    // file forever, and an add-bearing retry would be flatly rejected as
+    // invalid (the blank-id row now collides with the asset it already
+    // created), reading exactly like "you pasted a duplicate, delete this
+    // row" when the real fix is "export again".
+    res.workbook_refreshed = if plan.has_id_column {
+        export_assets_xlsx(pool, path).await.is_ok()
+    } else {
+        false
+    };
 
     Ok(res)
 }
