@@ -156,8 +156,8 @@ CREATE TABLE instrument_alias (
   id                   BIGSERIAL PRIMARY KEY,
   instrument_id        BIGINT NOT NULL REFERENCES instrument(instrument_id),
   id_type              TEXT NOT NULL CHECK (id_type IN
-                         ('ticker','isin','figi','cusip','sedol','bbg_unique',
-                          'bdp_security')),
+                         ('ticker','isin','figi','share_class_figi','cusip',
+                          'sedol','bbg_unique','bdp_security')),
   value                TEXT NOT NULL,
   exch_code            TEXT,
   valid_from           DATE NOT NULL,
@@ -174,6 +174,14 @@ CREATE INDEX ON instrument_alias (id_type, lower(value));
 ALTER TABLE instrument_alias ADD CONSTRAINT alias_anchor_required
   CHECK (source <> 'bloomberg_hist_ids' OR anchoring_identifier IS NOT NULL);
 ```
+
+`share_class_figi` was added during implementation and is not in the original
+list. `ID_BB_GLOBAL` and `ID_BB_GLOBAL_SHARE_CLASS_LEVEL` were both being stored
+as `figi` over one identical period, which the non-overlap constraint correctly
+refused — every real equity returns both, so the first live resolution would have
+failed. They are genuinely different things: a share-class FIGI answers for every
+sibling listing rather than identifying one, so `find_by_alias('figi', ...)`
+would otherwise return an arbitrary sibling.
 
 `anchoring_identifier` is not bookkeeping. P0 §6.4 showed that
 `HISTORICAL_IDS_TIME_RANGE` asked about `META US Equity` returns Facebook's
