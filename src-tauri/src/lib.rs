@@ -1,4 +1,5 @@
 pub mod blp_driver;
+pub mod book;
 pub mod budget;
 pub mod bulk;
 pub mod commands;
@@ -72,7 +73,8 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::list_asset_classes, commands::create_asset_class,
-            commands::list_assets, commands::create_asset, commands::set_asset_active,
+            commands::list_book, commands::add_to_book, commands::set_book_active,
+            commands::list_pending_reviews, commands::resolve_review, commands::reject_review,
             commands::list_fields, commands::create_field,
             commands::list_views, commands::create_view,
             commands::set_view_assets, commands::set_view_fields,

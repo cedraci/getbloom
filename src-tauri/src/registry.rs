@@ -9,28 +9,21 @@ pub struct AssetClass {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct Asset {
-    pub id: i64,
-    pub asset_class_id: i64,
-    pub label: String,
-    pub id_kind: String,
-    pub ticker: Option<String>,
-    pub isin: Option<String>,
-    pub yellow_key: String,
-    pub bdp_security: String,
-    pub active: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct NewAsset {
-    pub asset_class_id: i64,
-    pub label: String,
-    pub id_kind: String,
-    pub ticker: Option<String>,
-    pub isin: Option<String>,
-    pub yellow_key: String,
-}
+// Asset (the row), NewAsset, create_asset, list_assets and set_asset_active are
+// gone: Task 9 replaces them with `book::BookEntry` / `book::add` /
+// `book::list` / `book::set_active`, backed by `instrument` + `book_entry`
+// rather than the old `asset` table.
+//
+// `resolve_bdp_security` and `strip_trailing_key` stay, unlike the brief for
+// this task says to delete them: `bulk/mod.rs` and `bulk/diff.rs` still call
+// `resolve_bdp_security` for real (xlsx export/import), not just as a type
+// reference, and retargeting that to the instrument/resolution path is
+// Task 12's work, not this one's. Keeping them here is the minimum needed to
+// keep `cargo check --lib` green. The doubled-yellow-key regression these
+// exist to prevent is *also* covered independently in
+// `resolution::normalize::build_security` (Task 2) -- see
+// `ticker_carrying_its_own_yellow_key_is_not_doubled` in this file and
+// `a_ticker_carrying_its_own_yellow_key_is_not_doubled` in normalize.rs.
 
 /// Drop a yellow key the user already typed onto the identifier.
 ///
@@ -102,28 +95,6 @@ pub async fn create_asset_class(pool: &PgPool, name: &str, description: &str) ->
 pub async fn list_asset_classes(pool: &PgPool) -> AppResult<Vec<AssetClass>> {
     Ok(sqlx::query_as::<_, AssetClass>("SELECT * FROM asset_class ORDER BY name")
         .fetch_all(pool).await?)
-}
-
-pub async fn create_asset(pool: &PgPool, new: NewAsset) -> AppResult<Asset> {
-    let sec = resolve_bdp_security(&new.id_kind, new.ticker.as_deref(),
-                                   new.isin.as_deref(), &new.yellow_key)?;
-    Ok(sqlx::query_as::<_, Asset>(
-        "INSERT INTO asset (asset_class_id, label, id_kind, ticker, isin, yellow_key, bdp_security)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *")
-        .bind(new.asset_class_id).bind(&new.label).bind(&new.id_kind)
-        .bind(&new.ticker).bind(&new.isin).bind(new.yellow_key.trim()).bind(sec)
-        .fetch_one(pool).await?)
-}
-
-pub async fn list_assets(pool: &PgPool) -> AppResult<Vec<Asset>> {
-    Ok(sqlx::query_as::<_, Asset>("SELECT * FROM asset ORDER BY label")
-        .fetch_all(pool).await?)
-}
-
-pub async fn set_asset_active(pool: &PgPool, asset_id: i64, active: bool) -> AppResult<()> {
-    sqlx::query("UPDATE asset SET active = $2 WHERE id = $1")
-        .bind(asset_id).bind(active).execute(pool).await?;
-    Ok(())
 }
 
 #[cfg(test)]

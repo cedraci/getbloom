@@ -1,8 +1,10 @@
 use crate::error::AppError;
 use crate::instrument::search;
+use crate::master_fetch;
 use crate::orchestrator::{self, PipelineConfig, RunOutcome};
+use crate::resolution::engine;
 use crate::scheduler::previous_weekday;
-use crate::{budget, bulk, deletion, fields, registry, scheduler, views};
+use crate::{book, budget, bulk, deletion, fields, registry, scheduler, views};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -78,24 +80,51 @@ pub async fn create_asset_class(state: State<'_, AppState>, name: String, descri
 }
 
 // ---------------------------------------------------------------------------
-// Assets
+// Book
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn list_assets(state: State<'_, AppState>) -> Result<Vec<registry::Asset>, AppError> {
-    registry::list_assets(&state.pool).await
+pub async fn list_book(state: State<'_, AppState>)
+    -> Result<Vec<book::BookEntry>, AppError> {
+    book::list(&state.pool).await
 }
 
 #[tauri::command]
-pub async fn create_asset(state: State<'_, AppState>, new: registry::NewAsset)
-    -> Result<registry::Asset, AppError> {
-    registry::create_asset(&state.pool, new).await
+pub async fn add_to_book(state: State<'_, AppState>, req: book::AddToBook)
+    -> Result<book::AddOutcome, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
+    book::add(&state.pool, &fetcher, &req, "user").await
 }
 
 #[tauri::command]
-pub async fn set_asset_active(state: State<'_, AppState>, asset_id: i64, active: bool)
+pub async fn set_book_active(state: State<'_, AppState>, instrument_id: i64,
+                             active: bool) -> Result<(), AppError> {
+    book::set_active(&state.pool, instrument_id, active).await
+}
+
+// ---------------------------------------------------------------------------
+// Resolution review
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_pending_reviews(state: State<'_, AppState>)
+    -> Result<Vec<engine::PendingReview>, AppError> {
+    engine::pending_reviews(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn resolve_review(state: State<'_, AppState>, review_id: i64,
+                            chosen_security: String) -> Result<i64, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
+    engine::resolve_review(&state.pool, &fetcher, review_id, &chosen_security, "user").await
+}
+
+#[tauri::command]
+pub async fn reject_review(state: State<'_, AppState>, review_id: i64, note: String)
     -> Result<(), AppError> {
-    registry::set_asset_active(&state.pool, asset_id, active).await
+    engine::reject_review(&state.pool, review_id, &note).await
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +172,7 @@ pub async fn set_view_fields(state: State<'_, AppState>, view_id: i64, field_ids
 
 #[tauri::command]
 pub async fn get_view_assets(state: State<'_, AppState>, view_id: i64)
-    -> Result<Vec<registry::Asset>, AppError> {
+    -> Result<Vec<views::Asset>, AppError> {
     views::view_assets(&state.pool, view_id).await
 }
 

@@ -1,8 +1,27 @@
 use crate::error::AppResult;
 use crate::fields::FieldDef;
-use crate::registry::Asset;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+
+/// Stand-in for the old `registry::Asset`, which Task 9 removed along with the
+/// `asset` table it read from. `view_assets` below still queries `asset` /
+/// `view_asset`, neither of which exists in the current schema (both were
+/// already replaced by `instrument` / `view_instrument` before this task) --
+/// this function was already broken at runtime. This struct exists only so
+/// the crate keeps compiling; Task 12 retargets `view_assets` onto
+/// `book`/`instrument` for real. Do not build on this type.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Asset {
+    pub id: i64,
+    pub asset_class_id: i64,
+    pub label: String,
+    pub id_kind: String,
+    pub ticker: Option<String>,
+    pub isin: Option<String>,
+    pub yellow_key: String,
+    pub bdp_security: String,
+    pub active: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct View {
