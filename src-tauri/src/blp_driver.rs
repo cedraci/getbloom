@@ -65,12 +65,17 @@ pub fn describe_exit(code: i32) -> &'static str {
     }
 }
 
-pub async fn run_fetch(
+/// Spawn the sidecar, write `payload` to stdin, apply the process's own exit
+/// code as the success signal, and return stdout verbatim.
+///
+/// Shared by `run_fetch` and `run_raw`: both requests differ only in how the
+/// stdout text is subsequently parsed, not in how the child process is run.
+async fn run_sidecar_text(
     python: &Path,
     script: &Path,
-    payload: &SidecarPayload,
+    payload: &impl serde::Serialize,
     raw_out: Option<&Path>,
-) -> AppResult<SidecarResponse> {
+) -> AppResult<String> {
     let body = serde_json::to_vec(payload)
         .map_err(|e| AppError::Blp { code: -1, detail: format!("cannot serialize request: {e}") })?;
 
@@ -112,12 +117,39 @@ pub async fn run_fetch(
         return Err(AppError::Blp { code, detail });
     }
 
+    Ok(stdout)
+}
+
+pub async fn run_fetch(
+    python: &Path,
+    script: &Path,
+    payload: &SidecarPayload,
+    raw_out: Option<&Path>,
+) -> AppResult<SidecarResponse> {
+    let stdout = run_sidecar_text(python, script, payload, raw_out).await?;
+
     let resp = parse_response(&stdout).ok_or_else(|| AppError::Blp {
         code: 0,
         detail: "exit 0 but no JSON response on stdout".into(),
     })?;
     validate_response(&resp).map_err(|detail| AppError::Blp { code: 0, detail })?;
     Ok(resp)
+}
+
+/// Run the sidecar and return its response as untyped JSON.
+///
+/// `run_fetch` deserialises into SidecarResponse, which models observations.
+/// The security-master requests return tables and search results instead, so
+/// they read the JSON directly rather than widening SidecarResponse with
+/// fields that mean nothing to an EOD run.
+pub async fn run_raw(
+    python_path: &Path,
+    script_path: &Path,
+    payload: &serde_json::Value,
+) -> AppResult<serde_json::Value> {
+    let text = run_sidecar_text(python_path, script_path, payload, None).await?;
+    serde_json::from_str(&text)
+        .map_err(|e| AppError::Sidecar(format!("sidecar returned invalid JSON: {e}")))
 }
 
 #[cfg(test)]

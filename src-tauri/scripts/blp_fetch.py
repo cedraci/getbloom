@@ -545,7 +545,7 @@ def run_fetch(payload, raw_out):
 # --------------------------------------------------------------------------
 
 def emit(status, seconds, detail, observations, problems, code,
-        bulk_rows=None, list_results=None):
+        bulk_rows=None, list_results=None, raw_messages=None):
     print(json.dumps({
         "status": status,
         "seconds": round(seconds, 2),
@@ -554,9 +554,26 @@ def emit(status, seconds, detail, observations, problems, code,
         "problems": problems,
         "bulk_rows": bulk_rows or [],
         "list_results": list_results or [],
+        "raw_messages": raw_messages or [],
     }, separators=(",", ":")))
     sys.stdout.flush()
     return code
+
+
+def collect_raw_messages(capture):
+    """Flat messages for requests that asked for them.
+
+    A FLAT array, not the {"request":.., "messages":[..]} items --raw-out
+    writes: the master-fetch parsers on the Rust side walk securityData
+    directly, and the committed P0 capture files are already in this shape.
+    Gated on the request's own "raw" flag so an EOD history run, which never
+    asks for it, does not pay for messages nothing will read.
+    """
+    raw_messages = []
+    for item in capture.get("captured", []):
+        if (item.get("request") or {}).get("raw"):
+            raw_messages.extend(item.get("messages", []))
+    return raw_messages
 
 
 def finish(capture, started):
@@ -564,7 +581,9 @@ def finish(capture, started):
     seconds = time.monotonic() - started
     if fatal:
         return emit("error", seconds, fatal, [], [], EXIT_SESSION)
-    if not observations and not problems and not bulk_rows and not list_results:
+    raw_messages = collect_raw_messages(capture)
+    if not observations and not problems and not bulk_rows and not list_results \
+            and not raw_messages:
         # Structurally impossible for a well-formed request. Treated as a
         # fault so a silent no-op can never look like a successful run.
         return emit("empty", seconds,
@@ -573,7 +592,7 @@ def finish(capture, started):
     log(f"{len(observations)} observations, {len(problems)} problems, "
         f"{len(bulk_rows)} bulk rows, {len(list_results)} list results")
     return emit("ok", seconds, "", observations, problems, EXIT_OK,
-               bulk_rows, list_results)
+               bulk_rows, list_results, raw_messages)
 
 
 # --------------------------------------------------------------------------

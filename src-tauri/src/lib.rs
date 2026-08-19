@@ -9,6 +9,7 @@ pub mod fetch;
 pub mod fields;
 pub mod ingest;
 pub mod instrument;
+pub mod master_fetch;
 pub mod orchestrator;
 pub mod registry;
 pub mod resolution;

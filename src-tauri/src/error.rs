@@ -10,6 +10,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("bloomberg fetch failed (exit {code}): {detail}")]
     Blp { code: i32, detail: String },
+    #[error("sidecar error: {0}")]
+    Sidecar(String),
     #[error("validation error: {0}")]
     Validation(String),
     #[error("cannot delete: {reason} ({})", format_counts(.counts))]
