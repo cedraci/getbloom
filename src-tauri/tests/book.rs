@@ -40,7 +40,6 @@ async fn adding_an_entry_resolves_it_and_derives_its_security_string() {
     let AddOutcome::Added(entry) = out else { panic!("expected Added, got {out:?}") };
     assert_eq!(entry.security.as_deref(), Some(security.as_str()),
                "the security string is derived from the alias, not stored on the entry");
-    assert!(!entry.review_pending);
 }
 
 /// The constraint that replaced UNIQUE (bdp_security): one entry per instrument.
@@ -76,16 +75,21 @@ async fn an_ambiguous_addition_creates_a_review_and_no_book_entry() {
             {"security": format!("{ticker} LN<equity>"), "description": "Test"}]}]),
         ..Default::default()
     };
-    // Scoped as a before/after delta rather than a global count -- other tests
-    // share this database and never clean up, so an absolute zero would be
-    // false the moment any other test has run.
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM book_entry")
-        .fetch_one(&pool).await.unwrap();
     let out = book::add(&pool, &mock, &req(&ticker, class), "laurent").await.unwrap();
     assert!(matches!(out, AddOutcome::NeedsReview { .. }), "got {out:?}");
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM book_entry")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(after, before, "an unresolved identifier must not quietly enter the book");
+    // Scoped to this test's own label (unique via uniq()), not a global count:
+    // other tests share this database, run concurrently in this same binary,
+    // and never clean up, so a global count -- even taken before and after --
+    // races against them and is flaky by construction. `label` here is the raw
+    // ticker, which nothing else in the suite can coincide with.
+    //
+    // This IS the safety property, not a proxy for one: an ambiguous addition
+    // writes no book_entry row at all, so there is nothing for a caller to
+    // discover later and no "review pending" flag needed anywhere to say so.
+    // A row that does not exist cannot be silently mistaken for a settled one.
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM book_entry WHERE label = $1")
+        .bind(&ticker).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0, "an unresolved identifier must not quietly enter the book");
 }
 
 #[tokio::test]

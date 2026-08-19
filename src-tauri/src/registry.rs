@@ -25,6 +25,16 @@ pub struct AssetClass {
 // `ticker_carrying_its_own_yellow_key_is_not_doubled` in this file and
 // `a_ticker_carrying_its_own_yellow_key_is_not_doubled` in normalize.rs.
 
+// DUPLICATE, not merely similar: `resolution::normalize::build_security` is a
+// near-line-for-line copy of the same rule (strip a trailing yellow key,
+// reject a ticker/ISIN that is only the key, build the "/isin/..." form),
+// confirmed against this file's own copy down to the doc comment. The two
+// live in parallel because `bulk/` still calls this one and `resolution::
+// engine` calls the other; nobody has retargeted `bulk/` onto the instrument
+// path yet (that is the task that owns `bulk/`, not this one). Until that
+// consolidation happens, a yellow-key or ISIN-prefix fix landing in one copy
+// and not the other is a live risk: check both before changing either.
+
 /// Drop a yellow key the user already typed onto the identifier.
 ///
 /// The obvious thing to paste into a "ticker" box is the whole Bloomberg

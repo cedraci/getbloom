@@ -26,8 +26,6 @@ pub struct BookEntry {
     /// Derived from today's alias; None when the instrument has no security
     /// string valid today (a delisted instrument, for instance).
     pub security: Option<String>,
-    /// True while a resolution_review for this instrument is still pending.
-    pub review_pending: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,14 +96,8 @@ pub async fn list(pool: &PgPool) -> AppResult<Vec<BookEntry>> {
     let mut out = Vec::with_capacity(rows.len());
     for (instrument_id, asset_class_id, label, active, note) in rows {
         let security = store::current_security(pool, instrument_id, today).await?;
-        let review_pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM resolution_review r
-                              JOIN resolution_decision d ON d.id = r.decision_id
-                             WHERE r.status = 'pending'
-                               AND d.chosen_instrument_id = $1)")
-            .bind(instrument_id).fetch_one(pool).await?;
         out.push(BookEntry { instrument_id, asset_class_id, label, active, note,
-                             security, review_pending });
+                             security });
     }
     Ok(out)
 }
