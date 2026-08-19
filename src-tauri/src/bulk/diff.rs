@@ -133,6 +133,14 @@ pub fn diff(
     let views: HashSet<&str> = known_views.iter().map(String::as_str).collect();
     let by_id: HashMap<i64, &DbAsset> = db.iter().map(|a| (a.id, a)).collect();
 
+    // A view with no column in this sheet is a view the sheet does not speak
+    // for. Its memberships must be left alone, symmetric with guardrail 1 (a
+    // sheet with no id column cannot speak for rows it never lists). Without
+    // this, a view created after the file was exported -- absent from every
+    // column, therefore absent from every row -- would read as "removed from"
+    // for every asset that happens to belong to it.
+    let sheet_views: HashSet<&str> = sheet.view_columns.iter().map(String::as_str).collect();
+
     // Header problems are attributed to row 1, which is where Excel shows them.
     for v in &sheet.view_columns {
         if !views.contains(v.as_str()) {
@@ -289,7 +297,14 @@ pub fn diff(
                     else { plan.retires.push(aref); }
                 }
 
-                let before = sorted(cur.views.clone());
+                // Only views this sheet has a column for are in play. A view
+                // absent from `sheet.view_columns` is not addressed by this
+                // sheet, so the asset's current membership in it is dropped
+                // from `before` too and therefore never proposed as a removal
+                // (or, symmetrically, an addition it could never have shown).
+                let before = sorted(cur.views.iter()
+                    .filter(|v| sheet_views.contains(v.as_str()))
+                    .cloned().collect());
                 if views_now != before {
                     plan.membership_changes.push(MembershipChange {
                         id,
@@ -525,6 +540,47 @@ mod tests {
                      &db, &classes(), &views(), "h");
         assert!(q.invalid_rows.iter().any(|i| i.reason.contains("MSFT US Equity")),
                 "got {:?}", q.invalid_rows);
+    }
+
+    /// Finding I1: a view the DB knows about but the sheet carries no column
+    /// for must be left alone entirely -- the sheet does not speak for it, so
+    /// its absence from any row must never be read as "remove from this view".
+    /// Deliberately does NOT use the `sheet()` fixture, which always carries
+    /// the full view list and is exactly why the 16 pre-existing differ tests
+    /// never caught this.
+    #[test]
+    fn a_view_missing_from_the_sheets_columns_is_left_alone() {
+        let db = vec![db_apple()]; // db_apple belongs to "Daily"
+        let mut r = row_from(&db[0]);
+        r.views = vec![]; // the sheet has no "Daily" column, so nothing can be ticked
+        let s = SheetData {
+            has_id_column: true,
+            view_columns: vec!["Weekly".into()], // "Daily" is not a column in this sheet
+            rows: vec![r],
+        };
+        let p = diff(&s, &db, &classes(), &views(), "hash");
+        assert!(p.membership_changes.is_empty(),
+                "a view absent from the sheet's columns must not be touched, got {:?}",
+                p.membership_changes);
+    }
+
+    /// Companion to the test above: a view that IS present in the sheet's
+    /// columns must still behave exactly as before -- an unticked cell in a
+    /// present column still means "remove from this view".
+    #[test]
+    fn a_view_present_in_the_sheets_columns_still_adds_and_removes() {
+        let db = vec![db_apple()]; // belongs to "Daily"
+        let mut r = row_from(&db[0]);
+        r.views = vec!["Weekly".into()]; // ticked Weekly, left Daily unticked
+        let s = SheetData {
+            has_id_column: true,
+            view_columns: vec!["Daily".into(), "Weekly".into()],
+            rows: vec![r],
+        };
+        let p = diff(&s, &db, &classes(), &views(), "hash");
+        assert_eq!(p.membership_changes.len(), 1);
+        assert_eq!(p.membership_changes[0].added, vec!["Weekly".to_string()]);
+        assert_eq!(p.membership_changes[0].removed, vec!["Daily".to_string()]);
     }
 
     #[test]
