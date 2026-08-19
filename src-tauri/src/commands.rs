@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::instrument::search;
 use crate::orchestrator::{self, PipelineConfig, RunOutcome};
 use crate::scheduler::previous_weekday;
 use crate::{budget, bulk, deletion, fields, registry, scheduler, views};
@@ -367,4 +368,16 @@ pub async fn apply_assets_import(state: State<'_, AppState>, path: String,
     -> Result<bulk::ImportResult, AppError> {
     bulk::apply_import(&state.pool, &PathBuf::from(path), &file_hash,
                        &removal_modes, confirmed_removal_count).await
+}
+
+// ---------------------------------------------------------------------------
+// Instrument search
+// ---------------------------------------------------------------------------
+
+/// Local search. Never calls Bloomberg -- this is the command behind the
+/// type-ahead, and it runs on every keystroke.
+#[tauri::command]
+pub async fn search_local(state: State<'_, AppState>, query: String, limit: i64)
+    -> Result<Vec<search::SearchHit>, AppError> {
+    search::local(&state.pool, &query, limit.clamp(1, 50)).await
 }
