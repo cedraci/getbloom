@@ -2391,9 +2391,13 @@ use serde::{Deserialize, Serialize};
 /// session, updating in realtime. Requesting it would spend a call on a value
 /// that is stale on arrival and meaningless to store. INACTIVE_DATE, below,
 /// answers the question it was recruited for, with a date instead of a mood.
-pub const IDENTITY_FIELDS: [&str; 11] = [
+pub const IDENTITY_FIELDS: [&str; 12] = [
     "ID_BB_GLOBAL",
     "ID_BB_GLOBAL_SHARE_CLASS_LEVEL",
+    // Without this, instrument.id_bb_unique and the 'bbg_unique' alias type are
+    // dead schema no code path can populate. It rides along in a request that is
+    // being made anyway, so it costs no extra Bloomberg call.
+    "ID_BB_UNIQUE",
     "ID_ISIN",
     "EXCH_CODE",
     "CRNCY",
