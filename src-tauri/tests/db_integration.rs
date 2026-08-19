@@ -490,3 +490,333 @@ async fn smoke_real_bloomberg_end_to_end() {
     let payload = payload.expect("run has no payload_path");
     assert!(std::path::Path::new(&payload).exists(), "missing audit payload {payload}");
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn describe_deletion_counts_what_hangs_off_an_asset() {
+    use getbloomdata_lib::deletion::{describe_deletion, EntityKind};
+    use getbloomdata_lib::{fields, registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("DescribeCls"), "test").await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "Describe Me", &format!("{} US", uniq("DSC"))).await;
+    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+        .await.unwrap();
+    let view = views::create_view(&pool, &uniq("DescribeView"), "").await.unwrap();
+    views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
+
+    let run_id = new_run(&pool, view.id).await;
+    let basis = raw_basis_id(&pool).await;
+    sqlx::query(
+        "INSERT INTO observation (instrument_id, field_id, obs_date, value_num, basis_id, layer, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $4, 'raw', $3),
+                ($1, $2, DATE '2026-08-11', 2.0, $4, 'raw', $3)")
+        .bind(entry.instrument_id).bind(field.id).bind(run_id).bind(basis)
+        .execute(&pool).await.unwrap();
+
+    let impact = describe_deletion(&pool, EntityKind::Asset, entry.instrument_id).await.unwrap();
+    assert_eq!(impact.label, "Describe Me");
+    assert_eq!(impact.observations, 2);
+    assert_eq!(impact.first_obs, Some("2026-08-10".parse().unwrap()));
+    assert_eq!(impact.last_obs, Some("2026-08-11".parse().unwrap()));
+    assert_eq!(impact.views, 1);
+    assert!(impact.can_retire && impact.can_purge);
+    assert!(impact.blocked_reason.is_none());
+    // New in Task 13B's purge semantics: an asset purge never deletes
+    // observations, so the dialog must be told to word it that way.
+    assert!(impact.purge_keeps_history,
+            "an asset purge must be described as history-preserving under the new contract");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn describe_deletion_blocks_a_non_empty_asset_class() {
+    use getbloomdata_lib::deletion::{describe_deletion, EntityKind};
+    use getbloomdata_lib::registry;
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("BlockedCls"), "test").await.unwrap();
+    add_book_entry(&pool, class.id, "Occupant", &format!("{} US", uniq("OCC"))).await;
+
+    let impact = describe_deletion(&pool, EntityKind::AssetClass, class.id).await.unwrap();
+    assert_eq!(impact.children, 1);
+    assert!(!impact.can_retire, "an asset class has no retired state");
+    assert!(!impact.can_purge, "a class with an asset in it cannot be deleted");
+    assert!(impact.blocked_reason.is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn delete_schedule_removes_the_row() {
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("SchedView"), "").await.unwrap();
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, TIME '18:00', TIME '19:00', true)")
+        .bind(view.id).execute(&pool).await.unwrap();
+    let (sid,): (i64,) = sqlx::query_as("SELECT id FROM schedule WHERE view_id = $1")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+
+    getbloomdata_lib::deletion::delete_schedule(&pool, sid).await.unwrap();
+
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM schedule WHERE id = $1")
+        .bind(sid).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn delete_asset_class_refuses_while_occupied_then_succeeds_when_empty() {
+    use getbloomdata_lib::deletion::{delete_asset_class, delete_book_entry, DeleteMode};
+    use getbloomdata_lib::error::AppError;
+    use getbloomdata_lib::registry;
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("EmptyMeCls"), "test").await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "Tenant", &format!("{} US", uniq("TEN"))).await;
+
+    let err = delete_asset_class(&pool, class.id).await.unwrap_err();
+    assert!(matches!(err, AppError::DeleteBlocked { .. }),
+            "expected DeleteBlocked, got {err:?}");
+
+    // Purging the occupying book entry leaves identity (the instrument) intact
+    // but frees the class -- a class is empty of BOOK ENTRIES, not of every
+    // instrument that ever cited it.
+    delete_book_entry(&pool, entry.instrument_id, DeleteMode::Purge).await.unwrap();
+    delete_asset_class(&pool, class.id).await.unwrap();
+
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset_class WHERE id = $1")
+        .bind(class.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn retiring_an_asset_hides_it_from_views_but_keeps_its_observations() {
+    use getbloomdata_lib::deletion::{delete_book_entry, DeleteMode};
+    use getbloomdata_lib::{fields, registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("RetireCls"), "test").await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "Retiree", &format!("{} US", uniq("RET"))).await;
+    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+        .await.unwrap();
+    let view = views::create_view(&pool, &uniq("RetireView"), "").await.unwrap();
+    views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
+    let basis = raw_basis_id(&pool).await;
+    sqlx::query(
+        "INSERT INTO observation (instrument_id, field_id, obs_date, value_num, basis_id, layer, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $4, 'raw', $3)")
+        .bind(entry.instrument_id).bind(field.id).bind(run_id).bind(basis)
+        .execute(&pool).await.unwrap();
+
+    assert_eq!(views::view_instruments(&pool, view.id).await.unwrap().len(), 1);
+
+    delete_book_entry(&pool, entry.instrument_id, DeleteMode::Retire).await.unwrap();
+
+    assert!(views::view_instruments(&pool, view.id).await.unwrap().is_empty(),
+            "a retired asset must drop out of view resolution");
+    let (obs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM observation WHERE instrument_id = $1")
+        .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(obs, 1, "retire never destroys collected data");
+    let (row,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE instrument_id = $1")
+        .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(row, 1);
+}
+
+/// Rewritten for Task 13B: purge semantics changed. This test used to assert
+/// that purging an asset deleted its observations -- that is no longer true,
+/// and porting the old assertion unchanged would have re-encoded a guarantee
+/// this branch deliberately removed.
+///
+/// `purge_book_entry_tx` (deletion.rs) now removes ONLY `book_entry` and its
+/// `view_instrument` memberships. The instrument, its aliases, its
+/// observations and its ingest issues all survive: identity and history are
+/// not the user's to destroy by removing something from their list. This is
+/// exactly what `DeletionImpact::purge_keeps_history` (see
+/// `describe_deletion_counts_what_hangs_off_an_asset` above) exists to tell
+/// the confirm dialog. The rewrite below asserts the new contract explicitly,
+/// including that observations and aliases DO survive.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn purging_a_book_entry_removes_only_the_book_entry_and_its_memberships() {
+    use getbloomdata_lib::deletion::{delete_book_entry, DeleteMode};
+    use getbloomdata_lib::instrument::store;
+    use getbloomdata_lib::{fields, registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("PurgeCls"), "test").await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "Doomed", &format!("{} US", uniq("DOOM"))).await;
+    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+        .await.unwrap();
+    let view = views::create_view(&pool, &uniq("PurgeView"), "").await.unwrap();
+    views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
+
+    let run_id = new_run(&pool, view.id).await;
+    sqlx::query("INSERT INTO hit_ledger (run_id, estimated_hits) VALUES ($1, 7)")
+        .bind(run_id).execute(&pool).await.unwrap();
+    let basis = raw_basis_id(&pool).await;
+    sqlx::query(
+        "INSERT INTO observation (instrument_id, field_id, obs_date, value_num, basis_id, layer, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 1.0, $4, 'raw', $3)")
+        .bind(entry.instrument_id).bind(field.id).bind(run_id).bind(basis)
+        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO ingest_issue (run_id, instrument_id, field_id, obs_date, severity, code, detail)
+         VALUES ($1, $2, $3, DATE '2026-08-10', 'warn', 'no_data', 'test')")
+        .bind(run_id).bind(entry.instrument_id).bind(field.id).execute(&pool).await.unwrap();
+
+    let aliases_before = store::aliases(&pool, entry.instrument_id).await.unwrap().len();
+    assert!(aliases_before > 0, "fixture must actually carry an identity to prove it survives");
+
+    delete_book_entry(&pool, entry.instrument_id, DeleteMode::Purge).await.unwrap();
+
+    // What purge DOES remove: the book entry and its view membership.
+    for (table, col) in [("view_instrument", "instrument_id"), ("book_entry", "instrument_id")] {
+        let (n,): (i64,) = sqlx::query_as(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
+            .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "{table} should have no rows for the purged book entry");
+    }
+
+    // What purge must NEVER touch: identity and everything hanging off it.
+    let (instrument_rows,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM instrument WHERE instrument_id = $1")
+        .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(instrument_rows, 1, "the instrument's identity must survive a book purge");
+    let aliases_after = store::aliases(&pool, entry.instrument_id).await.unwrap().len();
+    assert_eq!(aliases_after, aliases_before, "aliases must survive a book purge");
+    let (obs,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM observation WHERE instrument_id = $1")
+        .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(obs, 1, "observations must survive a book purge -- history is not the user's \
+                        to destroy by removing something from their list");
+    let (issues,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ingest_issue WHERE instrument_id = $1")
+        .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(issues, 1, "ingest issues must survive a book purge too");
+
+    let (runs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM run WHERE id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(runs, 1, "a purge must never rewrite the record of work that happened");
+    let (hits,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM hit_ledger WHERE run_id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(hits, 1, "the budget ledger records money spent and is never rewritten");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn purging_a_field_clears_its_observations_and_memberships() {
+    use getbloomdata_lib::deletion::{delete_field, DeleteMode};
+    use getbloomdata_lib::{fields, registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("FldPurgeCls"), "test").await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "Holder", &format!("{} US", uniq("HLD"))).await;
+    let field = fields::create_field(&pool, class.id, "PX_VOLUME", "Volume", "numeric", None, None, "")
+        .await.unwrap();
+    let view = views::create_view(&pool, &uniq("FldPurgeView"), "").await.unwrap();
+    views::set_view_fields(&pool, view.id, &[field.id]).await.unwrap();
+    let run_id = new_run(&pool, view.id).await;
+    let basis = raw_basis_id(&pool).await;
+    sqlx::query(
+        "INSERT INTO observation (instrument_id, field_id, obs_date, value_num, basis_id, layer, run_id)
+         VALUES ($1, $2, DATE '2026-08-10', 5.0, $4, 'raw', $3)")
+        .bind(entry.instrument_id).bind(field.id).bind(run_id).bind(basis)
+        .execute(&pool).await.unwrap();
+
+    delete_field(&pool, field.id, DeleteMode::Purge).await.unwrap();
+
+    for (table, col) in [("observation", "field_id"), ("ingest_issue", "field_id"),
+                         ("view_field", "field_id"), ("field_def", "id")] {
+        let (n,): (i64,) = sqlx::query_as(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
+            .bind(field.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "{table} should have no rows for the purged field");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_view_with_runs_refuses_to_purge_but_still_retires() {
+    use getbloomdata_lib::deletion::{delete_view, DeleteMode};
+    use getbloomdata_lib::error::AppError;
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("HistoricView"), "").await.unwrap();
+    sqlx::query(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
+         VALUES ($1, 'eod', 'manual', 'ok', 1)")
+        .bind(view.id).execute(&pool).await.unwrap();
+
+    let err = delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap_err();
+    assert!(matches!(err, AppError::DeleteBlocked { .. }), "got {err:?}");
+
+    delete_view(&pool, view.id, DeleteMode::Retire).await.unwrap();
+    let (active,): (bool,) = sqlx::query_as("SELECT active FROM view WHERE id = $1")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+    assert!(!active);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn purging_a_never_run_view_takes_its_schedule_and_memberships_with_it() {
+    use getbloomdata_lib::deletion::{delete_view, DeleteMode};
+    use getbloomdata_lib::{registry, views};
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let class = registry::create_asset_class(&pool, &uniq("VPurgeCls"), "test").await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "Member", &format!("{} US", uniq("MEM"))).await;
+    let view = views::create_view(&pool, &uniq("FreshView"), "").await.unwrap();
+    views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, TIME '18:00', TIME '19:00', true)")
+        .bind(view.id).execute(&pool).await.unwrap();
+
+    delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap();
+
+    for table in ["schedule", "view_instrument", "view_field"] {
+        let (n,): (i64,) = sqlx::query_as(
+            &format!("SELECT COUNT(*) FROM {table} WHERE view_id = $1"))
+            .bind(view.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "{table} should be empty for the purged view");
+    }
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM view WHERE id = $1")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+    // The book entry itself is untouched: a view is a selection, not an owner.
+    let (b,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE instrument_id = $1")
+        .bind(entry.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(b, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn scheduler_skips_schedules_whose_view_is_retired() {
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+
+    let view = getbloomdata_lib::views::create_view(&pool, &uniq("RetiredSched"), "").await.unwrap();
+    sqlx::query(
+        "INSERT INTO schedule (view_id, window_start, window_end, active)
+         VALUES ($1, TIME '00:01', TIME '00:02', true)")
+        .bind(view.id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE view SET active = false WHERE id = $1")
+        .bind(view.id).execute(&pool).await.unwrap();
+
+    let due = getbloomdata_lib::scheduler::due_schedules(&pool).await.unwrap();
+    assert!(!due.iter().any(|(_, vid, _)| *vid == view.id),
+            "a retired view must not appear in the due list");
+}
