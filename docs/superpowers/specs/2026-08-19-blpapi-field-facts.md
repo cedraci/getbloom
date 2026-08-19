@@ -155,11 +155,12 @@ than inferred from price discontinuities.
 its 2012 IPO. The table is not limited to listed history, so a factor chain
 must not be assumed to start at the listing date.
 
-**Not yet established:** the meanings of `Operator Type` and `Adjustment Factor
-Flag` (both `1.0` / `3.0` in every row observed). Both were constant across all
-five rows captured, so no semantics can be inferred. Establish these before
-building the derivation engine — a wrong operator interpretation silently
-inverts or misapplies a factor.
+**Established in the second pass — see §10.1.** `Operator Type` is
+1 = divide, 2 = multiply, 3 = add, **opposite for volume**; `Flag` is
+1 = prices only, 3 = prices and volumes. They were constant at 1.0 / 3.0 here
+only because splits are the default content of this field; adding
+`CORPORATE_ACTIONS_FILTER` brings in cash dividends at operator 2 / flag 1 and
+separates the two.
 
 ---
 
@@ -359,14 +360,15 @@ over time; where corporate actions come from; the identity anchors and
 lifecycle dates available; that identifier history is retrievable and how it
 must be anchored.
 
-**Open, to be established before the phases that depend on them:**
+**Open at first writing — see §10, which closes all but one:**
 
-1. `Adjustment Factor Operator Type` and `Adjustment Factor Flag` semantics (§4)
-   — blocks the derivation engine.
-2. The `CA_MA_*` family's full membership — needed for fund mergers.
+1. ~~`Adjustment Factor Operator Type` and `Adjustment Factor Flag` semantics~~
+   — **settled, §10.1.** 1 = divide, 2 = multiply, 3 = add, opposite for volume;
+   flag 1 = prices only, 3 = prices and volumes.
+2. ~~The `CA_MA_*` family's full membership~~ — **settled, §10.3.** 89 members.
 3. Whether Desktop API bulk CA requests are metered differently from price
-   requests — the hit-budget estimator is still calibrated to the Excel add-in's
-   accounting and remains provisional.
+   requests — **still open, §10.5.** Not exposed by the API. The estimator stays
+   calibrated to the Excel add-in's accounting and remains provisional.
 **Closed since first writing:**
 
 4. ~~Licensing (carried from A2 §11)~~ — **settled 2026-08-19.** The user holds a
@@ -378,3 +380,172 @@ must be anchored.
    calibrated against the Excel add-in and treats the budget as scarce. Nothing
    in P1 depends on that calibration, so it is left alone here; the soft limit is
    a user setting and can be raised whenever the estimator is revisited.
+
+---
+
+## 10. Second pass — closing the open items (2026-08-19)
+
+The four items §9 left open have been resolved. Three were settled against the
+live Terminal in one session; the fourth was answered by the user. Evidence:
+`blpapi-facts/p0_close_report.json`, reproduced by
+`blpapi-facts/blp_p0_close_probe.py`.
+
+Sixteen mnemonics were put to `FieldInfoRequest` and **all sixteen exist**,
+including `CA_MA_COMPLETE_DT`, which the earlier partial field dump did not
+contain. Absence from that dump was not evidence: it holds 8,637 mnemonics,
+far short of the dictionary.
+
+### 10.1 Adjustment factor operator and flag semantics — SETTLED
+
+Bloomberg documents both columns on the field itself. `EQY_DVD_ADJUST_FACT`
+returns four unlabelled columns:
+
+| Column | Meaning |
+|---|---|
+| 1 | Adjustment Date |
+| 2 | Adjustment Factor |
+| 3 | **Operator Type — 1 = divide, 2 = multiply, 3 = add. *Opposite for Volume.*** |
+| 4 | **Flag — 1 = prices only, 3 = prices and volumes** |
+
+Measured on AAPL, default (no override), five rows, one per split:
+
+| Adjustment Date | Factor | Operator | Flag |
+|---|---|---|---|
+| 2020-08-31 | 4.0 | 1 | 3 |
+| 2014-06-09 | 7.0 | 1 | 3 |
+| 2005-02-28 | 2.0 | 1 | 3 |
+| 2000-06-21 | 2.0 | 1 | 3 |
+| 1987-06-16 | 2.0 | 1 | 3 |
+
+Cumulative split factor 4 × 7 × 2 × 2 × 2 = **224**.
+
+**This cross-checks §3.1 exactly.** That section measured AAPL's 2020-08-28
+close at 499.23 raw and 124.81 split-adjusted. Operator 1 means divide:
+499.23 / 4 = 124.8075. Had operator 1 meant multiply, the answer would have been
+1996.92. The factor table and the price measurement were taken independently,
+days apart, and they agree — which is the strongest evidence in this document
+that the adjustment model is understood correctly.
+
+**The trap is "Opposite for Volume".** The same operator code means divide for a
+price and multiply for a volume. A derivation engine that applies one rule to
+both columns produces volumes wrong by the square of the factor — for AAPL,
+50,176× — while prices look perfectly right. P4 must carry the price/volume
+distinction into the factor application itself, not into a wrapper around it.
+
+**Flag 1 means prices only.** With `CORPORATE_ACTIONS_FILTER` set to
+`NORMAL_CASH|ABNORMAL_CASH|CAPITAL_CHANGE`, AAPL returns 97 rows: the same 5
+splits at operator 1 / flag 3, plus 92 cash dividends at **operator 2 (multiply),
+flag 1 (prices only)**, factors just below 1 (0.999138 on 2026-08-10). Dividends
+correctly leave volume untouched. The five splits survive the filter, so the
+filtered call is a superset — one request, not two.
+
+### 10.2 `SIMP_SEC_STATUS` — SETTLED, and it is not what its name suggests
+
+**It is a realtime trading-session status, not a security lifecycle status.**
+Bloomberg's own documentation: "Bloomberg normalized (simplified) representation
+of the **trading status** of a security, taking into account the Trading Period
+and Exchange Market Status values. **Field updates in realtime.**"
+
+The value domain, quoted from the field documentation: `ABAL` auction order book
+balancing, `AUCT` auction call phase, `CAUC` continuous auction pre-call,
+`CLOS` market closed, `HALT` temporary halt, `HLTA` halt and auction call,
+`INEG` ineligible to trade (pending listing, delisted, private company, expired,
+called), `MOC` / `MOCB` market-on-close order collection and balancing,
+`NONE` undefined, `NOTR` not present, `PREO` pre-open, and others.
+
+Observed across a mixed basket at 15:26 local time:
+
+| Security | Value |
+|---|---|
+| AAPL US Equity | `PREO` |
+| META US Equity | `PREO` |
+| VFIAX US Equity | `CLOS` |
+| FB US Equity | `PREO` |
+| TWTR US Equity | `HALT` |
+| SX5E Index | *(no value returned)* |
+
+**Three consequences, all of which change the design.**
+
+First, it must not be stored as an instrument attribute. Recording that AAPL's
+status has been `PREO` since its 1980 listing is not a fact about the
+instrument; it is a fact about the clock, and it would be wrong again within
+the hour.
+
+Second, it is an intraday field on a system that has deliberately restricted
+itself to end-of-day data. Fetching it spends a call on a value that is stale on
+arrival.
+
+Third, absence proves nothing. The field "will only return a value through
+BLPAPI for securities that employ the latest version of the security status
+(version 2)"; `SECURITY_STATUS_VERSION` says which. `SX5E Index` returned
+nothing, and that is not evidence about the index.
+
+**Resolution: drop `SIMP_SEC_STATUS` from the identity block entirely.** The
+lifecycle question it was recruited to answer — is this instrument still alive —
+is already answered by `INACTIVE_DATE`, which is dated, permanent, and already
+in the identity field set. Open question §9.3 is closed by removing the need
+for it rather than by satisfying it.
+
+`INEG` is the one value carrying lifecycle meaning, but it is a live state, not
+a dated event, and it collapses "pending listing", "delisted", "private" and
+"expired" into one code. `INACTIVE_DATE` is strictly better for every use P1
+through P5 has.
+
+### 10.3 The `CA_MA_*` family — SETTLED, 89 members
+
+A live `FieldSearchRequest` for `CA_MA` returns 89 fields. The full list is in
+the capture; the ones that matter for fund mergers and successor derivation:
+
+| Mnemonic | Type | Meaning |
+|---|---|---|
+| `CA_MA_COMPLETE_DT` | Date | Completion/Termination Date. "A publicly traded Target's completion date coincides with the delisting date. Termination date will indicate date which the deal was officially withdrawn." |
+| `CA_MA_ACQUIRER_TICKER` | LongCharacter | Acquirer Ticker |
+| `CA_MA_ACQUIRER_NAME` | LongCharacter | Acquirer Name |
+| `CA_MA_TARGET_TICKER` | LongCharacter | Target Ticker |
+| `CA_MA_TARGET_NAME` | LongCharacter | Target Name |
+| `CA_MA_DEAL_TYPE` | Character | Deal Type |
+| `CA_MA_AMENDMENT_DT` | Date | Amendment Date |
+| `CA_MA_EXPECTED_COMPLETION_DATE` | Date | Expected Completion Date |
+| `CA_MA_DROP_DEAD_DATE` | Date | Drop Dead Date |
+| `CA_MA_PCT_SOUGHT` / `CA_MA_PCT_OWNED` | Real | Percent sought / owned |
+| `CA_MA_STOCK_TERMS` / `CA_MA_CASH_TERMS` | Character | Consideration terms |
+
+Note `CA_MA_COMPLETE_DT` carries two distinct meanings in one column —
+completion and termination — distinguished only by context. A withdrawn deal and
+a consummated one both stamp a date here. P3 must not read a non-null value as
+"this merger happened".
+
+### 10.4 Correction to §7.2
+
+§7.2 states flatly that no Bloomberg field returns a successor security. **That
+is too strong, and this pass corrects it.**
+
+It holds for *renames and lifecycle*: nothing maps a delisted instrument to
+whatever replaced it, which is why `HISTORICAL_IDS_TIME_RANGE` plus human
+confirmation remains the mechanism for those.
+
+It does **not** hold for *mergers and acquisitions*. `CA_MA_ACQUIRER_TICKER` and
+`CA_MA_ACQUIRER_NAME` name the acquiring entity directly, and
+`CA_MA_COMPLETE_DT` dates it. Three of the six mnemonics §7.1 recorded as
+non-existent — `MERGER_ACQUIRER`, `EQY_ACQUIRER_NAME`, `MERGER_TARGET` — were
+not absent concepts, only wrong names for concepts that exist under the `CA_MA_`
+prefix. §7.1 remains correct as written (those six strings do not exist); what
+it must not be read to imply is that the information is unavailable.
+
+The design consequence is unchanged for P1: an M&A ticker is still a *proposal*,
+because the acquirer's ticker is a string that must itself be resolved, and
+because a withdrawn deal populates the same fields. But P5 has a real source
+rather than pure inference, which is a materially better starting point than
+§7.2 implied.
+
+### 10.5 What remains open
+
+One item, and it is not answerable by probing:
+
+- **Is `instrumentListRequest` metered, and at what rate?** Not exposed by the
+  API, and not visible in any response. It stays counted conservatively. With
+  the licence now known to allow 500,000 hits/day (§9.4), the practical risk of
+  the conservative estimate being wrong in either direction is small.
+
+`//blp/instruments` remains the only search surface, and no corporate-actions
+service exists (§2.1) — both re-confirmed by this session's service list.

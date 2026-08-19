@@ -2323,8 +2323,12 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 /// The identity block requested at resolution step 3. All P0-verified (§6.1).
-/// SIMP_SEC_STATUS is read for display only -- P0 §9 records that its value
-/// domain was never enumerated, so nothing branches on it (spec §10 q3).
+///
+/// SIMP_SEC_STATUS is deliberately NOT here. It looked like a lifecycle field
+/// and is not: P0 §10.2 measured it returning PREO, CLOS and HALT -- the market
+/// session, updating in realtime. Requesting it would spend a call on a value
+/// that is stale on arrival and meaningless to store. INACTIVE_DATE, below,
+/// answers the question it was recruited for, with a date instead of a mood.
 pub const IDENTITY_FIELDS: [&str; 11] = [
     "ID_BB_GLOBAL",
     "ID_BB_GLOBAL_SHARE_CLASS_LEVEL",
@@ -2338,10 +2342,6 @@ pub const IDENTITY_FIELDS: [&str; 11] = [
     "LISTING_DATE",
     "INACTIVE_DATE",
 ];
-
-/// Requested alongside IDENTITY_FIELDS but kept separate because it is the one
-/// field whose meaning is not yet pinned down.
-pub const STATUS_FIELD: &str = "SIMP_SEC_STATUS";
 
 pub const HIST_IDS_FIELD: &str = "HISTORICAL_IDS_TIME_RANGE";
 /// Overrides on HIST_IDS_FIELD, resolved from its own FieldInfoRequest (P0 §6.3).
@@ -2363,6 +2363,8 @@ pub struct IdentityBlock {
     pub name: Option<String>,
     pub listing_date: Option<NaiveDate>,
     pub inactive_date: Option<NaiveDate>,
+    /// Reserved for a lifecycle status P3/P5 may derive. Never populated from
+    /// SIMP_SEC_STATUS -- see IDENTITY_FIELDS.
     pub status: Option<String>,
 }
 
@@ -2434,7 +2436,7 @@ pub fn parse_identity(raw: &serde_json::Value) -> Vec<IdentityBlock> {
                 name: s(&g("NAME")),
                 listing_date: date(&g("LISTING_DATE")),
                 inactive_date: date(&g("INACTIVE_DATE")),
-                status: s(&g(STATUS_FIELD)),
+                status: None,
             }
         })
         .collect()
@@ -2514,12 +2516,10 @@ impl BlpapiMasterFetcher<'_> {
 
 impl MasterFetcher for BlpapiMasterFetcher<'_> {
     async fn identity(&self, securities: &[String]) -> AppResult<Vec<IdentityBlock>> {
-        let mut fields: Vec<&str> = IDENTITY_FIELDS.to_vec();
-        fields.push(STATUS_FIELD);
         let resp = self.call(serde_json::json!({
             "kind": "reference",
             "securities": securities,
-            "fields": fields,
+            "fields": IDENTITY_FIELDS,
             "obs_date": chrono::Local::now().date_naive().to_string(),
             "raw": true,
         })).await?;
@@ -3054,7 +3054,9 @@ async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
         ("country", &block.country),
         ("instrument_type", &block.security_typ2),
         ("asset_class", &block.market_sector),
-        ("status", &block.status),
+        // No "status": P0 §10.2 -- SIMP_SEC_STATUS is a trading-session state,
+        // not a lifecycle one. INACTIVE_DATE above already closes the validity
+        // periods, which is the durable way to say an instrument has ended.
     ] {
         if let Some(v) = value {
             store::set_attr(&mut tx, inst.instrument_id, attr, v, from,
@@ -5887,9 +5889,8 @@ Record the result of each line; a failure here is a real finding, not a retry.
 
 ## Known-unknowns to observe while here
 
-- [ ] Note the distinct values of `SIMP_SEC_STATUS` seen (spec §10 q3).
 - [ ] Note whether instrumentListRequest appears in the Terminal's own hit
-      accounting (spec §10 q2).
+      accounting (spec §10 q2) — the last item P0 left open.
 ```
 
 - [ ] **Step 2: Run it and record the results**

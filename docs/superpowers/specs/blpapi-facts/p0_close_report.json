@@ -1,0 +1,430 @@
+{
+  "field_info": {
+    "HISTORICAL_STARTING_IDENTIFIER": {
+      "mnemonic": "HISTORICAL_STARTING_IDENTIFIER",
+      "description": "Historical Starting Identifier",
+      "datatype": "String",
+      "documentation": "Override field which specifies the override's starting identifier. The input is a character string that is of one of the following types. The actual (current) type is decided by the Historical Identifier Input Type (ID288, HISTORICAL_IDS_INPUT_TYPE). \n\n0 - Ticker\n1 - Cusip\n3 - Belgian SVM\n4 - Common Code\n6 - Misc\n8 - Valoren\n9 - Sicovam\n10 - Sedol\n11 - WPK\n12 - SINGID\n14 - FONDS\n15 - Isin\n17 - Austrian WPK\n18 - SEDOL FMQ\n",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    },
+    "ID_BB_UNIQUE": {
+      "mnemonic": "ID_BB_UNIQUE",
+      "description": "Unique Identifier",
+      "datatype": "String",
+      "documentation": "A proprietary identifier assigned to all instruments. The construction and length of this identifier is different across asset classes. This identifier can also change as a result of corporate actions.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    },
+    "CA_MA_COMPLETE_DT": {
+      "mnemonic": "CA_MA_COMPLETE_DT",
+      "description": "Completion/Termination Date",
+      "datatype": "Datetime",
+      "documentation": "Indicates the date the deal has been consummated. A publicly traded Targets completion date coincides with the delisting date. Termination date will indicate   date which the deal was officially withdrawn.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Date"
+    },
+    "REVERSE_MERGER_COMPLETION_DATE": {
+      "mnemonic": "REVERSE_MERGER_COMPLETION_DATE",
+      "description": "Reverse Merger Completion Date",
+      "datatype": "Datetime",
+      "documentation": "Provides company's last completed reverse merger Date.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Date"
+    },
+    "EQY_DVD_ADJUST_FACT": {
+      "mnemonic": "EQY_DVD_ADJUST_FACT",
+      "description": "Adjustment Factors",
+      "datatype": "String",
+      "documentation": "This bulk data field returns a list of adjustment factors used to adjust prices and/or volumes for stock splits, stock dividends, rights issues and spin-offs. Adjustment factors for normal and abnormal cash dividends are not included by default. To override the default behavior, use field Corporate Actions Filter (DV175, CORPORATE_ACTIONS_FILTER).\n\nThe field returns data in 4 unlabeled columns:\nColumn 1 - Adjustment Date\nColumn 2 - Adjustment Factor\nColumn 3 - Operator Type (1=div, 2=mult, 3=add. Opposite for Volume)\nColumn 4 - Flag (1=prices only, 3=prices and volumes)\n\nExample: (for FTE FP Equity)\n11/29/1999  0.9966  2  3\nOn 11/29/1999, there was an adjustment factor of 0.9966 that you must multiply and this applies to prices and volumes\n",
+      "categoryName": [],
+      "property": [],
+      "overrides": [
+        "DV175"
+      ],
+      "ftype": "BulkFormat"
+    },
+    "FUND_SHR_CLASS_DESG": {
+      "mnemonic": "FUND_SHR_CLASS_DESG",
+      "description": "Fund Share Class Designation",
+      "datatype": "String",
+      "documentation": "Designation of the share class within the fund. Identifies the fund share class by letter/number/currency/name of share class when appropriate.  This designation is determined by how the fund company references the share class in fund documentation.\n\nEach share class of a fund invests in the same portfolio of securities, but may have different attributes such as fees, expenses and/or rights. As a result, share classes of a fund may have different performance results.\n\nDisplay:\nLetters are entered in upper case. Currency is entered with the symbol when possible.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    },
+    "INACTIVE_DATE": {
+      "mnemonic": "INACTIVE_DATE",
+      "description": "Inactive Date",
+      "datatype": "Datetime",
+      "documentation": "Trading Status: Date on which trade status is set to inactive. Indicates the date that corresponds to the change in Trading Status (PR312, TRADE_STATUS).\n\nFacilties:\nDate the facility was set to inactive.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Date"
+    },
+    "HISTORICAL_IDS_TIME_RANGE": {
+      "mnemonic": "HISTORICAL_IDS_TIME_RANGE",
+      "description": "Historical Identifiers in a Time Range",
+      "datatype": "String",
+      "documentation": "Returns the historical evolution of the specified identifier on the date specified in Historical Identifiers Time Range Start Date (ID289, HISTORICAL_ID_TM_RANGE_START_DT) to today's current identifier.  Lists the Date, Old Identifier, New Identifier, Old Exchange, New Exchange, Corporate Action Identifier, Source, and Event.\n\nFor example, if company 1 lists under ticker 'AAA', changes its ticker to 'BBB',  delists, and is assigned  a dummy ticker '1234Z', this field will list those events as specified above.  However, if a separate and new company 2 later lists under ticker 'AAA', as 'AAA' no longer has any relevance to the original company, it would not be listed in the chain of events for company 1.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [
+        "ID325",
+        "ID289"
+      ],
+      "ftype": "BulkFormat"
+    },
+    "LISTING_DATE": {
+      "mnemonic": "LISTING_DATE",
+      "description": "Listing Date",
+      "datatype": "Datetime",
+      "documentation": "Date on which the security commences listing on the respective exchange market.\n\nExchange-listed warrants:\n   The listing date will be returned. \n\nUnlisted warrants:\n   Not applicable, no data will be returned.\n\nCash Equities\n  The date when offer shares begin trading on its exchange. Populates on Equity Offering Corporate Action IDs. Also populates on the Equity Ticker for equities and funds. Please refer to first pricing date or the listing corporate action for non-equity offering dates.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Date"
+    },
+    "SHARE_CLASS_TYPE": {
+      "mnemonic": "SHARE_CLASS_TYPE",
+      "description": "Share Class Type",
+      "datatype": "String",
+      "documentation": "Specifies the type of investment vehicle associated with the fund\u2019s share class.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    },
+    "CORPORATE_ACTIONS_FILTER": {
+      "mnemonic": "CORPORATE_ACTIONS_FILTER",
+      "description": "Corporate Actions Filter",
+      "datatype": "String",
+      "documentation": "User defined corporate actions filter for dividend bulk field Ajustment Factors (DV106, EQY_DVD_ADJUST_FACT). The corporate actions are specified as a pipe delimited.\n\nCAPITAL_CHANGE filter includes STOCK_SPLIT, STOCK_DIVIDEND, RIGHTS_OFFERING and SPINOFF corporate actions.\n\nThis field acts as a single or compound override.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "LongCharacter"
+    },
+    "FUND_TYP": {
+      "mnemonic": "FUND_TYP",
+      "description": "Fund Type",
+      "datatype": "String",
+      "documentation": "Description of a product designation provided by the fund company through a regulatory filing or prospectus.\n\nPossible Values:\nSICAV (Societe d'Investissement a Capital Variable); Unit Trust; FCP (Fond Commun de Placement); UCIT (Undertakings For Collective Investment In Transferable Securities); Open-End Fund; OEIC (Open-End Investment Company); Open-End Pension; SICAF (Societe d'Investissement a Capital Fixe); Trust Units; Investment Trust; Closed-End Fund; Closed-End Pension; Hedge Fund; Fund of Funds; Fund of Hedge Funds; UIT (Unit Investment Trust); ETF (Exchange Traded Fund); ETC (Exchange Traded Commodity); ETN (Exchange Traded Notes); Variable Annuity; Private Equity Fund; Private Equity Fund of Fund; FIDC (Fundo de Investimento em Direitos Creditorios); Funds of FIDCs.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    },
+    "FUND_SHARE_CLASS_CLOSURE_DATE": {
+      "mnemonic": "FUND_SHARE_CLASS_CLOSURE_DATE",
+      "description": "Fund Share Class Closure Date",
+      "datatype": "Datetime",
+      "documentation": "Date on which a fund share-class ceases to exist due to a liquidation, merger or reclassification. Currently this field is only supported for open-end funds since 2024.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Date"
+    },
+    "HISTORICAL_ID_TM_RANGE_START_DT": {
+      "mnemonic": "HISTORICAL_ID_TM_RANGE_START_DT",
+      "description": "Historical Identifiers Time Range Start Date",
+      "datatype": "Datetime",
+      "documentation": "Override which specifies when the historical identifier was relevant, using the 'YYYYMMDD' date format. This will set the range for the Historical Identifier at a Point in Time (ID286, HISTORICAL_ID_POINT_TIME) and Historical Identifiers in a Time Range (ID287, HISTORICAL_IDS_TIME_RANGE) fields.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Date"
+    },
+    "ID_BB_GLOBAL_SHARE_CLASS_LEVEL": {
+      "mnemonic": "ID_BB_GLOBAL_SHARE_CLASS_LEVEL",
+      "description": "Share Class Financial Instrument Global Identifier",
+      "datatype": "String",
+      "documentation": "Twelve character, alpha-numeric identifier. The first 2 characters are upper-case consonants (including \"Y\"), the third character is the upper-case \"G\", characters 4 -11 are any upper-case consonant (including \"Y\") or integer between 0 and 9, and the last character is a check-digit. A Share Class level Financial Instrument Global Identifier is assigned to an instrument that is traded in more than one country. This enables users to link multiple Composite FIGIs for the same instrument in order to obtain an aggregated view for that instrument across all countries globally.",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    },
+    "SIMP_SEC_STATUS": {
+      "mnemonic": "SIMP_SEC_STATUS",
+      "description": "Simplified Security Status",
+      "datatype": "String",
+      "documentation": "Bloomberg normalized (simplified) representation of the trading status of a security, taking into account the Trading Period (RQ063, RT_TRADING_PERIOD) and Exchange Market Status (RQ170, RT_EXCH_MARKET_STATUS) values. Field updates in realtime.\n\nThis field will only return a value through BLPAPI (including B-PIPE) for securities that employ the latest version of the security status (version 2). It will not return a value through BLPAPI for securities that are on the earlier version (version 1).\n\nThe security status version that is being employed for the security is indicated via the Security Status Version (EX030, SECURITY_STATUS_VERSION/Q1979, SECURITY_STATUS_VERSION_RT) field, which will return a value of '1' (version 1) or '2' (version 2).\n\nThe possible values are: \nABAL - auction order book balancing\nAUCT - auction call phase \nCAUC - continuous auction pre-call or call phase dependent on market makers or specialists\nCLOS - market closed\nHALT - temporary halt from trading\nHLTA - temporary halt and auction call phase\nINEG - ineligible to trade, e.g. pending listing, delisted, private company, expired, called, etc.\nMOC - market-on-close order collection for eventual execution at the determined closing price\nMOCB - market-on-close order balancing to try and maximize execution at the determined closing price\nNONE - the current status of the security is undefined\nNOTR - not presently available for trading\nOUT - trading in an out-of-hours trading phase\nPHLP - partial halt across the execution venues that form part of the Bloomberg composite, including the primary\nPHLT - partial halt across the execution venues that form part of the Bloomberg composite\nPOST - post-close session\nPREO - pre-open session\nPRPO - pre-open/post-close session\nSUSP - presently suspended from trading\nTALC - trade-at-last or trade-at-close trading phase \nTMCB - actively trading, but with market-on-close order balancing operating in parallel\nTMOC - actively trading, but with market-on-close order collection operating in parallel\nTRAD - actively trading, e.g. continuous trading, mandatory quotation period, etc.\nTRAU - actively trading, with an auction call running in parallel \nUNCR - auction uncrossing phase\n\nIf you are looking to track the status of a security in simplistic terms, then you make wish to make use of the following generalizations:\n- A security has an unknown status when it returns a value of NONE.\n- A security is ineligible to trade when it returns a value of INEG.\n- A security is closed for trading when it returns a value of CLOS (if Quotation Status/ Quotation Status- Realtime [PR745, QUOTE_STATUS/ RQ180, RT_QUOTE_STATUS] is also equal to 'N').\n- A security is available and open for trading (e.g. continuous trading) when it returns a value of CAUC, TMCB, TMOC, TRAD or TRAU.\n- A security is available for trade-at-last or trade-at-close order executions only when it returns a value of TALC.\n- A security is available for out-of-hours trading when it returns a value of OUT.\n- A security is in an auction call when it returns a value of AUCT, HLTA or TRAU. If In Auction Indicator/In Auction Indicator Realtime (PQ654 , IN_AUCTION/ RQ654 , IN_AUCTION_RT) returns a value of 'NO', then the order executions (the uncrossing) has already taken place at the end of that auction call.\n- A security is executing orders from an auction call when it returns a value of UNCR (not supported on all markets).\n- A security is offering an opportunity to offset an outstanding imbalance from an auction call when it returns a value of ABAL.\n- A security is operating a distinct market-on-close (MOC) order book when it returns a value of TMOC or MOC.\n- A security is offering an opportunity to offset an outstanding imbalance on a market-on-close (MOC) book when it returns a value of MOCB or TMCB.\n- A security is halted or suspended from trading when it returns a value of HALT, HLTA or SUSP. If the value is HLTA then the security is participating in an auction call to facilitate a resumption of trading. For a Bloomberg Composite feed source, the value of SUSP implies that the security has been halted or suspended from trading across all execution venues that form part of the Bloomberg Composite (e.g. Canada Composite, feed source \"CN\"), unless the Bloomberg Composite feed source has been configured to exclusively emulate the trading status of the execution venue that holds the primary listing (e.g. Australian Composite, feed source \"AU\").\n- A security is halted or suspended from trading across some but not all execution venues that form part of a Bloomberg Composite when it returns a value of PHLP or PHLT; in the case of PHLP the execution venue that holds the primary listing for the security is one of the execution venues for which trading has been halted.\n- A security is temporarily unavailable for trading - but not halted or suspended - when it returns a value of NOTR.\n- A security is in a pre-trading or post-trading phase (auction calls excepted), but with no trading via the primary market mechanism (e.g. continuous trading), when it returns a value of CLOS (if Quotation Status/ Quotation Status - Realtime [PR745, QUOTE_STATUS/ RQ180, RT_QUOTE_STATUS] is also equal to 'Y'), POST, PREO or POST.\n\nNote that there is a distinction between what we understand to be most likely temporary halts (HALT and HLTA), and what we understand may be longer term suspensions (SUSP). All three values nevertheless represent an unscheduled interruption to trading.\n\nMore complete definitions for each of the possible values now follow.\n\nABAL:\nThe auction call has concluded, but the market is running a balancing exercise. The mechanics of the balancing phase may vary from market to market, but they typically afford trading participants the option or rebalancing the orders on the book that will execute at the determined equilibrium price. The balancing exercise aims to maximize the quantity that will be transacted following the conclusion of the auction call.\n\nAUCT:\nThe security is presently in a scheduled auction call. During an auction call, automatic execution is normally suspended for a defined period, during which an equilibrium price and volume is calculated. This equilibrium price and/or volume may or may not be advertised. If it is advertised, it is republished each time it changes. It is often called a theoretical or indicative price/size. It represents the price and quantity that would be executed were the auction call to conclude at that time. The Auction Type/Auction Type - Realtime is available via P1558, AUCTION_TYPE / Q1558, AUCTION_TYPE_REALTIME field.\n\nCAUC:\nThe security is presently in the pre-call or call phase on a 'continuous auction' market. The 'continuous auction' is distinct from an auction call in that it is not facilitated by, or it is not exclusively facilitated by, a Central Limit Order Book, and it instead depends on a Market Maker or Specialist for executions. For markets that operate periodic auction call uncrossings exclusively on a Central Limit Order Book, a value of \"AUCT\" will instead be used, together with an Auction Type/ Auction Type - Realtime (P1558, AUCTION_TYPE / Q1558, AUCTION_TYPE_REALTIME) value of \"PRDC\" (periodic auction call).\n\nCLOS:\nThe market is closed and it is not possible to trade the security via the market operator's primary trading mechanism. This status would normally be observed before market open and after market close. Markets that observe a trading break between sessions (e.g. a lunch break) would normally have the status of OUT rather than CLOS.\n\nHALT:\nTrading in the security has been temporarily halted. This halt may be a manual interruption, whereby the market operator has manually intervened to halt trading in the security, or an automatic interruption, for example when trading limits have been breached during continuous trading or an auction call, sometimes known as a circuit breaker. Note that if a circuit breaker results in a volatility interruption, then the market operator may invoke an auction call to facilitate an orderly resumption of trading. If this is the case then a Simplified Security Status of HLTA will be used instead. If Bloomberg determines that the interruption to trading may be longer term in nature, then a Simplified Security Status of SUSP may be published instead. The reason for the interruption to trading is available via TRADING_HALT_REASON_TYPE / TRADING_HALT_REASON_TYPE_RT field.\n\nHLTA:\nA hybrid of HALT and AUCT. Trading in the security has been temporarily halted, but the market operator is operating an auction call to facilitate an orderly resumption of trading. The security is effectively in a hybrid state of both HALT and AUCT. The type of auction is available via Auction Type/ Auction Type - Realtime (P1558, AUCTION_TYPE / Q1558, AUCTION_TYPE_REALTIME). The reason for the interruption to trading is available via Trading Halt Reason Type/Trading Halt Reason Type - Realtime (P1559, TRADING_HALT_REASON_TYPE / Q1559, TRADING_HALT_REASON_TYPE_RT) field.\n\nINEG:\nThe security is presently ineligible to trade. This may have been determined on the basis of information configured on Bloomberg's instrument database (e.g. security is pending listing or has been delisted), or it may be determined from information received on the inbound market data feed supplied to Bloomberg by the market operator.\n\nMOC:\nThe security is presently in a market-on-close and/or limit-on-close order collection trading phase. These orders will be executed at the (usually yet to be determined) closing price.\n\nMOCB:\nThe security is presently in a market-on-close order balancing trading phase. This gives trading participants the opportunity to counteract an imbalance on the market-on-close order book before the orders are executed.\n\nNONE:\nBloomberg presently doesn't have any information that describes the current status of the security. A status of NONE is exceptionally rare, and will only be seen on instruments that have not been fully configured on the Bloomberg instrument databases, and for which there is no information about the security available on the inbound market data feed supplied to Bloomberg by the market operator.\n\nNOTR:\nThe security is not presently available for trading. This is normally a scheduled/expected transitory trading phase, and it thus does not represent a halt (HALT) or suspension (SUSP) of trading. It is often used by market operators that temporarily freeze the order book or execution of orders on the book while they transition the security from one trading phase to another. It may also be used when a security is between trading sessions on a given day, such as a scheduled lunch break that separates morning trading from afternoon trading.\n\nOUT:\nAn out-of-hours trading phase is in progress. This status is often used for trading outside of the primary/main market hours, for example pre- or post-session trading, or distinct evening session trading.\n\nPHLP:\nRelevant only to Bloomberg equity composite exchange codes (feed sources), e.g. \"CN\" for the Canada Composite. Indicates a partial halt across the execution venues that form part of the Bloomberg composite, including the execution venue that holds the primary listing for the security. At least one execution venue, excluding the venue that holds the primary listing, has advertised that they have the security available to trade. To determine precisely which execution venues are halted or suspended, the Simplified Security Status value on the equity exchange code (feed source) that represents each execution venue should be consulted.\n\nPHLT:\nRelevant only to Bloomberg equity composite exchange codes (feed sources), e.g. \"CN\" for the Canada Composite. Indicates a partial halt across the execution venues that form part of the Bloomberg composite, excluding the execution venue that holds the primary listing for the security. At least one execution venue, including the venue that holds the primary listing, has advertised that they have the security available to trade. To determine precisely which execution venues are halted or suspended, the Simplified Security Status value on the equity exchange code (feed source) that represents each execution venue should be consulted.\n\nPOST:\nThe market is presently closed, but there is a post-close trading phase in progress. This phase may allow order/quote-entry, deletion and/or amendment, but orders will not be executed until the market re-opens.\n\nPREO:\nThe market is presently closed, but there is a pre-open trading phase in progress. This phase may allow order/quote-entry, deletion and/or amendment, but orders will not be executed until the market opens.\n\nPRPO:\nA hybrid of PREO and POST. The market is presently closed, but there is either a pre-open or a post-close trading phase in progress. This phase may allow order/quote-entry, deletion and/or amendment, but orders will not be executed until the market next opens.\n\nSUSP:\nTrading in the security has been suspended from trading. This may be a longer term interruption to trading. If the suspension may be short term in nature, then a Simplified Security Status of HALT may be used instead. If the market operator is operating an auction call to facilitate an orderly resumption of trading, then a Simplified Security Status of HLTA will be used instead. The reason for the interruption to trading is available via Trading Halt Reason Type/Trading Halt Reason Type - Realtime (P1559, TRADING_HALT_REASON_TYPE / Q1559, TRADING_HALT_REASON_TYPE_RT). \n\nTALC:\nThe security is presently in a trade-at-last or trade-at-close trading phase. During this phase, special at-last or at-close orders can be executed, which will execute only at the pre-determined last trade from the continuous trading session, or the published closing price (these are often in fact the same price on many markets).\n\nTMCB:\nA hybrid of MOCB and TRAD. The market is open for trading (ordinarily the Simplified Security Status of TRAD), but with a market-on-close order balancing trading phase operating in parallel (ordinarily the Simplified Security Status of MOCB).\n\nTMOC:\nA hybrid of MOC and TRAD. The market is open for trading (ordinarily the Simplified Security Status of TRAD), but with a market-on-close and/or limit-on-close order collection exercise running in parallel (ordinarily the Simplified Security Status of MOC).\n\nTRAD:\nThe market is open for trading. This is most commonly a continuous trading phase for markets that operate a central limit order book, but it may also represent a mandatory quotation period for market maker facilitated trading.\n\nTRAU:\nA hybrid of TRAD and AUCT. The security is presently in continuous trading (or, for hybrid market maker quote and order book markets, a mandatory quotation period), with an auction call running in parallel. The Auction Type/Auction Type - Realtime is available via P1558, AUCTION_TYPE / Q1558, AUCTION_TYPE_REALTIME. \n\nUNCR:\nThe auction call (and auction balancing, if there is such a phase) has concluded, and the orders that have been matched in the auction call are in the process of being executed. During this phase the order book may be frozen in order to avoid any interruptions to the uncrossing process. Note that many market operators do not explicitly advertise an uncrossing phase, and will instead publish the auction call executions either immediately before the auction call concludes, when the Simplified Security Status will still be AUCT or HLTA, or immediately after the auction call concludes, when the Simplified Security Status will represent the subsequent trading phase (e.g. TRAD, TALC or CLOS).",
+      "categoryName": [],
+      "property": [],
+      "overrides": [],
+      "ftype": "Character"
+    }
+  },
+  "override_mnemonics": {
+    "HISTORICAL_STARTING_IDENTIFIER": "Historical Starting Identifier",
+    "CORPORATE_ACTIONS_FILTER": "Corporate Actions Filter",
+    "HISTORICAL_ID_TM_RANGE_START_DT": "Historical Identifiers Time Range Start Date"
+  },
+  "simp_sec_status_observed": {
+    "AAPL US Equity": "PREO",
+    "META US Equity": "PREO",
+    "VFIAX US Equity": "CLOS",
+    "FB US Equity": "PREO",
+    "TWTR US Equity": "HALT"
+  },
+  "adjust_factors_aapl_default": {
+    "AAPL US Equity": [
+      {
+        "Adjustment Date": "2020-08-31",
+        "Adjustment Factor": 4.0,
+        "Adjustment Factor Operator Type": 1.0,
+        "Adjustment Factor Flag": 3.0
+      },
+      {
+        "Adjustment Date": "2014-06-09",
+        "Adjustment Factor": 7.0,
+        "Adjustment Factor Operator Type": 1.0,
+        "Adjustment Factor Flag": 3.0
+      },
+      {
+        "Adjustment Date": "2005-02-28",
+        "Adjustment Factor": 2.0,
+        "Adjustment Factor Operator Type": 1.0,
+        "Adjustment Factor Flag": 3.0
+      },
+      {
+        "Adjustment Date": "2000-06-21",
+        "Adjustment Factor": 2.0,
+        "Adjustment Factor Operator Type": 1.0,
+        "Adjustment Factor Flag": 3.0
+      },
+      {
+        "Adjustment Date": "1987-06-16",
+        "Adjustment Factor": 2.0,
+        "Adjustment Factor Operator Type": 1.0,
+        "Adjustment Factor Flag": 3.0
+      }
+    ]
+  },
+  "adjust_factors_aapl_filtered_first20": {
+    "AAPL US Equity": [
+      {
+        "Adjustment Date": "2026-08-10",
+        "Adjustment Factor": 0.999138,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2026-05-11",
+        "Adjustment Factor": 0.99908,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2026-02-09",
+        "Adjustment Factor": 0.999065,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2025-11-10",
+        "Adjustment Factor": 0.999032,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2025-08-11",
+        "Adjustment Factor": 0.998866,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2025-05-12",
+        "Adjustment Factor": 0.99869,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2025-02-10",
+        "Adjustment Factor": 0.998902,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2024-11-08",
+        "Adjustment Factor": 0.998901,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2024-08-12",
+        "Adjustment Factor": 0.998844,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2024-05-10",
+        "Adjustment Factor": 0.998646,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2024-02-09",
+        "Adjustment Factor": 0.998726,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2023-11-10",
+        "Adjustment Factor": 0.998684,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2023-08-11",
+        "Adjustment Factor": 0.998651,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2023-05-12",
+        "Adjustment Factor": 0.998619,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2023-02-10",
+        "Adjustment Factor": 0.998476,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2022-11-04",
+        "Adjustment Factor": 0.998344,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2022-08-05",
+        "Adjustment Factor": 0.998613,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2022-05-06",
+        "Adjustment Factor": 0.998533,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2022-02-04",
+        "Adjustment Factor": 0.998728,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      },
+      {
+        "Adjustment Date": "2021-11-05",
+        "Adjustment Factor": 0.998543,
+        "Adjustment Factor Operator Type": 2.0,
+        "Adjustment Factor Flag": 1.0
+      }
+    ]
+  },
+  "ca_ma_family": [
+    "CA_MA_ACCOUNTING_METHOD",
+    "CA_MA_ACQUIRER_COUNTRY",
+    "CA_MA_ACQUIRER_FINANCIAL_ADVISER",
+    "CA_MA_ACQUIRER_INDUSTRY",
+    "CA_MA_ACQUIRER_LEGAL_ADVISER",
+    "CA_MA_ACQUIRER_NAME",
+    "CA_MA_ACQUIRER_PEOPLE_LINK",
+    "CA_MA_ACQUIRER_TICKER",
+    "CA_MA_ACQ_FAIRNESS_OPINION_ADVIS",
+    "CA_MA_ACQ_OWNERSHP_IN_NEW_CO_PCT",
+    "CA_MA_ACQ_TO_TARGET_TERM_FEES",
+    "CA_MA_ADDITIONAL_ACQ_ADVISERS",
+    "CA_MA_ADDITIONAL_SELLER_ADVISERS",
+    "CA_MA_ADDITIONAL_TARGET_ADVISERS",
+    "CA_MA_AMENDMENT_DT",
+    "CA_MA_ANNOUNCE_VALUE",
+    "CA_MA_APPROVED_APPROVALS",
+    "CA_MA_BLOCKED_APPROVALS",
+    "CA_MA_CASH_TERMS",
+    "CA_MA_CASH_VALUE",
+    "CA_MA_COMPLETE_DT",
+    "CA_MA_CONTINGENCY_PAYMENTS",
+    "CA_MA_CONTINGENCY_PAYMENTS_AMT",
+    "CA_MA_CUR_PREMIUM",
+    "CA_MA_DEAL_DESCRIPTION",
+    "CA_MA_DEAL_PURPOSE",
+    "CA_MA_DEAL_TYPE",
+    "CA_MA_DEBT_ASSUMPTION",
+    "CA_MA_DEBT_ISSUANCE",
+    "CA_MA_DISSENTER_CUT_OFF_DATE",
+    "CA_MA_DISSENTER_RIGHTS",
+    "CA_MA_DROP_DEAD_DATE",
+    "CA_MA_EARLY_TERM_APPROVALS",
+    "CA_MA_ELECTION_EXPIRATION_DATE",
+    "CA_MA_EXCHANGE",
+    "CA_MA_EXERCISABLE_OPTIONS",
+    "CA_MA_EXPECTED_COMPLETION_DATE",
+    "CA_MA_EXPIRATION_TIME",
+    "CA_MA_EXPIRATION_TIME_ZONE",
+    "CA_MA_EXPIRED_APPROVALS",
+    "CA_MA_EXTENDED_APPROVALS",
+    "CA_MA_FINANCING_CONDITION",
+    "CA_MA_FRACTIONAL_SHARES",
+    "CA_MA_GOVERNING_LAW_STATE",
+    "CA_MA_GO_SHOP_PERIOD_DAYS",
+    "CA_MA_GO_SHOP_PERIOD_END_DATE",
+    "CA_MA_GO_SHOP_PERIOD_START_DATE",
+    "CA_MA_LEGAL_ADVISER_TO_ACQ_FINL",
+    "CA_MA_LETTER_OF_TRANSMITTAL",
+    "CA_MA_LGL_ADVISER_TO_SELLER_FINL",
+    "CA_MA_LGL_ADVISER_TO_TARGET_FINL",
+    "CA_MA_MATERIAL_ADVERSE_EFF_COND",
+    "CA_MA_MERGERS_AGREEMENT_DATE",
+    "CA_MA_NATURE_OF_BID",
+    "CA_MA_NET_DEBT",
+    "CA_MA_NON_EQUITY_PAYMENTS",
+    "CA_MA_PAYMENT_TYP",
+    "CA_MA_PCT_OWNED",
+    "CA_MA_PCT_SOUGHT",
+    "CA_MA_PENDING_APPROVALS",
+    "CA_MA_PREMIUM",
+    "CA_MA_PROPOSED_DEAL_DATE",
+    "CA_MA_PROPOSED_DEAL_TYPE",
+    "CA_MA_PROPOSED_INFO_SOURCE",
+    "CA_MA_SELLER_COUNTRY",
+    "CA_MA_SELLER_FAIRNESS_OPINION_AD",
+    "CA_MA_SELLER_FINANCIAL_ADVISER",
+    "CA_MA_SELLER_INDUSTRY",
+    "CA_MA_SELLER_LEGAL_ADVISER",
+    "CA_MA_SELLER_NAME",
+    "CA_MA_SELLER_PEOPLE_LINK",
+    "CA_MA_SELLER_TICKER",
+    "CA_MA_SPECIAL_STOCK_PAYMENT",
+    "CA_MA_SPECIAL_STOCK_TICKER",
+    "CA_MA_STATE_SECTION_1",
+    "CA_MA_STATE_SECTION_2",
+    "CA_MA_STOCK_TERMS",
+    "CA_MA_TARGET_COUNTRY",
+    "CA_MA_TARGET_FINANCIAL_ADVISER",
+    "CA_MA_TARGET_INDUSTRY",
+    "CA_MA_TARGET_LEGAL_ADVISER",
+    "CA_MA_TARGET_NAME",
+    "CA_MA_TARGET_OWNER_IN_NEW_CO_PCT",
+    "CA_MA_TARGET_PEOPLE_LINK",
+    "CA_MA_TARGET_TICKER",
+    "CA_MA_TARGET_TO_ACQ_TERM_FEES",
+    "CA_MA_TAXABLE",
+    "CA_MA_TGT_FAIRNESS_OPINION_ADVIS",
+    "CA_MA_TOTAL_VAL"
+  ]
+}

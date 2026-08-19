@@ -139,8 +139,15 @@ is why it appears in P1 even though P2 is what exploits it.
 
 Attribute values are sourced from the P0-verified fields: `NAME`, `EXCH_CODE`,
 `CNTRY_ISSUE_ISO`, `CRNCY`, `SECURITY_TYP2`, `MARKET_SECTOR_DES`,
-`ID_BB_COMPANY`, `FUND_SHR_CLASS_DESG`, `SHARE_CLASS_TYPE`, `FUND_TYP`,
-`SIMP_SEC_STATUS`. Validity dates come from `LISTING_DATE` and `INACTIVE_DATE`.
+`ID_BB_COMPANY`, `FUND_SHR_CLASS_DESG`, `SHARE_CLASS_TYPE`, `FUND_TYP`.
+Validity dates come from `LISTING_DATE` and `INACTIVE_DATE`.
+
+The `status` attribute is defined in the CHECK constraint but **nothing in P1
+writes it.** `SIMP_SEC_STATUS` was the intended source, and P0 §10.2 established
+it is a realtime *trading-session* status — `PREO`, `CLOS`, `HALT` — not a
+lifecycle status. Storing it as an attribute would record the market clock as a
+property of the instrument. Lifecycle comes from `INACTIVE_DATE`, which is dated
+and permanent. The attribute value stays in the domain for P3/P5 to derive.
 
 ### 4.3 `instrument_alias` — every identifier ever worn
 
@@ -198,12 +205,24 @@ CREATE TABLE instrument_link (
 );
 ```
 
-P0 §7.2 established that **no Bloomberg field returns a successor security**.
-Links are therefore always derived — from `HISTORICAL_IDS_TIME_RANGE`,
-`CA_MA_COMPLETE_DT`, `REVERSE_MERGER_COMPLETION_DATE`,
-`FUND_SHARE_CLASS_CLOSURE_DATE` — and a link with `confirmed_by IS NULL` is a
-proposal that no query may follow. That nullability is the integrity guarantee,
-not a convenience.
+P0 §7.2 stated that no Bloomberg field returns a successor security. P0 §10.4
+**narrows that**: it holds for renames and lifecycle, but not for M&A, where
+`CA_MA_ACQUIRER_TICKER` and `CA_MA_ACQUIRER_NAME` name the acquirer directly and
+`CA_MA_COMPLETE_DT` dates it. All four mnemonics are confirmed to exist
+(P0 §10.3, 89 members in the family).
+
+Links remain derived and remain proposals regardless — from
+`HISTORICAL_IDS_TIME_RANGE`, `CA_MA_COMPLETE_DT`,
+`REVERSE_MERGER_COMPLETION_DATE`, `FUND_SHARE_CLASS_CLOSURE_DATE` — for two
+reasons that an acquirer ticker does not remove. An acquirer *ticker* is a
+string that must itself be resolved to an instrument, and P0 §6.4 is the standing
+demonstration that a ticker is not an identity. And `CA_MA_COMPLETE_DT` is
+documented as *"Completion/Termination Date"*: a withdrawn deal stamps the same
+column as a consummated one, so a non-null value is not evidence the merger
+happened.
+
+A link with `confirmed_by IS NULL` is therefore a proposal that no query may
+follow. That nullability is the integrity guarantee, not a convenience.
 
 ### 4.5 `resolution_decision` and `resolution_review`
 
@@ -363,7 +382,7 @@ input (ticker and/or ISIN, optional hints)
   ├─3  ReferenceDataRequest for the identity block
   │       ID_BB_GLOBAL, ID_BB_GLOBAL_SHARE_CLASS_LEVEL, ID_ISIN, EXCH_CODE,
   │       CRNCY, CNTRY_ISSUE_ISO, SECURITY_TYP2, MARKET_SECTOR_DES,
-  │       LISTING_DATE, INACTIVE_DATE, SIMP_SEC_STATUS
+  │       LISTING_DATE, INACTIVE_DATE
   │       unambiguous → bind, method 'bloomberg_ref'
   ├─4  ambiguous → instrumentListRequest with the matching yellowKeyFilter
   ├─5  score candidates on exchange, country, currency, asset class
@@ -499,12 +518,19 @@ metered at all is unknown (§10).
 
 ## 10. Open questions
 
-1. **`Adjustment Factor Operator Type` and `Adjustment Factor Flag` semantics**
-   (P0 §4). Blocks P4, not P1, but should be established before P3 finishes.
+1. ~~**`Adjustment Factor Operator Type` and `Adjustment Factor Flag`
+   semantics**~~ — **settled 2026-08-19** (P0 §10.1). Operator 1 = divide,
+   2 = multiply, 3 = add, **opposite for volume**; flag 1 = prices only,
+   3 = prices and volumes. Verified against AAPL's five splits, and it
+   reproduces P0 §3.1's measured 499.23 / 4 = 124.81 exactly. P4 must carry the
+   price/volume distinction into factor application: the same operator code
+   means divide for a price and multiply for a volume.
 2. **Is `instrumentListRequest` metered?** Not public, not established by P0.
    Counted conservatively until observed.
-3. **`SIMP_SEC_STATUS` value domain.** Its codes were not enumerated; needed
-   before status drives any behaviour beyond display.
+3. ~~**`SIMP_SEC_STATUS` value domain**~~ — **closed 2026-08-19 by removing the
+   need for it** (P0 §10.2). It is a realtime trading-session status, not a
+   lifecycle status, so it is dropped from the identity block entirely.
+   `INACTIVE_DATE` answers the lifecycle question, dated and permanently.
 4. ~~**Licensing**~~ — **settled 2026-08-19**: the user holds a BLPAPI licence for
    programmatic Desktop API use, 500,000 hits/day. The "call only when needed"
    constraint is unchanged; only the margin is wider than assumed.
