@@ -2148,6 +2148,25 @@ def build_request(blpapi, service, spec):
     return r
 ```
 
+**Also route the request to the right service.** `run_fetch` resolves ONE
+service object (`//blp/refdata`) before its request loop and reuses it for every
+request, so an `instrument_list` created against it fails at the blpapi layer on
+first live use — and no replay test catches it, because replay never calls
+`run_fetch`. Pick the service per `spec["kind"]`:
+
+```python
+        svc = (session.getService(INSTRUMENTS_SERVICE)
+               if spec.get("kind") == "instrument_list"
+               else session.getService(REFDATA_SERVICE))
+```
+
+**And widen the empty-response fault check.** `finish()` treats "no observations
+and no problems" as a session fault. A clean `bulk_reference` or
+`instrument_list` response legitimately has neither, so it must also consider
+`bulk_rows` and `list_results` before declaring a fault. For `history` and
+`reference` those two are structurally always empty, so the existing behaviour is
+unchanged.
+
 In `parse_capture`, route the new kinds and collect their output. Change its
 signature and return value to carry the two new sections:
 
