@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type Asset, type AssetClass, type EntityKind, type EstimateOut, type FieldDef, type View } from "./api";
+  import { api, type Asset, type AssetClass, type BookEntry, type EntityKind, type EstimateOut, type FieldDef, type View } from "./api";
   import DeleteDialog from "./DeleteDialog.svelte";
 
   let views = $state<View[]>([]);
@@ -37,7 +37,12 @@
   let selectedAssetIds = $state<number[]>([]);
   let selectedFieldIds = $state<number[]>([]);
 
-  let newField = $state({ asset_class_id: 0, mnemonic: "", label: "", value_kind: "numeric" });
+  let newField = $state({
+    asset_class_id: 0, mnemonic: "", label: "", value_kind: "numeric",
+    // Spec §4.9's configurable field-mapping layer. bbg_ftype records P0 §5's
+    // BulkFormat marker (table-valued vs. scalar); all three are optional.
+    bbg_ftype: "", bbg_datatype: "", entitlement_note: "",
+  });
 
   async function reload() {
     try {
@@ -63,8 +68,9 @@
   async function selectView(id: number) {
     try {
       selectedViewId = id;
-      const [va, vf] = await Promise.all([api.getViewAssets(id), api.getViewFields(id)]);
-      selectedAssetIds = va.map((a) => a.id);
+      const [va, vf]: [BookEntry[], FieldDef[]] =
+        await Promise.all([api.getViewInstruments(id), api.getViewFields(id)]);
+      selectedAssetIds = va.map((a) => a.instrument_id);
       selectedFieldIds = vf.map((f) => f.id);
     } catch (e) { error = String(e); }
   }
@@ -83,7 +89,7 @@
   async function saveAssignments() {
     if (selectedViewId === null) return;
     try {
-      await api.setViewAssets(selectedViewId, selectedAssetIds);
+      await api.setViewInstruments(selectedViewId, selectedAssetIds);
       await api.setViewFields(selectedViewId, selectedFieldIds);
       await reload();
     } catch (e) { error = String(e); }
@@ -91,8 +97,12 @@
 
   async function addField() {
     try {
-      await api.createField(newField.asset_class_id, newField.mnemonic, newField.label, newField.value_kind);
+      await api.createField(newField.asset_class_id, newField.mnemonic, newField.label,
+        newField.value_kind,
+        newField.bbg_ftype || null, newField.bbg_datatype || null,
+        newField.entitlement_note || null);
       newField.mnemonic = ""; newField.label = "";
+      newField.bbg_ftype = ""; newField.bbg_datatype = ""; newField.entitlement_note = "";
       await reload();
     } catch (e) { error = String(e); }
   }
@@ -199,6 +209,9 @@
       <option value="text">text</option>
       <option value="date">date</option>
     </select>
+    <input bind:value={newField.bbg_ftype} placeholder="BulkFormat marker (optional)" />
+    <input bind:value={newField.bbg_datatype} placeholder="Bloomberg datatype (optional)" />
+    <input bind:value={newField.entitlement_note} placeholder="Entitlement note (optional)" />
     <button type="submit" disabled={!classes.length}>Add field</button>
   </form>
 </section>

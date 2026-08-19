@@ -97,7 +97,7 @@ async fn load_view(pool: &PgPool, view_id: i64) -> AppResult<Loaded> {
         .bind(view_id)
         .fetch_one(pool)
         .await?;
-    let assets_db = views::view_assets(pool, view_id).await?;
+    let members = views::view_instruments(pool, view_id).await?;
     let fields_db = views::view_fields(pool, view_id).await?;
     let classes = crate::registry::list_asset_classes(pool).await?;
     let class_name = |id: i64| {
@@ -107,18 +107,28 @@ async fn load_view(pool: &PgPool, view_id: i64) -> AppResult<Loaded> {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("Class{id}"))
     };
+    let mut assets = Vec::with_capacity(members.len());
+    for m in &members {
+        // The security string is derived from the alias valid today, never read
+        // off the book entry -- one instrument wears several over its life.
+        let Some(security) = m.security.clone() else {
+            // No security valid today: delisted, or never resolved. Skipping is
+            // right, and saying so is what keeps it from looking like a holiday.
+            eprintln!("view {view_id}: instrument {} has no security string today, skipping",
+                      m.instrument_id);
+            continue;
+        };
+        assets.push(FetchAsset {
+            instrument_id: m.instrument_id,
+            asset_class_id: m.asset_class_id,
+            class_name: class_name(m.asset_class_id),
+            label: m.label.clone(),
+            bdp_security: security,
+        });
+    }
     Ok(Loaded {
         view_name: view.name,
-        assets: assets_db
-            .iter()
-            .map(|a| FetchAsset {
-                asset_id: a.id,
-                asset_class_id: a.asset_class_id,
-                class_name: class_name(a.asset_class_id),
-                label: a.label.clone(),
-                bdp_security: a.bdp_security.clone(),
-            })
-            .collect(),
+        assets,
         fields: fields_db
             .iter()
             .map(|f| FetchField {
@@ -340,7 +350,7 @@ mod tests {
     async fn mock_fetcher_satisfies_the_trait() {
         let d = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
         let m = MockFetcher {
-            cells: vec![ObsCell { asset_id: 1, field_id: 2, obs_date: d,
+            cells: vec![ObsCell { instrument_id: 1, field_id: 2, obs_date: d,
                                   value: CellValue::Num(1.5) }],
             problems: vec![],
             fail: None,

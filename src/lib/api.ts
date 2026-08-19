@@ -12,14 +12,18 @@ export interface NewAsset {
 }
 export interface FieldDef {
   id: number; asset_class_id: number; mnemonic: string;
-  label: string; value_kind: string; active: boolean;
+  label: string; value_kind: string;
+  bbg_ftype: string | null; bbg_datatype: string | null; entitlement_note: string;
+  active: boolean;
 }
 export interface View { id: number; name: string; description: string; active: boolean; }
 export interface EstimateOut {
   estimated: number; today_total: number; level: "Ok" | "SoftWarn" | "HardConfirm";
 }
 export type RunOutcome =
-  | { Completed: { run_id: number; summary: { upserted: number; issues: number } } }
+  | { Completed: { run_id: number;
+                    summary: { inserted: number; superseded: number;
+                               unchanged: number; issues: number } } }
   | { NeedsConfirmation: { estimated: number; today_total: number } };
 export interface RunRow {
   id: number; view_id: number; kind: string; trigger_kind: string; status: string;
@@ -27,7 +31,7 @@ export interface RunRow {
   estimated_hits: number; error_summary: string | null;
 }
 export interface IssueRow {
-  id: number; run_id: number; asset_id: number | null; field_id: number | null;
+  id: number; run_id: number; instrument_id: number | null; field_id: number | null;
   obs_date: string | null; severity: string; code: string; detail: string;
 }
 export interface ScheduleRow {
@@ -44,6 +48,14 @@ export interface DeletionImpact {
   can_retire: boolean; can_purge: boolean; blocked_reason: string | null;
 }
 export interface AppConfig { data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string; }
+
+export interface BookEntry {
+  instrument_id: number; asset_class_id: number; label: string; active: boolean;
+  note: string;
+  /// Derived from today's alias; null when the instrument has no security
+  /// string valid today (a delisted instrument, for instance).
+  security: string | null;
+}
 
 export interface AssetRef { id: number; label: string; security: string; }
 export interface AddRow {
@@ -82,16 +94,20 @@ export const api = {
   setAssetActive: (assetId: number, active: boolean) =>
     invoke<void>("set_asset_active", { assetId, active }),
   listFields: () => invoke<FieldDef[]>("list_fields"),
-  createField: (assetClassId: number, mnemonic: string, label: string, valueKind: string) =>
-    invoke<FieldDef>("create_field", { assetClassId, mnemonic, label, valueKind }),
+  createField: (assetClassId: number, mnemonic: string, label: string, valueKind: string,
+                bbgFtype: string | null = null, bbgDatatype: string | null = null,
+                entitlementNote: string | null = null) =>
+    invoke<FieldDef>("create_field",
+      { assetClassId, mnemonic, label, valueKind, bbgFtype, bbgDatatype, entitlementNote }),
   listViews: () => invoke<View[]>("list_views"),
   createView: (name: string, description: string) =>
     invoke<View>("create_view", { name, description }),
-  setViewAssets: (viewId: number, assetIds: number[]) =>
-    invoke<void>("set_view_assets", { viewId, assetIds }),
+  setViewInstruments: (viewId: number, instrumentIds: number[]) =>
+    invoke<void>("set_view_instruments", { viewId, instrumentIds }),
   setViewFields: (viewId: number, fieldIds: number[]) =>
     invoke<void>("set_view_fields", { viewId, fieldIds }),
-  getViewAssets: (viewId: number) => invoke<Asset[]>("get_view_assets", { viewId }),
+  getViewInstruments: (viewId: number) =>
+    invoke<BookEntry[]>("get_view_instruments", { viewId }),
   getViewFields: (viewId: number) => invoke<FieldDef[]>("get_view_fields", { viewId }),
   estimateView: (viewId: number) => invoke<EstimateOut>("estimate_view", { viewId }),
   runEodNow: (viewId: number, confirmed: boolean) =>

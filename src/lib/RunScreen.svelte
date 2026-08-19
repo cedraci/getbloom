@@ -162,12 +162,12 @@
   {#if selectedRun}
     <h2>Issues — run #{selectedRun.id}</h2>
     <table>
-      <thead><tr><th>Severity</th><th>Code</th><th>Detail</th><th>Asset</th><th>Field</th><th>Obs. date</th></tr></thead>
+      <thead><tr><th>Severity</th><th>Code</th><th>Detail</th><th>Instrument</th><th>Field</th><th>Obs. date</th></tr></thead>
       <tbody>
         {#each issues as i}
           <tr>
             <td>{i.severity}</td><td>{i.code}</td><td>{i.detail}</td>
-            <td>{i.asset_id ?? ""}</td><td>{i.field_id ?? ""}</td><td>{i.obs_date ?? ""}</td>
+            <td>{i.instrument_id ?? ""}</td><td>{i.field_id ?? ""}</td><td>{i.obs_date ?? ""}</td>
           </tr>
         {/each}
       </tbody>

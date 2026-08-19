@@ -153,8 +153,8 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
         let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", obs_date, false).await;
         let msg = match &result {
             Ok(RunOutcome::Completed { run_id, summary }) =>
-                format!("ok run={run_id} upserted={} issues={}",
-                        summary.upserted, summary.issues),
+                format!("ok run={run_id} inserted={} superseded={} issues={}",
+                        summary.inserted, summary.superseded, summary.issues),
             Ok(RunOutcome::NeedsConfirmation { estimated, .. }) =>
                 format!("blocked: needs confirmation for {estimated} estimated hits"),
             Err(e) => format!("failed: {e}"),
@@ -207,8 +207,9 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
     let end = today - Duration::days(1);
     let rows: Vec<(NaiveDate,)> = sqlx::query_as(
         "SELECT DISTINCT o.obs_date FROM observation o
-         JOIN view_asset va ON va.asset_id = o.asset_id
-         WHERE va.view_id = $1 AND o.obs_date BETWEEN $2 AND $3")
+         JOIN view_instrument vi ON vi.instrument_id = o.instrument_id
+         WHERE vi.view_id = $1 AND o.obs_date BETWEEN $2 AND $3
+           AND o.system_to = 'infinity'")
         .bind(view_id).bind(start).bind(end).fetch_all(pool).await?;
     let present: HashSet<NaiveDate> = rows.into_iter().map(|r| r.0).collect();
     Ok(group_ranges(&missing_weekdays(&present, start, end),

@@ -79,7 +79,7 @@ mod tests {
 
     fn fixture() -> (Vec<FetchAsset>, Vec<FetchField>) {
         let mk_a = |id, class| FetchAsset {
-            asset_id: id, asset_class_id: class, class_name: format!("C{class}"),
+            instrument_id: id, asset_class_id: class, class_name: format!("C{class}"),
             label: format!("A{id}"), bdp_security: format!("S{id} Equity") };
         let mk_f = |id, class, m: &str| FetchField {
             field_id: id, asset_class_id: class,

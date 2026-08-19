@@ -36,7 +36,7 @@ pub struct FieldSpec {
 
 #[derive(Debug, Clone)]
 pub struct ObsCell {
-    pub asset_id: i64,
+    pub instrument_id: i64,
     pub field_id: i64,
     pub obs_date: NaiveDate,
     pub value: CellValue,
@@ -44,7 +44,7 @@ pub struct ObsCell {
 
 #[derive(Debug, Clone)]
 pub struct CellProblem {
-    pub asset_id: Option<i64>,
+    pub instrument_id: Option<i64>,
     pub field_id: Option<i64>,
     pub obs_date: Option<NaiveDate>,
     pub code: String,
@@ -61,7 +61,7 @@ pub struct FetchOutcome {
 
 #[derive(Debug, Clone)]
 pub struct FetchAsset {
-    pub asset_id: i64,
+    pub instrument_id: i64,
     pub asset_class_id: i64,
     pub class_name: String,
     pub label: String,
@@ -310,7 +310,7 @@ fn problem(
     detail: String,
 ) -> CellProblem {
     CellProblem {
-        asset_id: asset.map(|a| a.asset_id),
+        instrument_id: asset.map(|a| a.instrument_id),
         field_id: field.map(|f| f.field_id),
         obs_date: date,
         code: code.to_string(),
@@ -347,7 +347,7 @@ pub fn map_response(req: &FetchRequest, resp: &SidecarResponse) -> FetchOutcome 
         };
         match coerce(&field.value_kind, o.num, o.text.as_deref()) {
             Ok(value) => out.cells.push(ObsCell {
-                asset_id: asset.asset_id,
+                instrument_id: asset.instrument_id,
                 field_id: field.field_id,
                 obs_date: date,
                 value,
@@ -368,7 +368,7 @@ pub fn map_response(req: &FetchRequest, resp: &SidecarResponse) -> FetchOutcome 
             .as_deref()
             .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
         out.problems.push(CellProblem {
-            asset_id: asset.map(|a| a.asset_id),
+            instrument_id: asset.map(|a| a.instrument_id),
             field_id: field.map(|f| f.field_id),
             obs_date: date,
             code: p.code.clone(),
@@ -392,12 +392,12 @@ mod tests {
         FetchRequest {
             run_id: 7,
             assets: vec![
-                FetchAsset { asset_id: 1, asset_class_id: 10, class_name: "Equity".into(),
+                FetchAsset { instrument_id: 1, asset_class_id: 10, class_name: "Equity".into(),
                              label: "Apple".into(), bdp_security: "AAPL US Equity".into() },
-                FetchAsset { asset_id: 2, asset_class_id: 10, class_name: "Equity".into(),
+                FetchAsset { instrument_id: 2, asset_class_id: 10, class_name: "Equity".into(),
                              label: "LVMH".into(),
                              bdp_security: "/isin/FR0000121014 Equity".into() },
-                FetchAsset { asset_id: 3, asset_class_id: 20, class_name: "Index".into(),
+                FetchAsset { instrument_id: 3, asset_class_id: 20, class_name: "Index".into(),
                              label: "EuroStoxx".into(), bdp_security: "SX5E Index".into() },
             ],
             fields: vec![
@@ -457,7 +457,7 @@ mod tests {
         let mut req = sample(day, day);
         req.assets = (0..250)
             .map(|i| FetchAsset {
-                asset_id: i, asset_class_id: 20, class_name: "Index".into(),
+                instrument_id: i, asset_class_id: 20, class_name: "Index".into(),
                 label: format!("A{i}"), bdp_security: format!("S{i} Index"),
             })
             .collect();
@@ -509,13 +509,13 @@ mod tests {
         let out = map_response(&req, &r);
         assert_eq!(out.problems.len(), 0);
         assert_eq!(out.cells.len(), 3);
-        assert_eq!(out.cells[0].asset_id, 1);
+        assert_eq!(out.cells[0].instrument_id, 1);
         assert_eq!(out.cells[0].field_id, 100);
         assert_eq!(out.cells[0].value, CellValue::Num(305.59));
         assert_eq!(out.cells[1].field_id, 102);
         assert_eq!(out.cells[1].value, CellValue::Text("APPLE INC".into()));
         // Same mnemonic, different class -> different field_id.
-        assert_eq!(out.cells[2].asset_id, 3);
+        assert_eq!(out.cells[2].instrument_id, 3);
         assert_eq!(out.cells[2].field_id, 200);
     }
 
@@ -529,7 +529,7 @@ mod tests {
         let out = map_response(&req, &r);
         assert_eq!(out.cells.len(), 0);
         assert_eq!(out.problems.len(), 1);
-        assert_eq!(out.problems[0].asset_id, Some(1));
+        assert_eq!(out.problems[0].instrument_id, Some(1));
         assert_eq!(out.problems[0].field_id, Some(100));
         assert_eq!(out.problems[0].obs_date, Some(day));
         assert_eq!(out.problems[0].code, "no_data");
@@ -558,7 +558,7 @@ mod tests {
         let out = map_response(&req, &r);
         assert_eq!(out.cells.len(), 0);
         assert_eq!(out.problems[0].code, "type_mismatch");
-        assert_eq!(out.problems[0].asset_id, Some(1));
+        assert_eq!(out.problems[0].instrument_id, Some(1));
         assert_eq!(out.problems[0].field_id, Some(100));
     }
 

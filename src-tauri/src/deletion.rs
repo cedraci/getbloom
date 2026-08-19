@@ -86,20 +86,27 @@ pub async fn describe_deletion(
     };
 
     match kind {
+        // "Asset" here means a book entry: identity (instrument, aliases,
+        // observations) lives elsewhere and a book-entry deletion never
+        // touches it -- see purge_book_entry_tx.
         EntityKind::Asset => {
-            impact.label = label_of(pool, "SELECT label FROM asset WHERE id = $1", id).await?;
+            impact.label =
+                label_of(pool, "SELECT label FROM book_entry WHERE instrument_id = $1", id)
+                    .await?;
             let dates: (i64, Option<chrono::NaiveDate>, Option<chrono::NaiveDate>) =
                 sqlx::query_as(
                     "SELECT COUNT(*), MIN(obs_date), MAX(obs_date)
-                     FROM observation WHERE asset_id = $1")
+                     FROM observation WHERE instrument_id = $1")
                     .bind(id).fetch_one(pool).await?;
             impact.observations = dates.0;
             impact.first_obs = dates.1;
             impact.last_obs = dates.2;
-            impact.views =
-                scalar(pool, "SELECT COUNT(*) FROM view_asset WHERE asset_id = $1", id).await?;
-            impact.issues =
-                scalar(pool, "SELECT COUNT(*) FROM ingest_issue WHERE asset_id = $1", id).await?;
+            impact.views = scalar(
+                pool, "SELECT COUNT(*) FROM view_instrument WHERE instrument_id = $1", id)
+                .await?;
+            impact.issues = scalar(
+                pool, "SELECT COUNT(*) FROM ingest_issue WHERE instrument_id = $1", id)
+                .await?;
             impact.can_retire = true;
             impact.can_purge = true;
         }
@@ -134,8 +141,9 @@ pub async fn describe_deletion(
         }
         EntityKind::AssetClass => {
             impact.label = label_of(pool, "SELECT name FROM asset_class WHERE id = $1", id).await?;
-            let assets =
-                scalar(pool, "SELECT COUNT(*) FROM asset WHERE asset_class_id = $1", id).await?;
+            let assets = scalar(
+                pool, "SELECT COUNT(*) FROM book_entry WHERE asset_class_id = $1", id)
+                .await?;
             let flds =
                 scalar(pool, "SELECT COUNT(*) FROM field_def WHERE asset_class_id = $1", id).await?;
             impact.children = assets + flds;
@@ -172,7 +180,8 @@ pub async fn delete_schedule(pool: &PgPool, id: i64) -> AppResult<()> {
 /// points at it -- there is no meaningful "retired class", because a retired
 /// class would still have to answer for its assets.
 pub async fn delete_asset_class(pool: &PgPool, id: i64) -> AppResult<()> {
-    let assets = scalar(pool, "SELECT COUNT(*) FROM asset WHERE asset_class_id = $1", id).await?;
+    let assets =
+        scalar(pool, "SELECT COUNT(*) FROM book_entry WHERE asset_class_id = $1", id).await?;
     let flds = scalar(pool, "SELECT COUNT(*) FROM field_def WHERE asset_class_id = $1", id).await?;
     if assets > 0 || flds > 0 {
         return Err(AppError::DeleteBlocked {
@@ -188,23 +197,30 @@ pub async fn delete_asset_class(pool: &PgPool, id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// Purge order matters: children before parents, because the foreign keys are
-/// deliberately restrictive. `ingest_issue` first (it names both an asset and a
-/// run), then `observation`, then the membership row, then the asset itself.
+/// Purge a book entry -- the user's list, not the company's identity.
+///
+/// This deletes ONLY `view_instrument` (the membership rows) and `book_entry`
+/// itself. It must never touch `instrument`, `instrument_alias`,
+/// `instrument_attr` or `observation`: removing something from the book is
+/// not the same claim as asserting the company never existed, and the
+/// observation history recorded against `instrument_id` belongs to the
+/// instrument, not to the book entry that happened to be watching it.
+///
+/// Kept named `purge_asset_tx` (not `purge_book_entry_tx`) because
+/// `bulk/mod.rs` imports it by this name; that module still targets the
+/// removed `asset` table and is retargeted by a later task, out of scope
+/// here (see task 12 correction G) -- renaming this helper too would only
+/// break that import for no benefit.
 pub async fn purge_asset_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: i64,
 ) -> AppResult<()> {
-    sqlx::query("DELETE FROM ingest_issue WHERE asset_id = $1")
+    sqlx::query("DELETE FROM view_instrument WHERE instrument_id = $1")
         .bind(id).execute(&mut **tx).await?;
-    sqlx::query("DELETE FROM observation WHERE asset_id = $1")
-        .bind(id).execute(&mut **tx).await?;
-    sqlx::query("DELETE FROM view_asset WHERE asset_id = $1")
-        .bind(id).execute(&mut **tx).await?;
-    let n = sqlx::query("DELETE FROM asset WHERE id = $1")
+    let n = sqlx::query("DELETE FROM book_entry WHERE instrument_id = $1")
         .bind(id).execute(&mut **tx).await?.rows_affected();
     if n == 0 {
-        return Err(AppError::Validation(format!("no such asset: id {id}")));
+        return Err(AppError::Validation(format!("no such book entry: id {id}")));
     }
     Ok(())
 }
@@ -227,13 +243,13 @@ pub async fn purge_field_tx(
     Ok(())
 }
 
-pub async fn delete_asset(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult<()> {
+pub async fn delete_book_entry(pool: &PgPool, id: i64, mode: DeleteMode) -> AppResult<()> {
     match mode {
         DeleteMode::Retire => {
-            let n = sqlx::query("UPDATE asset SET active = false WHERE id = $1")
+            let n = sqlx::query("UPDATE book_entry SET active = false WHERE instrument_id = $1")
                 .bind(id).execute(pool).await?.rows_affected();
             if n == 0 {
-                return Err(AppError::Validation(format!("no such asset: id {id}")));
+                return Err(AppError::Validation(format!("no such book entry: id {id}")));
             }
             Ok(())
         }

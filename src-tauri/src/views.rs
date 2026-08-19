@@ -1,27 +1,8 @@
+use crate::book::BookEntry;
 use crate::error::AppResult;
 use crate::fields::FieldDef;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-
-/// Stand-in for the old `registry::Asset`, which Task 9 removed along with the
-/// `asset` table it read from. `view_assets` below still queries `asset` /
-/// `view_asset`, neither of which exists in the current schema (both were
-/// already replaced by `instrument` / `view_instrument` before this task) --
-/// this function was already broken at runtime. This struct exists only so
-/// the crate keeps compiling; Task 12 retargets `view_assets` onto
-/// `book`/`instrument` for real. Do not build on this type.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct Asset {
-    pub id: i64,
-    pub asset_class_id: i64,
-    pub label: String,
-    pub id_kind: String,
-    pub ticker: Option<String>,
-    pub isin: Option<String>,
-    pub yellow_key: String,
-    pub bdp_security: String,
-    pub active: bool,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct View {
@@ -47,20 +28,20 @@ pub async fn list_views(pool: &PgPool) -> AppResult<Vec<View>> {
         .await?)
 }
 
-pub async fn set_view_assets(
+pub async fn set_view_instruments(
     pool: &PgPool,
     view_id: i64,
-    asset_ids: &[i64],
+    instrument_ids: &[i64],
 ) -> AppResult<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM view_asset WHERE view_id = $1")
+    sqlx::query("DELETE FROM view_instrument WHERE view_id = $1")
         .bind(view_id)
         .execute(&mut *tx)
         .await?;
-    for aid in asset_ids {
-        sqlx::query("INSERT INTO view_asset (view_id, asset_id) VALUES ($1,$2)")
+    for iid in instrument_ids {
+        sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
             .bind(view_id)
-            .bind(aid)
+            .bind(iid)
             .execute(&mut *tx)
             .await?;
     }
@@ -89,15 +70,32 @@ pub async fn set_view_fields(
     Ok(())
 }
 
-pub async fn view_assets(pool: &PgPool, view_id: i64) -> AppResult<Vec<Asset>> {
-    Ok(sqlx::query_as::<_, Asset>(
-        "SELECT a.* FROM asset a
-         JOIN view_asset va ON va.asset_id = a.id
-         WHERE va.view_id = $1 AND a.active ORDER BY a.label",
-    )
-    .bind(view_id)
-    .fetch_all(pool)
-    .await?)
+/// The active, resolved members of a view.
+///
+/// An instrument with a pending `resolution_review` is excluded (spec §5). The
+/// alternative -- fetching for an identifier nobody has confirmed -- produces a
+/// time series that looks complete and is attached to the wrong company.
+///
+/// Under the current design this exclusion is vacuous: `book::BookEntry` has no
+/// `review_pending` flag because an ambiguous resolution writes no book entry
+/// at all (see 0a19e48) -- that absence is the real enforcement. The
+/// `NOT EXISTS` guard below stays anyway, written correctly against
+/// `resolution_review` joined to `resolution_decision.chosen_instrument_id`, in
+/// case a later phase opens a review against an instrument that is already
+/// bound and already has a book entry.
+pub async fn view_instruments(pool: &PgPool, view_id: i64) -> AppResult<Vec<BookEntry>> {
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT vi.instrument_id FROM view_instrument vi
+           JOIN book_entry b ON b.instrument_id = vi.instrument_id
+          WHERE vi.view_id = $1 AND b.active
+            AND NOT EXISTS (
+              SELECT 1 FROM resolution_review r
+                JOIN resolution_decision d ON d.id = r.decision_id
+               WHERE r.status = 'pending' AND d.chosen_instrument_id = vi.instrument_id)
+          ORDER BY b.label")
+        .bind(view_id).fetch_all(pool).await?;
+    let all = crate::book::list(pool).await?;
+    Ok(all.into_iter().filter(|b| ids.contains(&b.instrument_id)).collect())
 }
 
 pub async fn view_fields(pool: &PgPool, view_id: i64) -> AppResult<Vec<FieldDef>> {
@@ -112,12 +110,12 @@ pub async fn view_fields(pool: &PgPool, view_id: i64) -> AppResult<Vec<FieldDef>
     if !explicit.is_empty() {
         return Ok(explicit);
     }
-    // Spec default: all active fields of the classes present in the view's assets.
+    // Spec default: all active fields of the classes present in the view's instruments.
     Ok(sqlx::query_as::<_, FieldDef>(
         "SELECT DISTINCT f.* FROM field_def f
-         JOIN asset a ON a.asset_class_id = f.asset_class_id
-         JOIN view_asset va ON va.asset_id = a.id
-         WHERE va.view_id = $1 AND f.active AND a.active
+         JOIN book_entry b ON b.asset_class_id = f.asset_class_id
+         JOIN view_instrument vi ON vi.instrument_id = b.instrument_id
+         WHERE vi.view_id = $1 AND f.active AND b.active
          ORDER BY f.asset_class_id, f.mnemonic",
     )
     .bind(view_id)

@@ -449,6 +449,16 @@ def build_request(blpapi, service, spec):
         # Holidays must come back as *absent* rows, not as filled-forward
         # values -- that is what makes the `no_data` issue honest.
         r.set("nonTradingDayFillOption", "ACTIVE_DAYS_ONLY")
+        # P0 3.1: with none of these set, the values follow the Terminal's
+        # DPDF<GO> setting -- a per-user preference that is not captured with the
+        # data and can change between runs. AAPL closed 2020-08-28 at 499.23 with
+        # all four false, 124.81 split-adjusted and 120.96 fully adjusted; all
+        # three are "PX_LAST". Only the unadjusted number is a fact about that
+        # day, so only that one is stored. Adjusted series are derived in P4.
+        r.set("adjustmentNormal", False)
+        r.set("adjustmentAbnormal", False)
+        r.set("adjustmentSplit", False)
+        r.set("adjustmentFollowDPDF", False)
     elif kind in ("reference", "bulk_reference"):
         r = service.createRequest("ReferenceDataRequest")
     elif kind == "instrument_list":

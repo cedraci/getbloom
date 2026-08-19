@@ -137,10 +137,15 @@ pub async fn list_fields(state: State<'_, AppState>) -> Result<Vec<fields::Field
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_field(state: State<'_, AppState>, asset_class_id: i64,
-                          mnemonic: String, label: String, value_kind: String)
+                          mnemonic: String, label: String, value_kind: String,
+                          bbg_ftype: Option<String>, bbg_datatype: Option<String>,
+                          entitlement_note: Option<String>)
     -> Result<fields::FieldDef, AppError> {
-    fields::create_field(&state.pool, asset_class_id, &mnemonic, &label, &value_kind).await
+    fields::create_field(&state.pool, asset_class_id, &mnemonic, &label, &value_kind,
+                         bbg_ftype.as_deref(), bbg_datatype.as_deref(),
+                         entitlement_note.as_deref().unwrap_or("")).await
 }
 
 // ---------------------------------------------------------------------------
@@ -159,9 +164,10 @@ pub async fn create_view(state: State<'_, AppState>, name: String, description: 
 }
 
 #[tauri::command]
-pub async fn set_view_assets(state: State<'_, AppState>, view_id: i64, asset_ids: Vec<i64>)
+pub async fn set_view_instruments(state: State<'_, AppState>, view_id: i64,
+                                  instrument_ids: Vec<i64>)
     -> Result<(), AppError> {
-    views::set_view_assets(&state.pool, view_id, &asset_ids).await
+    views::set_view_instruments(&state.pool, view_id, &instrument_ids).await
 }
 
 #[tauri::command]
@@ -171,9 +177,9 @@ pub async fn set_view_fields(state: State<'_, AppState>, view_id: i64, field_ids
 }
 
 #[tauri::command]
-pub async fn get_view_assets(state: State<'_, AppState>, view_id: i64)
-    -> Result<Vec<views::Asset>, AppError> {
-    views::view_assets(&state.pool, view_id).await
+pub async fn get_view_instruments(state: State<'_, AppState>, view_id: i64)
+    -> Result<Vec<book::BookEntry>, AppError> {
+    views::view_instruments(&state.pool, view_id).await
 }
 
 #[tauri::command]
@@ -186,12 +192,17 @@ pub async fn get_view_fields(state: State<'_, AppState>, view_id: i64)
 pub async fn estimate_view(state: State<'_, AppState>, view_id: i64)
     -> Result<EstimateOut, AppError> {
     let cfg = pipeline_cfg(&state).await;
-    let assets = views::view_assets(&state.pool, view_id).await?;
+    let members = views::view_instruments(&state.pool, view_id).await?;
     let fields_db = views::view_fields(&state.pool, view_id).await?;
-    let gen: Vec<_> = assets.iter().map(|a| crate::fetch::FetchAsset {
-        asset_id: a.id, asset_class_id: a.asset_class_id,
-        class_name: String::new(), label: a.label.clone(),
-        bdp_security: a.bdp_security.clone() }).collect();
+    // Only members with a security string valid today are actually fetchable;
+    // this mirrors orchestrator::load_view so the estimate matches what a run
+    // would really send.
+    let gen: Vec<_> = members.iter().filter_map(|m| {
+        m.security.clone().map(|security| crate::fetch::FetchAsset {
+            instrument_id: m.instrument_id, asset_class_id: m.asset_class_id,
+            class_name: String::new(), label: m.label.clone(),
+            bdp_security: security })
+    }).collect();
     let specs: Vec<_> = fields_db.iter().map(|f| crate::fetch::FetchField {
         field_id: f.id, asset_class_id: f.asset_class_id,
         mnemonic: f.mnemonic.clone(), value_kind: f.value_kind.clone() }).collect();
@@ -245,7 +256,7 @@ pub async fn list_runs(state: State<'_, AppState>, limit: i64)
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct IssueRow {
-    pub id: i64, pub run_id: i64, pub asset_id: Option<i64>, pub field_id: Option<i64>,
+    pub id: i64, pub run_id: i64, pub instrument_id: Option<i64>, pub field_id: Option<i64>,
     pub obs_date: Option<chrono::NaiveDate>, pub severity: String,
     pub code: String, pub detail: String,
 }
@@ -254,7 +265,7 @@ pub struct IssueRow {
 pub async fn list_issues(state: State<'_, AppState>, run_id: i64)
     -> Result<Vec<IssueRow>, AppError> {
     Ok(sqlx::query_as::<_, IssueRow>(
-        "SELECT id, run_id, asset_id, field_id, obs_date, severity, code, detail
+        "SELECT id, run_id, instrument_id, field_id, obs_date, severity, code, detail
          FROM ingest_issue WHERE run_id = $1 ORDER BY id")
         .bind(run_id).fetch_all(&state.pool).await?)
 }
@@ -346,7 +357,7 @@ pub async fn describe_deletion(state: State<'_, AppState>,
 #[tauri::command]
 pub async fn delete_asset(state: State<'_, AppState>, id: i64, mode: deletion::DeleteMode)
     -> Result<(), AppError> {
-    deletion::delete_asset(&state.pool, id, mode).await
+    deletion::delete_book_entry(&state.pool, id, mode).await
 }
 
 #[tauri::command]
