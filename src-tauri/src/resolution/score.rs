@@ -51,6 +51,10 @@ fn compare(name: &str, hint: Option<&String>, value: Option<&String>)
 {
     match (hint, value) {
         (None, _) => (0, false, None),
+        // A hint the user typed into and then cleared arrives as Some("") from a
+        // UI text field, not None. Treating it as a real hint would disqualify
+        // every candidate that says anything at all -- so a blank hint is no hint.
+        (Some(h), _) if h.trim().is_empty() => (0, false, None),
         // The candidate is silent: absence of evidence is not evidence.
         (Some(_), None) => (0, false, Some(format!("{name}: candidate is silent"))),
         (Some(h), Some(v)) if h.trim().eq_ignore_ascii_case(v.trim()) => {
@@ -191,5 +195,19 @@ mod tests {
             &hints(None, None));
         assert_eq!(scored.len(), 1);
         assert_eq!(scored[0].candidate.security, "AAPL US Equity");
+    }
+
+    /// A UI text field the user typed into and then cleared yields Some(""),
+    /// not None. Before this was handled, clearing a box disqualified every
+    /// candidate and the search went silently empty.
+    #[test]
+    fn a_blank_hint_is_no_hint() {
+        let blank = Hints { exchange: Some("".into()), country: None,
+                            currency: Some("   ".into()), asset_class: None };
+        let scored = score_all(vec![cand("AAPL US Equity", "US", "USD")], &blank);
+        assert!(!scored[0].disqualified, "a cleared field must not disqualify anything");
+        assert_eq!(scored[0].score, 0, "and must not score either");
+        assert!(scored[0].reasons.is_empty(), "nothing was asked, so nothing to explain");
+        assert!(matches!(verdict(scored), Verdict::Unique(_)));
     }
 }
