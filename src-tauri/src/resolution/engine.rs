@@ -118,13 +118,128 @@ fn validity_period(listing_date: Option<NaiveDate>, inactive_date: Option<NaiveD
     }
 }
 
+/// The attributes an identity block carries, and the `instrument_attr.attr`
+/// each belongs under. Extracted so creation and reconciliation cannot drift:
+/// an attribute added here is refreshed on every later resolution for free.
+///
+/// No "status": P0 §10.2 -- SIMP_SEC_STATUS is a trading-session state, not a
+/// lifecycle one. INACTIVE_DATE closes the validity periods instead -- for
+/// aliases via their `valid_to`, and for attributes via `close_attrs_at` --
+/// which is the durable way to say an instrument has ended.
+fn attr_pairs(block: &IdentityBlock) -> [(&'static str, &Option<String>); 6] {
+    [
+        ("name", &block.name),
+        ("exchange", &block.exch_code),
+        ("currency", &block.currency),
+        ("country", &block.country),
+        ("instrument_type", &block.security_typ2),
+        ("asset_class", &block.market_sector),
+    ]
+}
+
+/// Write every attribute the block carries for the period starting at `from`,
+/// then cap everything at INACTIVE_DATE if the instrument has died.
+///
+/// `set_attr` is already correction-aware: a row for this exact `valid_from`
+/// carrying a different value is superseded and re-inserted; an identical
+/// value is a no-op. That is precisely what "refresh" means, so creation and
+/// reconciliation share this function unchanged rather than each writing their
+/// own loop that can drift from the other.
+async fn write_attrs_tx(tx: &mut store::Tx<'_>, instrument_id: i64,
+                        block: &IdentityBlock, from: NaiveDate, decision_id: i64)
+    -> AppResult<()>
+{
+    for (attr, value) in attr_pairs(block) {
+        if let Some(v) = value {
+            store::set_attr(tx, instrument_id, attr, v, from,
+                            "bloomberg", Some(decision_id)).await?;
+        }
+    }
+    if let Some(inactive) = block.inactive_date {
+        store::close_attrs_at(tx, instrument_id, inactive).await?;
+    }
+    Ok(())
+}
+
+/// The instrument already exists and Bloomberg has just answered about it
+/// again. Bring its identity up to date instead of returning it untouched.
+///
+/// This is the branch's headline promise, and until this function existed no
+/// production path delivered it. `bind_identity` was bind-or-return-existing:
+/// an instrument bound while it wore `FB US Equity` went on answering
+/// `FB US Equity` forever, because a later resolution of `META US Equity`
+/// found the same FIGI and returned before any alias or attribute was
+/// written. `current_security` kept handing a dead ticker to every fetch and
+/// the series stopped without one error.
+///
+/// It also makes a rename discoverable WITHOUT `HISTORICAL_IDS_TIME_RANGE`,
+/// which is the real answer to that field's bootstrap problem (P0 §6.5): you
+/// cannot anchor a chain you have not already seen, but you can notice that
+/// the FIGI you already hold now answers to a different security string.
+///
+/// The rename is recorded the only way this codebase records one: the current
+/// `bdp_security` period is CLOSED at today and a new period is INSERTED. No
+/// UPDATE ever touches `value`. The attributes then run through the same
+/// `write_attrs_tx` the creation path uses, so a name or exchange change
+/// arriving alongside the rename is not silently dropped either.
+///
+/// One transaction: a half-applied rename -- old alias closed, new one missing
+/// -- would leave the instrument with no security valid today, which is worse
+/// than the stale ticker it replaces.
+async fn reconcile_identity(pool: &PgPool, instrument_id: i64, block: &IdentityBlock,
+                            decision_id: i64, as_of: NaiveDate) -> AppResult<i64>
+{
+    let (from, _to) = validity_period(block.listing_date, block.inactive_date, as_of);
+    let mut tx = pool.begin().await?;
+
+    let current: Option<(i64, String, NaiveDate)> = sqlx::query_as(
+        "SELECT id, value, valid_from FROM instrument_alias
+          WHERE instrument_id = $1 AND id_type = 'bdp_security'
+            AND system_to = 'infinity' AND valid_from <= $2 AND valid_to > $2
+          ORDER BY valid_from DESC LIMIT 1")
+        .bind(instrument_id).bind(as_of).fetch_optional(&mut *tx).await?;
+
+    let incoming = block.security.trim();
+    let already_current = current.as_ref()
+        .is_some_and(|(_, v, _)| v.eq_ignore_ascii_case(incoming));
+
+    if !incoming.is_empty() && !already_current {
+        if let Some((alias_id, _, valid_from)) = current {
+            if valid_from < as_of {
+                // A real-world change: the old string was true until today.
+                store::close_alias(&mut tx, alias_id, as_of).await?;
+            } else {
+                // The period we would close starts today or later, so closing
+                // it at today would produce an empty range and overlap its own
+                // replacement. This is a correction of a belief formed today,
+                // which is what system-time supersession is for.
+                store::supersede_alias(&mut tx, alias_id).await?;
+            }
+        }
+        store::insert_alias(&mut tx, instrument_id, &NewAlias {
+            id_type: "bdp_security".into(), value: incoming.to_string(),
+            exch_code: block.exch_code.clone(),
+            valid_from: as_of, valid_to: None,
+            source: "bloomberg_ref".into(), bbg_action_id: None,
+            anchoring_identifier: None,
+        }).await?;
+    }
+
+    write_attrs_tx(&mut tx, instrument_id, block, from, decision_id).await?;
+    tx.commit().await?;
+    Ok(instrument_id)
+}
+
 /// Write an identity block into the master: one instrument, its aliases, its
-/// attributes. Idempotent on re-resolution:
+/// attributes. On re-resolution the instrument is never duplicated -- and, as
+/// of the C1 fix, never left stale either:
 /// - a FIGI already in the master identifies the same instrument, not a new
 ///   one -- the common case, since almost every IDENTITY_FIELDS response
-///   carries one;
+///   carries one -- and the block Bloomberg just returned is reconciled onto
+///   it (`reconcile_identity`), which is how a rename actually lands;
 /// - when there is no FIGI (the resolve_review fallback path), the same
-///   bdp_security alias does instead, so a double-submit or two reviews
+///   bdp_security alias identifies it instead, so a double-submit or two
+///   reviews
 ///   resolved to the same security while Bloomberg stays silent cannot mint
 ///   two instruments wearing one identifier. A genuine local ambiguity here
 ///   (more than one existing match) is not this function's call to
@@ -143,12 +258,12 @@ async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
             "SELECT instrument_id FROM instrument WHERE id_bb_global = $1")
             .bind(figi).fetch_optional(pool).await?
         {
-            return Ok(existing);
+            return reconcile_identity(pool, existing, block, decision_id, as_of).await;
         }
     } else if let Some(existing) = store::find_by_alias(
         pool, "bdp_security", &block.security, as_of).await?
     {
-        return Ok(existing);
+        return reconcile_identity(pool, existing, block, decision_id, as_of).await;
     }
 
     let (from, to) = validity_period(block.listing_date, block.inactive_date, as_of);
@@ -170,7 +285,13 @@ async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
         store::insert_alias(&mut tx, inst.instrument_id, &alias("figi", v)).await?;
     }
     if let Some(v) = &block.share_class_figi {
-        store::insert_alias(&mut tx, inst.instrument_id, &alias("figi", v)).await?;
+        // Its own id_type, not 'figi'. See migration 0001's comment on the
+        // id_type domain: these are two identifiers of two different things,
+        // and writing both as 'figi' gave one instrument two simultaneous
+        // 'figi' values over one period -- which the alias non-overlap fence
+        // now refuses outright.
+        store::insert_alias(&mut tx, inst.instrument_id,
+                            &alias("share_class_figi", v)).await?;
     }
     if let Some(v) = &block.isin {
         store::insert_alias(&mut tx, inst.instrument_id, &alias("isin", v)).await?;
@@ -179,27 +300,7 @@ async fn bind_identity(pool: &PgPool, block: &IdentityBlock, decision_id: i64,
         store::insert_alias(&mut tx, inst.instrument_id, &alias("bbg_unique", v)).await?;
     }
 
-    for (attr, value) in [
-        ("name", &block.name),
-        ("exchange", &block.exch_code),
-        ("currency", &block.currency),
-        ("country", &block.country),
-        ("instrument_type", &block.security_typ2),
-        ("asset_class", &block.market_sector),
-        // No "status": P0 §10.2 -- SIMP_SEC_STATUS is a trading-session state,
-        // not a lifecycle one. INACTIVE_DATE closes the validity periods
-        // instead -- for aliases via `to` above, and for attributes via
-        // close_attrs_at below -- which is the durable way to say an
-        // instrument has ended.
-    ] {
-        if let Some(v) = value {
-            store::set_attr(&mut tx, inst.instrument_id, attr, v, from,
-                            "bloomberg", Some(decision_id)).await?;
-        }
-    }
-    if let Some(inactive) = block.inactive_date {
-        store::close_attrs_at(&mut tx, inst.instrument_id, inactive).await?;
-    }
+    write_attrs_tx(&mut tx, inst.instrument_id, block, from, decision_id).await?;
     tx.commit().await?;
     Ok(inst.instrument_id)
 }
@@ -246,7 +347,14 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
     // legitimately wear the same identifier (BMW in Frankfurt and in the
     // US), and that ambiguity is entirely local: a Bloomberg call cannot
     // resolve it, so none is made.
-    for id_type in ["bdp_security", "ticker", "isin", "figi"] {
+    // 'share_class_figi' is probed too: bind_identity writes
+    // ID_BB_GLOBAL_SHARE_CLASS_LEVEL under its own id_type (see migration
+    // 0001), so without it a user pasting a share-class FIGI would fall
+    // through to a Bloomberg call for something already in the master. It is
+    // probed last because it is the one identifier here that several
+    // instruments legitimately share -- every sibling listing in the class --
+    // so it reaches the local-ambiguity branch rather than binding one of them.
+    for id_type in ["bdp_security", "ticker", "isin", "figi", "share_class_figi"] {
         let probe = if id_type == "bdp_security" { security.as_str() }
                     else { input.raw.trim() };
         let matches = store::find_all_by_alias(pool, id_type, probe, input.as_of).await?;
@@ -287,19 +395,18 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
             pool, input, &security, "bloomberg_ref", None,
             &serde_json::json!([&blocks[0]]), Some(&raw_identity)).await?;
         let iid = bind_identity(pool, &blocks[0], decision_id, input.as_of).await?;
-        // Spec §5.1: an anchored identifier-history request once per
-        // successful bind (not once per instrument, ever -- a later resolve
-        // of an already-bound instrument never reaches this branch at all,
-        // since step 2's local alias lookup returns first). A failure here
-        // must not undo a good binding -- the identifiers we have are still
-        // correct, we simply know less about the past.
-        let hist_start = blocks[0].listing_date
-            .unwrap_or_else(|| NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
-        if let Err(e) = crate::instrument::history::ingest(
-            pool, fetcher, iid, &blocks[0].security, hist_start).await
-        {
-            eprintln!("identifier history for {} failed: {e}", blocks[0].security);
-        }
+        // No HISTORICAL_IDS_TIME_RANGE call here. Spec §5.1 put one on this
+        // path; P0 §6.5 measured why it cannot stay. The field is anchored on
+        // the identifier the chain STARTED from, and resolution only knows the
+        // identifier the chain ENDED at -- so passing the resolved current
+        // security returns a well-formed chain belonging to a different
+        // company (META -> METV, the Roundhill ETF). The field cannot discover
+        // a rename, only confirm one, so it has no place on the path whose job
+        // is discovery. `reconcile_identity` above is what actually catches a
+        // rename now, off a FIGI we already hold, and costs nothing extra.
+        // Identifier history remains available as an explicit user action with
+        // a user-supplied anchor: `commands::ingest_identifier_history`.
+        //
         // Not fixed, deliberately: a crash between bind_identity committing
         // and this UPDATE leaves the decision row with chosen_instrument_id
         // still NULL even though the instrument exists. That is recoverable,
@@ -341,14 +448,7 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                 pool, input, &security, "bloomberg_list", None,
                 &candidates_json, Some(&raw_identity)).await?;
             let iid = bind_identity(pool, &block, decision_id, input.as_of).await?;
-            // See the identical history::ingest call in step 3 above.
-            let hist_start = block.listing_date
-                .unwrap_or_else(|| NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
-            if let Err(e) = crate::instrument::history::ingest(
-                pool, fetcher, iid, &block.security, hist_start).await
-            {
-                eprintln!("identifier history for {} failed: {e}", block.security);
-            }
+            // No identifier-history call here either -- see step 3 above.
             // See the identical UPDATE in step 3 above: a crash here is
             // recoverable on the next resolve, not silently wrong.
             sqlx::query("UPDATE resolution_decision SET chosen_instrument_id = $2 WHERE id = $1")

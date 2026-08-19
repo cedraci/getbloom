@@ -5,6 +5,13 @@
 -- pipeline tables retained from the previous schema.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- btree_gist lets a GiST EXCLUDE constraint mix plain equality columns
+-- (instrument_id, id_type/attr) with a range overlap operator. Without it the
+-- non-overlap fences below cannot be expressed at all, and validity periods
+-- would go on being computed only in Rust -- where a missed branch inserts two
+-- overlapping "current" rows and nothing complains until a lookup silently
+-- returns two answers.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- ---------------------------------------------------------------- identity
 
@@ -88,7 +95,16 @@ CREATE TABLE instrument_attr (
   CONSTRAINT instrument_attr_period CHECK (valid_from < valid_to),
   -- Make the DATE 'infinity' mistake unrepresentable, not just unwritten by
   -- convention. Do not "simplify" this away -- see the comment on valid_to.
-  CONSTRAINT instrument_attr_no_infinity CHECK (valid_to <> 'infinity')
+  CONSTRAINT instrument_attr_no_infinity CHECK (valid_to <> 'infinity'),
+  -- One value per attribute at a time. store::set_attr computes this in Rust;
+  -- this is the fence that makes a bug there fail loudly instead of leaving
+  -- two overlapping "current" periods for a reader to pick between. Scoped to
+  -- the rows we currently believe -- a superseded row (system_to closed) is
+  -- history and may overlap whatever replaced it.
+  CONSTRAINT instrument_attr_no_overlap
+    EXCLUDE USING gist (instrument_id WITH =, attr WITH =,
+                        daterange(valid_from, valid_to) WITH &&)
+      WHERE (system_to = 'infinity')
 );
 CREATE UNIQUE INDEX instrument_attr_current
   ON instrument_attr (instrument_id, attr, valid_from)
@@ -99,9 +115,17 @@ CREATE UNIQUE INDEX instrument_attr_current
 CREATE TABLE instrument_alias (
   id                   BIGSERIAL PRIMARY KEY,
   instrument_id        BIGINT NOT NULL REFERENCES instrument(instrument_id),
+  -- 'share_class_figi' is not in spec 4.3's list, and it is here because the
+  -- non-overlap fence below revealed why it has to be: bind_identity wrote
+  -- BOTH ID_BB_GLOBAL and ID_BB_GLOBAL_SHARE_CLASS_LEVEL as id_type 'figi'
+  -- over one period, so a resolved instrument carried two simultaneous
+  -- identifiers of one type. That is also wrong independently of the fence:
+  -- a share-class FIGI is shared by every sibling listing in the class, so
+  -- looking one up under 'figi' answers with an arbitrary sibling. They are
+  -- two different identifiers of two different things and get two id_types.
   id_type              TEXT NOT NULL CHECK (id_type IN
-                         ('ticker','isin','figi','cusip','sedol','bbg_unique',
-                          'bdp_security')),
+                         ('ticker','isin','figi','share_class_figi','cusip',
+                          'sedol','bbg_unique','bdp_security')),
   value                TEXT NOT NULL,
   exch_code            TEXT,
   valid_from           DATE NOT NULL,
@@ -120,7 +144,16 @@ CREATE TABLE instrument_alias (
   CONSTRAINT instrument_alias_period CHECK (valid_from < valid_to),
   -- Make the DATE 'infinity' mistake unrepresentable, not just unwritten by
   -- convention. Do not "simplify" this away -- see the comment on valid_to.
-  CONSTRAINT instrument_alias_no_infinity CHECK (valid_to <> 'infinity')
+  CONSTRAINT instrument_alias_no_infinity CHECK (valid_to <> 'infinity'),
+  -- One identifier of a given type at a time. Nothing in Rust computed this
+  -- for aliases at all before this constraint existed, so two overlapping
+  -- open periods inserted cleanly and current_security had two answers to
+  -- choose between. Scoped to currently-believed rows: a superseded row is
+  -- history and may overlap its own replacement.
+  CONSTRAINT instrument_alias_no_overlap
+    EXCLUDE USING gist (instrument_id WITH =, id_type WITH =,
+                        daterange(valid_from, valid_to) WITH &&)
+      WHERE (system_to = 'infinity')
 );
 
 -- P0 6.4: HISTORICAL_IDS_TIME_RANGE asked about META US Equity returns

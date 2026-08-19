@@ -119,10 +119,17 @@ strong AS (
   SELECT * FROM hits WHERE similarity >= $2
 ),
 best AS (
-  SELECT DISTINCT ON (coalesce(security, display))
+  -- instrument_id is part of the key, not just the ordering: two DIFFERENT
+  -- instruments can legitimately wear the same security string (the BMW case
+  -- in store.rs) or carry the same label, and keying on the string alone
+  -- collapsed them into a single row -- hiding from the user the very
+  -- ambiguity the resolution engine would then send to review. Rows with no
+  -- instrument_id (candidate-cache entries) still collapse by string, which
+  -- is what that key is for.
+  SELECT DISTINCT ON (coalesce(security, display), instrument_id)
          origin, security, display, description, instrument_id, similarity
     FROM strong
-   ORDER BY coalesce(security, display), rank, similarity DESC
+   ORDER BY coalesce(security, display), instrument_id, rank, similarity DESC
 )
 SELECT origin, security, display, description, instrument_id, similarity
   FROM best ORDER BY similarity DESC, display LIMIT $3
@@ -140,22 +147,29 @@ pub async fn local(pool: &PgPool, query: &str, limit: i64) -> AppResult<Vec<Sear
     // 0.3. That default is HIGHER than MIN_SIMILARITY (0.25): left alone, the
     // `%` prefilter would silently discard rows in [0.25, 0.3) before the
     // explicit `similarity >= $2` check ever saw them, making MIN_SIMILARITY a
-    // lie for anything in that band. set_limit makes the operator's own
-    // threshold agree with the constant this module actually promises.
-    // set_limit is session-scoped, so it and the query below must share one
-    // physical connection -- pool.acquire() rather than a pool-wide query.
-    let mut conn = pool.acquire().await?;
-    sqlx::query("SELECT set_limit($1)")
-        .bind(MIN_SIMILARITY)
-        .execute(&mut *conn)
+    // lie for anything in that band. Lowering the operator's own threshold
+    // makes it agree with the constant this module actually promises.
+    //
+    // Done with `set_config(..., is_local => true)` inside a transaction, NOT
+    // with `set_limit()`. `set_limit` mutates the SESSION, and a pooled
+    // connection outlives this function: the mutated GUC went back to the pool
+    // and any later, unrelated consumer of that connection inherited a
+    // threshold it never asked for. `SET LOCAL` semantics unwind at COMMIT.
+    // (`set_config` rather than the `SET LOCAL` statement because only the
+    // function form takes a bind parameter.)
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('pg_trgm.similarity_threshold', $1, true)")
+        .bind(MIN_SIMILARITY.to_string())
+        .execute(&mut *tx)
         .await?;
 
     let rows = sqlx::query_as::<_, RawHit>(SEARCH_SQL)
         .bind(q)
         .bind(MIN_SIMILARITY)
         .bind(limit)
-        .fetch_all(&mut *conn)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     Ok(rows.into_iter().map(|r| SearchHit {
         origin: match r.origin.as_str() {
@@ -224,14 +238,11 @@ pub async fn bloomberg<F: MasterFetcher>(
     }
 
     let filter = crate::resolution::engine::yellow_key_filter(yellow_key);
+    // The `hit_ledger` write that used to live here is gone: it is done at the
+    // wire seam instead (`BlpapiMasterFetcher::instrument_list`), where a
+    // future call site cannot forget it. This one had already been forgotten
+    // four times over in `resolution`.
     let answered = fetcher.instrument_list(q, filter, 20).await?;
-
-    // Spec §10 q2: whether instrumentListRequest is metered at all is not
-    // established, so it is counted -- the project's existing
-    // over-count-is-safe policy applied to a new call site. Charged even
-    // though the search may come back with zero matches: the call was still
-    // made.
-    crate::budget::record_purpose_hits(pool, "search", crate::budget::SEARCH_HIT_COST).await?;
 
     // `answered.parsed` is already normalised by `parse_list` --
     // "AAPL US<equity>" became "AAPL US Equity" on the way in, so the raw

@@ -481,6 +481,6 @@ pub async fn apply_import(
     removal_modes: &[(i64, DeleteMode)],
     confirmed_removal_count: Option<i64>,
 ) -> AppResult<ImportResult> {
-    let fetcher = BlpapiMasterFetcher { cfg };
+    let fetcher = BlpapiMasterFetcher { cfg, pool };
     apply_import_with(pool, &fetcher, path, file_hash, removal_modes, confirmed_removal_count).await
 }

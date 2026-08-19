@@ -202,8 +202,24 @@ pub fn parse_list(raw: &serde_json::Value) -> Vec<Candidate> {
 
 // ------------------------------------------------------------------ live
 
+/// The live fetcher, and the only place in the crate where a security-master
+/// request reaches the wire.
+///
+/// It carries a pool because THIS is where the hit ledger is written. Every
+/// earlier attempt put `record_purpose_hits` at the call sites, and four call
+/// sites -- the two identity calls in `resolution::engine`, the history call,
+/// and `resolve_review`'s identity call -- were added without one, so a bulk
+/// import of four hundred rows spent hundreds of unrecorded Bloomberg hits
+/// while the budget screen read zero. A guard at the seam cannot be bypassed
+/// by a future call site, because a call that does not pass through here does
+/// not reach Bloomberg at all.
+///
+/// `MockMasterFetcher` deliberately does NOT record: it has no pool, so no
+/// test's ledger assertions change and no test needs a database to run a
+/// fetcher.
 pub struct BlpapiMasterFetcher<'a> {
     pub cfg: &'a PipelineConfig,
+    pub pool: &'a sqlx::PgPool,
 }
 
 impl BlpapiMasterFetcher<'_> {
@@ -218,6 +234,19 @@ impl BlpapiMasterFetcher<'_> {
             }),
         ).await
     }
+
+    /// Charge the ledger for a request that has already succeeded.
+    ///
+    /// Logged and swallowed, never propagated: the Bloomberg call has been
+    /// made and paid for by the time this runs, so turning a ledger write
+    /// failure into a `?` would throw away the candidates that call bought
+    /// and leave the user to spend the hit again. An undercounted budget is
+    /// the smaller of the two harms, and it is visible in the log.
+    async fn charge(&self, purpose: &str, hits: i64) {
+        if let Err(e) = crate::budget::record_purpose_hits(self.pool, purpose, hits).await {
+            eprintln!("hit ledger write failed for {purpose} ({hits} hits): {e}");
+        }
+    }
 }
 
 impl MasterFetcher for BlpapiMasterFetcher<'_> {
@@ -229,6 +258,13 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             "obs_date": chrono::Local::now().date_naive().to_string(),
             "raw": true,
         })).await?;
+        // Counted the way `budget::estimate_eod_hits` counts a reference
+        // request -- one hit per security-field pair, the Excel add-in's own
+        // accounting, which the whole estimator is calibrated against. The
+        // over-count-is-safe policy applies: whether the Desktop API meters
+        // this identically is not established (P0 §10.5).
+        self.charge("resolve_identity",
+                    (securities.len() * IDENTITY_FIELDS.len()) as i64).await;
         let raw = resp["raw_messages"].clone();
         let parsed = parse_identity(&raw);
         Ok(Answered { parsed, raw })
@@ -251,6 +287,8 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             ],
             "raw": true,
         })).await?;
+        // One security, one (bulk) field.
+        self.charge("resolve_history", 1).await;
         Ok(parse_hist_ids(&resp["raw_messages"]))
     }
 
@@ -264,6 +302,10 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
             "max_results": max_results,
             "raw": true,
         })).await?;
+        // Whether instrumentListRequest is metered at all is still open
+        // (P0 §10.5); it is charged anyway, at the same conservative rate the
+        // Search Bloomberg button used to charge from its own call site.
+        self.charge("search", crate::budget::SEARCH_HIT_COST).await;
         let raw = resp["raw_messages"].clone();
         let parsed = parse_list(&raw);
         Ok(Answered { parsed, raw })

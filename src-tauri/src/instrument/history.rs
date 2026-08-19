@@ -81,11 +81,11 @@ pub async fn apply(pool: &PgPool, instrument_id: i64, anchor: &str, rows: &[Hist
         return Ok(HistoryOutcome { aliases_added, links_proposed });
     };
     let mut boundary = chain_start(pool, instrument_id, first.date).await?;
-    // The date of the last row that turned out to genuinely be this
-    // instrument's own chain (inserted or closed) -- NOT the last row in the
-    // response, which may have been someone else's identity entirely (a
-    // proposal or an ambiguous skip must never move our own current period).
-    let mut last_own_change: Option<NaiveDate> = None;
+    // The current bdp_security period is corrected inside the writing arms
+    // below, in the same transaction as the write it has to make room for --
+    // never once at the end off a "last change date". A proposal or a refused
+    // row must never move our own current period, and correcting afterwards
+    // left an overlap committed in between.
 
     for row in &sorted {
         let period_start = boundary;
@@ -162,25 +162,59 @@ pub async fn apply(pool: &PgPool, instrument_id: i64, anchor: &str, rows: &[Hist
                          automatic merge would destroy one of the two histories"))
                     .await? { links_proposed.push(id); }
             }
-            // We already carry the Old ID, open-ended (typically a manual
-            // entry made before its history was known). Bloomberg says it
-            // stopped on this date -- close it instead of discarding the
+            // P0 §6.5: the New ID is owned by nobody at all, so nothing
+            // independently confirms that this chain is ours. Anchoring is
+            // necessary but not sufficient -- a wrong anchor returns a
+            // well-formed chain belonging to someone else, and the row is
+            // evidence, not a fact. In particular this is where the META->METV
+            // row lands on a clean database: `META US Equity` is ours,
+            // `METV` is nobody's, and the pre-fix code read that as "our own
+            // identifier just ended" and CLOSED our live alias, leaving the
+            // instrument with no security valid today and silently
+            // unfetchable. No successor instrument exists to point an
+            // instrument_link at, so the durable record is an ingest_issue.
+            (Free, _) => {
+                eprintln!("identifier history: New ID {} belongs to no instrument \
+                           (anchor {anchor}); refusing to write {} -> {} on {}",
+                          row.new_id, row.old_id, row.new_id, row.date);
+                record_unconfirmed_new_id_issue(pool, instrument_id, anchor, row).await?;
+            }
+            // Both ends are provably ours: we already carry the Old ID,
+            // open-ended (typically a manual entry made before its history
+            // was known), and the New ID is ours too. Bloomberg says the old
+            // one stopped on this date -- close it instead of discarding the
             // event.
-            (_, Ours) => {
+            (Ours, Ours) => {
                 let mut tx = pool.begin().await?;
                 close_open_alias(&mut tx, instrument_id, "ticker", &row.old_id, row.date).await?;
                 if let Some(sec) = &old_sec {
                     close_open_alias(&mut tx, instrument_id, "bdp_security", sec, row.date).await?;
                 }
+                // After the closes, never before: if the old security WAS the
+                // current open one it has just been closed at row.date, so
+                // this finds nothing and returns -- rather than re-inserting
+                // a period the close would then have to empty.
+                correct_current_security_period_tx(&mut tx, instrument_id, row.date, anchor)
+                    .await?;
                 tx.commit().await?;
-                last_own_change = Some(row.date);
             }
-            // The ordinary case: nobody has claimed the Old ID yet, and the
-            // New ID is free or already ours. Write it in both spaces --
-            // bare ticker and reconstructed security -- with the same
-            // period, the same Action ID, the same anchor.
-            (_, Free) => {
+            // The ordinary case, and the only one that writes a new alias:
+            // the New ID is provably ours and nobody has claimed the Old ID.
+            // Write it in both spaces -- bare ticker and reconstructed
+            // security -- with the same period, the same Action ID, the same
+            // anchor.
+            (Ours, Free) => {
                 let mut tx = pool.begin().await?;
+                // BEFORE the inserts, and in the same transaction. The
+                // current bdp_security still claims [listing_date, forever),
+                // which overlaps the period about to be written for the old
+                // identifier; correcting it afterwards (as this module used
+                // to) left the overlap committed in between, where
+                // `find_by_alias` had two answers to choose from. The alias
+                // non-overlap constraint now refuses that outright, which is
+                // how the window was found.
+                correct_current_security_period_tx(&mut tx, instrument_id, row.date, anchor)
+                    .await?;
                 store::insert_alias(&mut tx, instrument_id, &NewAlias {
                     id_type: "ticker".into(), value: row.old_id.clone(),
                     exch_code: row.old_exch.clone(),
@@ -201,13 +235,8 @@ pub async fn apply(pool: &PgPool, instrument_id: i64, anchor: &str, rows: &[Hist
                 }
                 tx.commit().await?;
                 aliases_added += 1;
-                last_own_change = Some(row.date);
             }
         }
-    }
-
-    if let Some(change) = last_own_change {
-        correct_current_security_period(pool, instrument_id, change, anchor).await?;
     }
 
     Ok(HistoryOutcome { aliases_added, links_proposed })
@@ -396,35 +425,72 @@ async fn record_ambiguous_owner_issue(pool: &PgPool, instrument_id: i64, anchor:
     Ok(())
 }
 
+/// Bloomberg's New ID is not an identifier any instrument in the master
+/// holds, so nothing independently confirms the chain is ours. P0 §6.5: a
+/// returned row is evidence, not a fact, and the field cannot discover a
+/// rename it does not already know about. No successor instrument exists to
+/// hang an `instrument_link` proposal on, so the durable, queryable record is
+/// an `ingest_issue`, exactly as for an ambiguous owner.
+///
+/// Idempotent on the same principle as `record_ambiguous_owner_issue`:
+/// `detail` fully encodes the row, so (instrument_id, code, detail) is the
+/// natural key for "already recorded".
+async fn record_unconfirmed_new_id_issue(pool: &PgPool, instrument_id: i64, anchor: &str,
+                                         row: &HistIdRow) -> AppResult<()>
+{
+    let detail = format!(
+        "old_id={} new_id={} anchor={anchor} change_date={} action_id={} \
+         reason=new_id_is_not_an_identifier_this_instrument_holds",
+        row.old_id, row.new_id, row.date,
+        row.action_id.as_deref().unwrap_or("none"));
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'unconfirmed_identifier_change' AND detail = $2")
+        .bind(instrument_id).bind(&detail).fetch_optional(pool).await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
+         VALUES (NULL, $1, 'warn', 'unconfirmed_identifier_change', $2)")
+        .bind(instrument_id).bind(&detail)
+        .execute(pool).await?;
+    Ok(())
+}
+
 /// `bind_identity` wrote the current identifier's own `bdp_security` alias
 /// with `valid_from` = LISTING_DATE, which is false once a rename is known:
 /// META did not exist as "META US Equity" at listing if it was born "FB US
-/// Equity" and renamed later. Correct it once the chain is known -- but only
-/// as far as `last_own_change` in `apply` actually reaches, never off a row
-/// that turned out to be a proposal or an ambiguous skip. This is a
-/// correction of our own earlier belief, so `system_to` supersession is the
-/// right mechanism, not `valid_to`, which would falsely claim we always knew
-/// the boundary.
-async fn correct_current_security_period(pool: &PgPool, instrument_id: i64,
-                                         change_date: NaiveDate, anchor: &str) -> AppResult<()>
+/// Equity" and renamed later. Correct it as each of this instrument's OWN
+/// changes is applied -- never off a row that turned out to be a proposal, a
+/// refusal or an ambiguous skip. This is a correction of our own earlier
+/// belief, so `system_to` supersession is the right mechanism, not `valid_to`,
+/// which would falsely claim we always knew the boundary.
+///
+/// Takes the caller's transaction rather than opening its own: the correction
+/// and the write it makes room for must be one atomic step, or the old period
+/// and the new one overlap in between -- which the `instrument_alias_no_overlap`
+/// constraint now refuses outright.
+async fn correct_current_security_period_tx(tx: &mut Tx<'_>, instrument_id: i64,
+                                            change_date: NaiveDate, anchor: &str)
+    -> AppResult<()>
 {
     let current: Option<(i64, String, Option<String>, NaiveDate)> = sqlx::query_as(
         "SELECT id, value, exch_code, valid_from FROM instrument_alias
           WHERE instrument_id = $1 AND id_type = 'bdp_security'
             AND system_to = 'infinity' AND valid_to = $2")
-        .bind(instrument_id).bind(store::forever()).fetch_optional(pool).await?;
+        .bind(instrument_id).bind(store::forever()).fetch_optional(&mut **tx).await?;
     let Some((id, value, exch_code, valid_from)) = current else { return Ok(()) };
     if valid_from >= change_date {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
-    store::supersede_alias(&mut tx, id).await?;
-    store::insert_alias(&mut tx, instrument_id, &NewAlias {
+    store::supersede_alias(tx, id).await?;
+    store::insert_alias(tx, instrument_id, &NewAlias {
         id_type: "bdp_security".into(), value, exch_code,
         valid_from: change_date, valid_to: None,
         source: "bloomberg_hist_ids".into(), bbg_action_id: None,
         anchoring_identifier: Some(anchor.to_string()),
     }).await?;
-    tx.commit().await?;
     Ok(())
 }

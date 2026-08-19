@@ -93,7 +93,7 @@ pub async fn list_book(state: State<'_, AppState>)
 pub async fn add_to_book(state: State<'_, AppState>, req: book::AddToBook)
     -> Result<book::AddOutcome, AppError> {
     let cfg = pipeline_cfg(&state).await;
-    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
     book::add(&state.pool, &fetcher, &req, "user").await
 }
 
@@ -117,7 +117,7 @@ pub async fn list_pending_reviews(state: State<'_, AppState>)
 pub async fn resolve_review(state: State<'_, AppState>, review_id: i64,
                             chosen_security: String) -> Result<i64, AppError> {
     let cfg = pipeline_cfg(&state).await;
-    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
     engine::resolve_review(&state.pool, &fetcher, review_id, &chosen_security, "user").await
 }
 
@@ -469,7 +469,7 @@ pub async fn search_bloomberg(state: State<'_, AppState>, query: String,
                               yellow_key: String)
     -> Result<search::BloombergSearch, AppError> {
     let cfg = pipeline_cfg(&state).await;
-    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg };
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
     search::bloomberg(&state.pool, &fetcher, &query, &yellow_key).await
 }
 

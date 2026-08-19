@@ -464,7 +464,7 @@ async fn smoke_real_bloomberg_end_to_end() {
         .bind(SMOKE_SECURITY).fetch_optional(&pool).await.unwrap() {
         Some(id) => id,
         None => {
-            let fetcher = BlpapiMasterFetcher { cfg: &cfg };
+            let fetcher = BlpapiMasterFetcher { cfg: &cfg, pool: &pool };
             let req = AddToBook {
                 raw: "AAPL US".into(), yellow_key: "Equity".into(),
                 asset_class_id: class_id, label: "Apple".into(), hints: Hints::default(),
