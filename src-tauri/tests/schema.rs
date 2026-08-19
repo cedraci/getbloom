@@ -65,13 +65,62 @@ async fn an_alias_from_a_reference_request_needs_no_anchor() {
 async fn id_bb_global_is_write_once() {
     let pool = test_pool().await;
     let iid = new_instrument(&pool).await;
-    sqlx::query("UPDATE instrument SET id_bb_global = 'BBG000B9XRY4' WHERE instrument_id = $1")
-        .bind(iid).execute(&pool).await.expect("null -> value is allowed");
+    let first = common::uniq("BBG");
+    let second = common::uniq("BBG");
+    sqlx::query("UPDATE instrument SET id_bb_global = $1 WHERE instrument_id = $2")
+        .bind(&first).bind(iid).execute(&pool).await.expect("null -> value is allowed");
     let err = sqlx::query(
-        "UPDATE instrument SET id_bb_global = 'BBG000000000' WHERE instrument_id = $1")
-        .bind(iid).execute(&pool).await.unwrap_err();
+        "UPDATE instrument SET id_bb_global = $1 WHERE instrument_id = $2")
+        .bind(&second).bind(iid).execute(&pool).await.unwrap_err();
     assert!(err.to_string().contains("write-once"),
             "overwriting a known FIGI must be refused, got: {err}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn alias_provenance_columns_cannot_be_rewritten() {
+    let pool = test_pool().await;
+    let iid = new_instrument(&pool).await;
+    let aid = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO instrument_alias
+           (instrument_id, id_type, value, exch_code, valid_from, source,
+            bbg_action_id, anchoring_identifier)
+         VALUES ($1, 'ticker', 'META', 'US', DATE '2022-06-09', 'bloomberg_hist_ids',
+                 'ACT1', 'FB US Equity')
+         RETURNING id")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+
+    // Rewriting the anchor would launder an unanchored alias into a trusted
+    // one -- the whole point of alias_anchor_required.
+    let err = sqlx::query(
+        "UPDATE instrument_alias SET anchoring_identifier = 'ROUNDHILL US Equity' WHERE id = $1")
+        .bind(aid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("immutable"),
+            "rewriting anchoring_identifier must be refused, got: {err}");
+
+    let err = sqlx::query("UPDATE instrument_alias SET bbg_action_id = 'ACT2' WHERE id = $1")
+        .bind(aid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("immutable"),
+            "rewriting bbg_action_id must be refused, got: {err}");
+
+    let err = sqlx::query("UPDATE instrument_alias SET exch_code = 'LN' WHERE id = $1")
+        .bind(aid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("immutable"),
+            "rewriting exch_code must be refused, got: {err}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_alias_from_historical_ids_with_a_blank_anchor_is_rejected() {
+    let pool = test_pool().await;
+    let iid = new_instrument(&pool).await;
+    let err = sqlx::query(
+        "INSERT INTO instrument_alias
+           (instrument_id, id_type, value, valid_from, source, anchoring_identifier)
+         VALUES ($1, 'ticker', 'FB', DATE '2012-05-18', 'bloomberg_hist_ids', '   ')")
+        .bind(iid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("alias_anchor_required"),
+            "a blank anchor is not an anchor, got: {err}");
 }
 
 #[tokio::test]
@@ -93,6 +142,21 @@ async fn an_alias_value_cannot_be_updated_but_can_be_closed() {
         .bind(aid).execute(&pool).await.unwrap_err();
     assert!(err.to_string().contains("immutable"),
             "rewriting an alias value destroys history and must be refused, got: {err}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_attr_source_cannot_be_rewritten() {
+    let pool = test_pool().await;
+    let iid = new_instrument(&pool).await;
+    let aid = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO instrument_attr (instrument_id, attr, value, valid_from, source)
+         VALUES ($1, 'name', 'Meta Platforms', DATE '2022-06-09', 'user') RETURNING id")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    let err = sqlx::query("UPDATE instrument_attr SET source = 'bloomberg' WHERE id = $1")
+        .bind(aid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("immutable"),
+            "rewriting source must be refused, matching instrument_alias's source freeze, got: {err}");
 }
 
 #[tokio::test]
@@ -132,13 +196,77 @@ async fn an_eod_observation_must_have_no_time_and_an_intraday_one_must() {
     let pool = test_pool().await;
     let iid = new_instrument(&pool).await;
     let (fid, rid) = seed_field_and_run(&pool, iid).await;
+    let basis = sqlx::query_scalar::<_, i16>(
+        "SELECT id FROM adjustment_basis WHERE adj_normal = false").fetch_one(&pool).await.unwrap();
     let err = sqlx::query(
         "INSERT INTO observation
-           (instrument_id, field_id, obs_date, obs_time, granularity, layer, value_num, run_id)
-         VALUES ($1,$2,DATE '2026-08-18',TIME '16:00','eod','raw',1.0,$3)")
-        .bind(iid).bind(fid).bind(rid).execute(&pool).await.unwrap_err();
+           (instrument_id, field_id, obs_date, obs_time, granularity, layer, basis_id, value_num, run_id)
+         VALUES ($1,$2,DATE '2026-08-18',TIME '16:00','eod','raw',$3,1.0,$4)")
+        .bind(iid).bind(fid).bind(basis).bind(rid).execute(&pool).await.unwrap_err();
     assert!(err.to_string().contains("observation_granularity_time"),
             "an EOD row carrying a time is ambiguous and must be refused, got: {err}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_numeric_observation_without_a_basis_is_rejected() {
+    let pool = test_pool().await;
+    let iid = new_instrument(&pool).await;
+    let (fid, rid) = seed_field_and_run(&pool, iid).await;
+    let err = sqlx::query(
+        "INSERT INTO observation
+           (instrument_id, field_id, obs_date, granularity, layer, value_num, run_id)
+         VALUES ($1,$2,DATE '2026-08-18','eod','raw',499.23,$3)")
+        .bind(iid).bind(fid).bind(rid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("observation_numeric_needs_basis"),
+            "a numeric price with no recorded adjustment basis is not a fact, got: {err}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn observation_granularity_must_be_lowercase() {
+    let pool = test_pool().await;
+    let iid = new_instrument(&pool).await;
+    let (fid, rid) = seed_field_and_run(&pool, iid).await;
+    let basis = sqlx::query_scalar::<_, i16>(
+        "SELECT id FROM adjustment_basis WHERE adj_normal = false").fetch_one(&pool).await.unwrap();
+    let err = sqlx::query(
+        "INSERT INTO observation
+           (instrument_id, field_id, obs_date, obs_time, granularity, layer, basis_id, value_num, run_id)
+         VALUES ($1,$2,DATE '2026-08-18',TIME '16:00','EOD','raw',$3,1.0,$4)")
+        .bind(iid).bind(fid).bind(basis).bind(rid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("observation_granularity_lower"),
+            "an uppercase granularity would silently fork observation_current's uniqueness key, got: {err}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn observation_append_only_also_guards_time_granularity_and_run() {
+    let pool = test_pool().await;
+    let iid = new_instrument(&pool).await;
+    let (fid, rid) = seed_field_and_run(&pool, iid).await;
+    let basis = sqlx::query_scalar::<_, i16>(
+        "SELECT id FROM adjustment_basis WHERE adj_normal = false").fetch_one(&pool).await.unwrap();
+    let oid = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO observation
+           (instrument_id, field_id, obs_date, granularity, layer, basis_id, value_num, run_id)
+         VALUES ($1,$2,DATE '2026-08-19','eod','raw',$3,1.23,$4) RETURNING id")
+        .bind(iid).bind(fid).bind(basis).bind(rid).fetch_one(&pool).await.unwrap();
+
+    // Relocating a stored EOD row into the intraday series must be refused,
+    // not silently accepted just because the destination shape is itself valid.
+    let err = sqlx::query(
+        "UPDATE observation SET granularity = 'intraday', obs_time = TIME '16:00' WHERE id = $1")
+        .bind(oid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("append-only"),
+            "changing granularity/obs_time must be refused, got: {err}");
+
+    // Reassigning a stored observation to a different run must be refused too.
+    let (_fid2, rid2) = seed_field_and_run(&pool, iid).await;
+    let err = sqlx::query("UPDATE observation SET run_id = $1 WHERE id = $2")
+        .bind(rid2).bind(oid).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("append-only"),
+            "changing run_id must be refused, got: {err}");
 }
 
 #[tokio::test]

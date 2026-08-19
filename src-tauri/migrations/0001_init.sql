@@ -107,7 +107,8 @@ CREATE TABLE instrument_alias (
 -- HISTORICAL_STARTING_IDENTIFIER was supplied. An alias whose anchor is unknown
 -- cannot be trusted, so storing one is made impossible.
 ALTER TABLE instrument_alias ADD CONSTRAINT alias_anchor_required
-  CHECK (source <> 'bloomberg_hist_ids' OR anchoring_identifier IS NOT NULL);
+  CHECK (source <> 'bloomberg_hist_ids'
+    OR (anchoring_identifier IS NOT NULL AND btrim(anchoring_identifier) <> ''));
 
 CREATE INDEX instrument_alias_lookup ON instrument_alias (id_type, lower(value));
 CREATE INDEX instrument_alias_by_instrument ON instrument_alias (instrument_id);
@@ -123,7 +124,10 @@ BEGIN
      OR NEW.id_type <> OLD.id_type
      OR NEW.instrument_id <> OLD.instrument_id
      OR NEW.valid_from <> OLD.valid_from
-     OR NEW.source <> OLD.source THEN
+     OR NEW.source <> OLD.source
+     OR NEW.anchoring_identifier IS DISTINCT FROM OLD.anchoring_identifier
+     OR NEW.bbg_action_id IS DISTINCT FROM OLD.bbg_action_id
+     OR NEW.exch_code IS DISTINCT FROM OLD.exch_code THEN
     RAISE EXCEPTION
       'instrument_alias identity columns are immutable; close valid_to/system_to and insert a new row';
   END IF;
@@ -138,7 +142,8 @@ BEGIN
   IF NEW.value <> OLD.value
      OR NEW.attr <> OLD.attr
      OR NEW.instrument_id <> OLD.instrument_id
-     OR NEW.valid_from <> OLD.valid_from THEN
+     OR NEW.valid_from <> OLD.valid_from
+     OR NEW.source <> OLD.source THEN
     RAISE EXCEPTION
       'instrument_attr identity columns are immutable; close system_to and insert a new row';
   END IF;
@@ -307,7 +312,18 @@ CREATE TABLE observation (
   CONSTRAINT observation_one_value
     CHECK ((value_num IS NULL) <> (value_text IS NULL)),
   CONSTRAINT observation_granularity_time
-    CHECK ((granularity = 'eod') = (obs_time IS NULL))
+    CHECK ((granularity = 'eod') = (obs_time IS NULL)),
+  -- Spec 4.8: adjustment basis is recorded, not assumed. Only numeric prices
+  -- carry a basis; text-valued fields (NAME and similar) legitimately have
+  -- none.
+  CONSTRAINT observation_numeric_needs_basis
+    CHECK (value_num IS NULL OR basis_id IS NOT NULL),
+  -- Spec 4.8: a new granularity (e.g. intraday) must be addable as a new
+  -- value, not a schema change, so the case is normalized instead of
+  -- enumerated -- otherwise 'EOD' and 'eod' would silently partition
+  -- observation_current's uniqueness key.
+  CONSTRAINT observation_granularity_lower
+    CHECK (granularity = lower(granularity) AND granularity <> '')
 );
 
 -- One current row per logical series; the superseded history accumulates beneath.
@@ -328,8 +344,11 @@ BEGIN
      OR NEW.instrument_id <> OLD.instrument_id
      OR NEW.field_id <> OLD.field_id
      OR NEW.obs_date <> OLD.obs_date
+     OR NEW.obs_time IS DISTINCT FROM OLD.obs_time
+     OR NEW.granularity <> OLD.granularity
      OR NEW.layer <> OLD.layer
-     OR NEW.basis_id IS DISTINCT FROM OLD.basis_id THEN
+     OR NEW.basis_id IS DISTINCT FROM OLD.basis_id
+     OR NEW.run_id <> OLD.run_id THEN
     RAISE EXCEPTION
       'observations are append-only; close system_to and insert a corrected row';
   END IF;
