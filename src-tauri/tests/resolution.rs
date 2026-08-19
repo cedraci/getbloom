@@ -353,7 +353,8 @@ async fn resolving_a_review_binds_the_chosen_candidate_and_closes_it() {
     let chosen = format!("{ticker} US Equity");
     let figi = uniq("BBG000TESTZC");
     let resolve_mock = identity_mock(&chosen, &figi, "US");
-    let iid = engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent")
+    let iid = engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent",
+                                     d("2026-08-19"))
         .await.unwrap();
 
     let status: String = sqlx::query_scalar(
@@ -396,7 +397,8 @@ async fn resolving_a_review_falls_back_to_a_bare_block_when_bloomberg_has_nothin
     let chosen = format!("{ticker} US Equity");
     // Same mock: identity_raw is still empty, so resolve_review's own
     // identity() call also comes back empty.
-    let iid = engine::resolve_review(&pool, &list_mock, review_id, &chosen, "laurent")
+    let iid = engine::resolve_review(&pool, &list_mock, review_id, &chosen, "laurent",
+                                     d("2026-08-19"))
         .await.unwrap();
 
     assert_eq!(store::find_by_alias(&pool, "bdp_security", &chosen,
@@ -496,9 +498,9 @@ async fn resolve_review_refuses_a_review_that_is_already_resolved() {
     let Resolution::NeedsReview { review_id, .. } = r else { panic!("expected review") };
 
     let chosen = format!("{ticker} US Equity");
-    engine::resolve_review(&pool, &mock, review_id, &chosen, "laurent").await.unwrap();
+    engine::resolve_review(&pool, &mock, review_id, &chosen, "laurent", d("2026-08-19")).await.unwrap();
 
-    let err = engine::resolve_review(&pool, &mock, review_id, &chosen, "laurent").await
+    let err = engine::resolve_review(&pool, &mock, review_id, &chosen, "laurent", d("2026-08-19")).await
         .unwrap_err();
     assert!(matches!(err, AppError::Validation(_)),
             "a second resolution of the same review must be refused, not silently repeated");
@@ -523,7 +525,7 @@ async fn resolve_review_refuses_a_rejected_review() {
     engine::reject_review(&pool, review_id, "not a real security").await.unwrap();
 
     let chosen = format!("{ticker} US Equity");
-    let err = engine::resolve_review(&pool, &mock, review_id, &chosen, "laurent").await
+    let err = engine::resolve_review(&pool, &mock, review_id, &chosen, "laurent", d("2026-08-19")).await
         .unwrap_err();
     assert!(matches!(err, AppError::Validation(_)));
 }
@@ -550,7 +552,7 @@ async fn two_reviews_resolved_to_the_same_silent_security_bind_one_instrument() 
 
     let r1 = engine::resolve(&pool, &mock, &input(&ticker)).await.unwrap();
     let Resolution::NeedsReview { review_id: review1, .. } = r1 else { panic!("expected review") };
-    let iid1 = engine::resolve_review(&pool, &mock, review1, &chosen, "laurent").await.unwrap();
+    let iid1 = engine::resolve_review(&pool, &mock, review1, &chosen, "laurent", d("2026-08-19")).await.unwrap();
 
     // A second, independent search for the same raw identifier -- the bound
     // alias from the first review does not match this input's own probes
@@ -559,7 +561,7 @@ async fn two_reviews_resolved_to_the_same_silent_security_bind_one_instrument() 
     let r2 = engine::resolve(&pool, &mock, &input(&ticker)).await.unwrap();
     let Resolution::NeedsReview { review_id: review2, .. } = r2 else { panic!("expected review") };
     assert_ne!(review1, review2);
-    let iid2 = engine::resolve_review(&pool, &mock, review2, &chosen, "laurent").await.unwrap();
+    let iid2 = engine::resolve_review(&pool, &mock, review2, &chosen, "laurent", d("2026-08-19")).await.unwrap();
 
     assert_eq!(iid1, iid2,
                "the same identifier must not mint two instruments even though Bloomberg \
@@ -587,7 +589,7 @@ async fn the_manual_decision_records_the_review_and_the_original_candidates() {
 
     let chosen = format!("{ticker} US Equity");
     let resolve_mock = identity_mock(&chosen, &uniq("BBG000TESTZO"), "US");
-    let iid = engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent")
+    let iid = engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent", d("2026-08-19"))
         .await.unwrap();
 
     let candidates: serde_json::Value = sqlx::query_scalar(
@@ -735,7 +737,7 @@ async fn resolve_review_refuses_a_chosen_security_that_is_not_a_security_string(
     let calls_before = mock.call_count();
 
     for bad in ["instrument #42", "AAPL US", "", "   ", "AAPL US Nonsense"] {
-        let err = engine::resolve_review(&pool, &mock, review_id, bad, "laurent")
+        let err = engine::resolve_review(&pool, &mock, review_id, bad, "laurent", d("2026-08-19"))
             .await.unwrap_err();
         assert!(matches!(err, AppError::Validation(_)),
                 "{bad:?} must be refused as a security string, got {err:?}");
@@ -871,7 +873,7 @@ async fn reject_review_refuses_a_review_that_is_already_resolved() {
 
     let chosen = format!("{ticker} US Equity");
     let resolve_mock = identity_mock(&chosen, &uniq("BBG000TESTZR"), "US");
-    engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent")
+    engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent", d("2026-08-19"))
         .await.unwrap();
     let note_before: String = sqlx::query_scalar(
         "SELECT note FROM resolution_review WHERE id = $1")

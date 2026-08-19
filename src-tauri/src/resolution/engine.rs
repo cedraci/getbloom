@@ -544,7 +544,8 @@ struct ReviewContext {
 /// is the literal text `instrument #42`. Making the placeholder unbindable
 /// here means the UI can only ever regress into an error.
 pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review_id: i64,
-                                              chosen_security: &str, by: &str) -> AppResult<i64>
+                                              chosen_security: &str, by: &str,
+                                              as_of: NaiveDate) -> AppResult<i64>
 {
     // Before anything else, including before the review is read: a refused
     // request must not cost a Bloomberg hit or a database round trip.
@@ -587,8 +588,7 @@ pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review
         .bind(&ctx.raw_input).bind(chosen_security).bind(&candidates).bind(&raw_identity).bind(by)
         .fetch_one(pool).await?;
 
-    let iid = bind_identity(pool, &block, manual_id,
-                            chrono::Local::now().date_naive()).await?;
+    let iid = bind_identity(pool, &block, manual_id, as_of).await?;
     // See the identical UPDATE in resolve()'s step 3: a crash here is
     // recoverable on the next resolve, not silently wrong.
     sqlx::query("UPDATE resolution_decision SET chosen_instrument_id = $2 WHERE id = $1")

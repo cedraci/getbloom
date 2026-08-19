@@ -118,7 +118,8 @@ pub async fn resolve_review(state: State<'_, AppState>, review_id: i64,
                             chosen_security: String) -> Result<i64, AppError> {
     let cfg = pipeline_cfg(&state).await;
     let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
-    engine::resolve_review(&state.pool, &fetcher, review_id, &chosen_security, "user").await
+    let as_of = chrono::Local::now().date_naive();
+    engine::resolve_review(&state.pool, &fetcher, review_id, &chosen_security, "user", as_of).await
 }
 
 /// A locally ambiguous review, resolved by pointing at one of the existing
