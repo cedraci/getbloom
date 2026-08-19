@@ -69,18 +69,20 @@ pub struct NewAlias {
 /// Postgres' DATE 'infinity' is not a date chrono can represent: sqlx decodes a
 /// binary DATE by adding the day count to 2000-01-01, and Postgres encodes
 /// 'infinity' as i32::MAX days -- about 5.9 million years -- which overflows
-/// chrono::NaiveDate's range and panics on decode. NaiveDate::MAX (262143-12-31)
-/// is a real, finite date far enough out to behave as "forever" for every
-/// comparison this module does, and because it is finite it round-trips through
-/// Postgres cleanly. So this module never writes the literal SQL 'infinity' into
-/// a column it later decodes as NaiveDate (valid_to on alias/attr rows): every
-/// open-ended insert below binds `forever()` explicitly instead of relying on
-/// the column default. The column default is left in place for the schema's own
-/// documentation value and for system_to (a TIMESTAMPTZ this module never reads
-/// back into Rust), but identity rows written through here are never actually
-/// Postgres-infinite in valid_to.
+/// chrono::NaiveDate's range and panics on decode. Nor can `NaiveDate::MAX`
+/// (262142-12-31) stand in for it: chrono serializes an out-of-range year with
+/// an ISO expanded sign ("+262142-12-31"), which is `Invalid Date` in
+/// JavaScript at the frontend boundary. 9999-12-31 is a real, finite,
+/// four-digit date far enough out to behave as "forever" for every comparison
+/// this module does, and it is what migration 0001's `valid_to` default and
+/// `..._no_infinity` CHECK constraints standardize on -- so this value must
+/// match the migration exactly. This module never writes the literal SQL
+/// 'infinity' into a column it later decodes as NaiveDate (valid_to on
+/// alias/attr rows): every open-ended insert below binds `forever()`
+/// explicitly. `system_to` (a TIMESTAMPTZ this module never reads back into
+/// Rust) is unaffected and stays at real 'infinity'.
 pub fn forever() -> NaiveDate {
-    NaiveDate::MAX
+    NaiveDate::from_ymd_opt(9999, 12, 31).unwrap()
 }
 
 pub async fn create(pool: &PgPool) -> AppResult<Instrument> {
@@ -124,10 +126,14 @@ pub async fn insert_alias(tx: &mut Tx<'_>, instrument_id: i64, new: &NewAlias)
 }
 
 /// The identifier stopped being true in the world on `valid_to`.
+/// A no-op against a row that has already been superseded (system_to closed):
+/// that row is no longer current, so its real-world end date is not this
+/// call's to decide.
 pub async fn close_alias(tx: &mut Tx<'_>, alias_id: i64, valid_to: NaiveDate)
     -> AppResult<()>
 {
-    sqlx::query("UPDATE instrument_alias SET valid_to = $2 WHERE id = $1")
+    sqlx::query("UPDATE instrument_alias SET valid_to = $2
+                  WHERE id = $1 AND system_to = 'infinity'")
         .bind(alias_id).bind(valid_to).execute(&mut **tx).await?;
     Ok(())
 }
@@ -141,18 +147,38 @@ pub async fn supersede_alias(tx: &mut Tx<'_>, alias_id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// Which instrument wore this identifier on this date, as best we know today.
-pub async fn find_by_alias(pool: &PgPool, id_type: &str, value: &str, as_of: NaiveDate)
-    -> AppResult<Option<i64>>
+/// Every instrument that wore this identifier on this date, as best we know
+/// today. Ordinarily this has zero or one entries, but genuine overlap is
+/// real -- two live listings can legitimately both wear ticker "BMW" in
+/// different markets at once -- and silently picking one of them is exactly
+/// the failure this project exists to prevent. Callers that need to resolve
+/// (not just detect) an overlap use this directly; Task 7 routes more than
+/// one match to a human review queue.
+pub async fn find_all_by_alias(pool: &PgPool, id_type: &str, value: &str, as_of: NaiveDate)
+    -> AppResult<Vec<i64>>
 {
     Ok(sqlx::query_scalar(
-        "SELECT instrument_id FROM instrument_alias
+        "SELECT DISTINCT instrument_id FROM instrument_alias
           WHERE id_type = $1 AND lower(value) = lower($2)
             AND valid_from <= $3 AND valid_to > $3
             AND system_to = 'infinity'
-          ORDER BY valid_from DESC LIMIT 1")
+          ORDER BY instrument_id")
         .bind(id_type).bind(value).bind(as_of)
-        .fetch_optional(pool).await?)
+        .fetch_all(pool).await?)
+}
+
+/// Which single instrument wore this identifier on this date. `None` means
+/// either nobody did, or -- see `find_all_by_alias` -- more than one did;
+/// this function cannot and must not guess between "absent" and "ambiguous".
+/// A caller that needs to tell those apart uses `find_all_by_alias` instead.
+pub async fn find_by_alias(pool: &PgPool, id_type: &str, value: &str, as_of: NaiveDate)
+    -> AppResult<Option<i64>>
+{
+    let mut matches = find_all_by_alias(pool, id_type, value, as_of).await?;
+    Ok(match matches.len() {
+        1 => matches.pop(),
+        _ => None,
+    })
 }
 
 pub async fn aliases(pool: &PgPool, instrument_id: i64) -> AppResult<Vec<Alias>> {
@@ -181,13 +207,44 @@ pub async fn current_security(pool: &PgPool, instrument_id: i64, as_of: NaiveDat
         .fetch_optional(pool).await?)
 }
 
-/// Record an attribute for a validity period. If we already believe something
-/// else about that exact period, the earlier belief is superseded first --
-/// which is what the partial unique index would otherwise refuse.
+/// Record an attribute for a validity period.
+///
+/// Two different things can be true when this is called, and both must be
+/// handled, because they mean different things for history:
+///   - a real-world change: `valid_from` lands inside a still-open prior
+///     period, so that period's end is now known -- close its `valid_to`.
+///   - a correction: we already asserted something for this exact
+///     `valid_from` and it was wrong -- supersede it (`system_to`), never
+///     move a boundary.
+/// If the incoming value is identical to what is already current for that
+/// exact period, the call is a no-op: superseding to write the same value
+/// again would only add noise to history.
 pub async fn set_attr(tx: &mut Tx<'_>, instrument_id: i64, attr: &str, value: &str,
                       valid_from: NaiveDate, source: &str, decision_id: Option<i64>)
     -> AppResult<()>
 {
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM instrument_attr
+          WHERE instrument_id = $1 AND attr = $2 AND valid_from = $3
+            AND system_to = 'infinity'")
+        .bind(instrument_id).bind(attr).bind(valid_from)
+        .fetch_optional(&mut **tx).await?;
+    if current.as_deref() == Some(value) {
+        return Ok(());
+    }
+
+    // Real-world change: $3 (valid_from) appears three times -- as the new
+    // end date, and in the bounds check for "a period that was still open
+    // when this one begins". A row with valid_from == $3 is the correction
+    // case below, not this one, so it is deliberately excluded here.
+    sqlx::query(
+        "UPDATE instrument_attr SET valid_to = $3
+          WHERE instrument_id = $1 AND attr = $2 AND system_to = 'infinity'
+            AND valid_from < $3 AND valid_to > $3")
+        .bind(instrument_id).bind(attr).bind(valid_from)
+        .execute(&mut **tx).await?;
+
+    // Correction: same period, different (or first) value.
     sqlx::query(
         "UPDATE instrument_attr SET system_to = now()
           WHERE instrument_id = $1 AND attr = $2 AND valid_from = $3
@@ -235,20 +292,24 @@ pub async fn propose_link(pool: &PgPool, predecessor_id: i64, successor_id: i64,
         .fetch_one(pool).await?)
 }
 
+/// A no-op against an already-confirmed link: without this guard a second
+/// call would silently overwrite who confirmed it and when.
 pub async fn confirm_link(pool: &PgPool, link_id: i64, by: &str) -> AppResult<()> {
     sqlx::query("UPDATE instrument_link SET confirmed_by = $2, confirmed_at = now()
-                  WHERE id = $1")
+                  WHERE id = $1 AND confirmed_by IS NULL")
         .bind(link_id).bind(by).execute(pool).await?;
     Ok(())
 }
 
-/// Only confirmed links are ever followed.
-pub async fn confirmed_successor(pool: &PgPool, instrument_id: i64)
-    -> AppResult<Option<i64>>
+/// Only confirmed links are ever followed. A spinoff can legitimately produce
+/// more than one confirmed successor, so every confirmed link is returned,
+/// most recently effective first (`successor_id` breaks ties deterministically).
+pub async fn confirmed_successors(pool: &PgPool, instrument_id: i64)
+    -> AppResult<Vec<i64>>
 {
     Ok(sqlx::query_scalar(
         "SELECT successor_id FROM instrument_link
           WHERE predecessor_id = $1 AND confirmed_by IS NOT NULL
-          ORDER BY effective_date DESC LIMIT 1")
-        .bind(instrument_id).fetch_optional(pool).await?)
+          ORDER BY effective_date DESC, successor_id")
+        .bind(instrument_id).fetch_all(pool).await?)
 }

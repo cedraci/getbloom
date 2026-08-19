@@ -70,12 +70,25 @@ CREATE TABLE instrument_attr (
                     'instrument_type','issuer','share_class','fund_vehicle','status')),
   value          TEXT NOT NULL,
   valid_from     DATE NOT NULL,
-  valid_to       DATE NOT NULL DEFAULT 'infinity',
+  -- chrono::NaiveDate cannot represent Postgres DATE 'infinity': it decodes as
+  -- ~5.9M years in the future and overflows, panicking in sqlx. 9999-12-31 is
+  -- the finite sentinel this schema uses for "open-ended" instead; see
+  -- instrument_store.rs's forever() and instrument_attr_no_infinity below.
+  valid_to       DATE NOT NULL DEFAULT DATE '9999-12-31',
   system_from    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- system_to has no finite sentinel and is left at real 'infinity': it is a
+  -- TIMESTAMPTZ never decoded into chrono here (store.rs's Attr/Alias structs
+  -- do not expose it), and instrument_attr_current above keys off literal
+  -- 'infinity'. A query that needs it in Rust should select
+  -- `system_to < 'infinity' AS superseded`, not the timestamp itself --
+  -- decoding literal infinity into chrono::DateTime<Utc> panics the same way.
   system_to      TIMESTAMPTZ NOT NULL DEFAULT 'infinity',
   source         TEXT NOT NULL CHECK (source IN ('bloomberg','user','derived')),
   decision_id    BIGINT REFERENCES resolution_decision(id),
-  CONSTRAINT instrument_attr_period CHECK (valid_from < valid_to)
+  CONSTRAINT instrument_attr_period CHECK (valid_from < valid_to),
+  -- Make the DATE 'infinity' mistake unrepresentable, not just unwritten by
+  -- convention. Do not "simplify" this away -- see the comment on valid_to.
+  CONSTRAINT instrument_attr_no_infinity CHECK (valid_to <> 'infinity')
 );
 CREATE UNIQUE INDEX instrument_attr_current
   ON instrument_attr (instrument_id, attr, valid_from)
@@ -92,14 +105,22 @@ CREATE TABLE instrument_alias (
   value                TEXT NOT NULL,
   exch_code            TEXT,
   valid_from           DATE NOT NULL,
-  valid_to             DATE NOT NULL DEFAULT 'infinity',
+  -- See instrument_attr.valid_to above: 9999-12-31 is the finite sentinel for
+  -- "open-ended" because chrono::NaiveDate cannot round-trip DATE 'infinity'.
+  valid_to             DATE NOT NULL DEFAULT DATE '9999-12-31',
   system_from          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- system_to is left at real 'infinity' on purpose -- see instrument_attr's
+  -- system_to comment. instrument_alias_current below keys off literal
+  -- 'infinity' too.
   system_to            TIMESTAMPTZ NOT NULL DEFAULT 'infinity',
   source               TEXT NOT NULL CHECK (source IN
                          ('bloomberg_hist_ids','bloomberg_ref','user')),
   bbg_action_id        TEXT,
   anchoring_identifier TEXT,
-  CONSTRAINT instrument_alias_period CHECK (valid_from < valid_to)
+  CONSTRAINT instrument_alias_period CHECK (valid_from < valid_to),
+  -- Make the DATE 'infinity' mistake unrepresentable, not just unwritten by
+  -- convention. Do not "simplify" this away -- see the comment on valid_to.
+  CONSTRAINT instrument_alias_no_infinity CHECK (valid_to <> 'infinity')
 );
 
 -- P0 6.4: HISTORICAL_IDS_TIME_RANGE asked about META US Equity returns
