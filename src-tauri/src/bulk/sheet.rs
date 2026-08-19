@@ -1,4 +1,4 @@
-//! Reading and writing the assets workbook. No database access lives here.
+//! Reading and writing the book workbook. No database access lives here.
 
 use crate::error::{AppError, AppResult};
 use calamine::{Data, Reader, Xlsx};
@@ -6,25 +6,27 @@ use rust_xlsxwriter::{DataValidation, Format, Workbook};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub const SHEET_NAME: &str = "Assets";
-pub const FIXED_HEADERS: [&str; 9] = [
-    "id", "label", "class", "id_kind", "ticker", "isin", "yellow_key", "active", "security",
+pub const SHEET_NAME: &str = "Book";
+pub const FIXED_HEADERS: [&str; 8] = [
+    "instrument_id", "label", "class", "identifier", "yellow_key", "active",
+    "security", "status",
 ];
 
-/// One asset as it appears in the exported workbook. `security` is written for
-/// the reader's benefit only -- import always recomputes it.
+/// One instrument as it appears in the exported workbook. `security` and
+/// `status` are written for the reader's benefit only -- import ignores both:
+/// `security` is derived from the alias valid today, and `status` reflects the
+/// review queue.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportRow {
-    pub id: i64,
+    pub instrument_id: i64,
     pub label: String,
     pub class: String,
-    pub id_kind: String,
-    pub ticker: String,
-    pub isin: String,
+    pub identifier: String,
     pub yellow_key: String,
     pub active: bool,
     pub security: String,
-    /// Names of the views this asset belongs to.
+    pub status: String,
+    /// Names of the views this instrument belongs to.
     pub views: Vec<String>,
 }
 
@@ -57,22 +59,23 @@ pub fn write_assets_sheet(
 
     for (i, r) in rows.iter().enumerate() {
         let row = (i + 1) as u32;
-        // A blank id is how the sheet says "new asset". Writing 0 here would
-        // read back as id 0 and be rejected as an id not in the database, so a
-        // row assembled for an add must leave the cell empty.
-        if r.id > 0 {
-            sheet.write_number_with_format(row, 0, r.id as f64, &readonly).map_err(xlsx_err)?;
+        // A blank instrument_id is how the sheet says "new instrument". Writing
+        // 0 here would read back as instrument_id 0 and be rejected as an id
+        // not in the database, so a row assembled for an add must leave the
+        // cell empty.
+        if r.instrument_id > 0 {
+            sheet.write_number_with_format(row, 0, r.instrument_id as f64, &readonly)
+                .map_err(xlsx_err)?;
         } else {
             sheet.write_blank(row, 0, &readonly).map_err(xlsx_err)?;
         }
         sheet.write_string(row, 1, &r.label).map_err(xlsx_err)?;
         sheet.write_string(row, 2, &r.class).map_err(xlsx_err)?;
-        sheet.write_string(row, 3, &r.id_kind).map_err(xlsx_err)?;
-        sheet.write_string(row, 4, &r.ticker).map_err(xlsx_err)?;
-        sheet.write_string(row, 5, &r.isin).map_err(xlsx_err)?;
-        sheet.write_string(row, 6, &r.yellow_key).map_err(xlsx_err)?;
-        sheet.write_string(row, 7, if r.active { "yes" } else { "no" }).map_err(xlsx_err)?;
-        sheet.write_string_with_format(row, 8, &r.security, &readonly).map_err(xlsx_err)?;
+        sheet.write_string(row, 3, &r.identifier).map_err(xlsx_err)?;
+        sheet.write_string(row, 4, &r.yellow_key).map_err(xlsx_err)?;
+        sheet.write_string(row, 5, if r.active { "yes" } else { "no" }).map_err(xlsx_err)?;
+        sheet.write_string_with_format(row, 6, &r.security, &readonly).map_err(xlsx_err)?;
+        sheet.write_string_with_format(row, 7, &r.status, &readonly).map_err(xlsx_err)?;
         for (j, v) in view_names.iter().enumerate() {
             let c = (FIXED_HEADERS.len() + j) as u16;
             let mark = if r.views.iter().any(|x| x == v) { "x" } else { "" };
@@ -80,20 +83,19 @@ pub fn write_assets_sheet(
         }
     }
 
-    // Dropdowns turn three of the most typo-prone columns into pick lists.
+    // Dropdowns turn the most typo-prone columns into pick lists.
     let last = rows.len().max(1) as u32;
     let classes: Vec<&str> = class_names.iter().map(String::as_str).collect();
     let dv_class = DataValidation::new().allow_list_strings(&classes).map_err(xlsx_err)?;
     sheet.add_data_validation(1, 2, last, 2, &dv_class).map_err(xlsx_err)?;
-    let dv_kind = DataValidation::new()
-        .allow_list_strings(&["ticker", "isin"]).map_err(xlsx_err)?;
-    sheet.add_data_validation(1, 3, last, 3, &dv_kind).map_err(xlsx_err)?;
     let dv_active = DataValidation::new()
         .allow_list_strings(&["yes", "no"]).map_err(xlsx_err)?;
-    sheet.add_data_validation(1, 7, last, 7, &dv_active).map_err(xlsx_err)?;
+    sheet.add_data_validation(1, 5, last, 5, &dv_active).map_err(xlsx_err)?;
     // `yellow_key` deliberately has no dropdown: the set is open-ended
     // (Equity, Corp, Index, Curncy, Comdty, Govt, ...) and constraining it
     // would block a legitimate key nobody thought to list.
+    // `identifier` deliberately has no dropdown either: id_kind is gone,
+    // `detect_id_kind` reads the shape of whatever the user typed.
 
     // `Workbook::save` truncates its target (`File::create`, then streams the
     // zip) before writing a single byte of sheet content, so a failure
@@ -136,12 +138,10 @@ pub fn file_sha256(path: &Path) -> AppResult<String> {
 pub struct SheetRow {
     /// 1-based spreadsheet row number, so error messages match what Excel shows.
     pub row_number: u32,
-    pub id: Option<i64>,
+    pub instrument_id: Option<i64>,
     pub label: String,
     pub class: String,
-    pub id_kind: String,
-    pub ticker: String,
-    pub isin: String,
+    pub identifier: String,
     pub yellow_key: String,
     pub active: bool,
     pub views: Vec<String>,
@@ -190,17 +190,18 @@ pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
     let header: Vec<String> = header_raw.iter().map(|h| h.to_lowercase()).collect();
 
     let col = |name: &str| header.iter().position(|h| h == name);
-    let (c_id, c_label, c_class, c_kind, c_ticker, c_isin, c_key, c_active) = (
-        col("id"), col("label"), col("class"), col("id_kind"),
-        col("ticker"), col("isin"), col("yellow_key"), col("active"),
+    let (c_id, c_label, c_class, c_identifier, c_key, c_active) = (
+        col("instrument_id"), col("label"), col("class"),
+        col("identifier"), col("yellow_key"), col("active"),
     );
     if c_label.is_none() {
         return Err(AppError::Validation("sheet has no 'label' column".into()));
     }
 
-    // Anything that is not a known fixed header is a view column. `security` is
-    // a fixed header and is read but discarded -- import recomputes it. View
-    // names keep their original case, because they have to match `view.name`.
+    // Anything that is not a known fixed header is a view column. `security`
+    // and `status` are fixed headers and are read but discarded -- import
+    // recomputes them. View names keep their original case, because they have
+    // to match `view.name`.
     let (view_indices, view_columns): (Vec<usize>, Vec<String>) = header_raw
         .iter()
         .enumerate()
@@ -215,11 +216,12 @@ pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
             continue;
         }
         let id_text = cell_text(r, c_id);
-        let id = if id_text.is_empty() {
+        let instrument_id = if id_text.is_empty() {
             None
         } else {
             Some(id_text.parse::<i64>().map_err(|_| {
-                AppError::Validation(format!("row {row_number}: id '{id_text}' is not a number"))
+                AppError::Validation(format!(
+                    "row {row_number}: instrument_id '{id_text}' is not a number"))
             })?)
         };
         let active_text = cell_text(r, c_active).to_lowercase();
@@ -240,12 +242,10 @@ pub fn read_assets_sheet(path: &Path) -> AppResult<SheetData> {
 
         rows.push(SheetRow {
             row_number,
-            id,
+            instrument_id,
             label: cell_text(r, c_label),
             class: cell_text(r, c_class),
-            id_kind: cell_text(r, c_kind).to_lowercase(),
-            ticker: cell_text(r, c_ticker),
-            isin: cell_text(r, c_isin),
+            identifier: cell_text(r, c_identifier),
             yellow_key: cell_text(r, c_key),
             active,
             views,
@@ -261,17 +261,64 @@ mod tests {
 
     fn sample() -> Vec<ExportRow> {
         vec![ExportRow {
-            id: 7,
+            instrument_id: 7,
             label: "Apple".into(),
             class: "Equity".into(),
-            id_kind: "ticker".into(),
-            ticker: "AAPL US".into(),
-            isin: String::new(),
+            identifier: "AAPL US".into(),
             yellow_key: "Equity".into(),
             active: true,
             security: "AAPL US Equity".into(),
+            status: "resolved".into(),
             views: vec!["Daily".into()],
         }]
+    }
+
+    /// Writes headers only (no data rows) -- enough to exercise
+    /// `has_id_column` without needing a full, valid row.
+    fn write_minimal_sheet(path: &Path, headers: &[&str]) {
+        let mut book = Workbook::new();
+        let s = book.add_worksheet();
+        s.set_name(SHEET_NAME).unwrap();
+        for (c, h) in headers.iter().enumerate() {
+            s.write_string(0, c as u16, *h).unwrap();
+        }
+        book.save(path).unwrap();
+    }
+
+    #[test]
+    fn the_header_names_instruments_not_assets() {
+        assert_eq!(FIXED_HEADERS,
+                   ["instrument_id", "label", "class", "identifier", "yellow_key",
+                    "active", "security", "status"]);
+    }
+
+    /// The id column is the guardrail from the 2026-08-18 work: a file without
+    /// it was never a full export, so the absence of a row means nothing and no
+    /// removal may be proposed. Renaming the column must not lose that.
+    #[test]
+    fn a_sheet_without_instrument_id_cannot_propose_removals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hand_built.xlsx");
+        write_minimal_sheet(&path, &["label", "class", "identifier", "yellow_key"]);
+        let data = read_assets_sheet(&path).unwrap();
+        assert!(!data.has_id_column);
+    }
+
+    /// One column, not two. id_kind is gone: detect_id_kind reads the shape of
+    /// the identifier, and a user who typed an ISIN into a "ticker" column was
+    /// only ever telling us something we could see for ourselves.
+    #[test]
+    fn one_identifier_column_replaces_ticker_and_isin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.xlsx");
+        write_assets_sheet(&path, &[ExportRow {
+            instrument_id: 7, label: "Apple".into(), class: "Equity".into(),
+            identifier: "AAPL US".into(), yellow_key: "Equity".into(),
+            active: true, security: "AAPL US Equity".into(),
+            status: "resolved".into(), views: vec![] }], &[], &["Equity".into()])
+            .unwrap();
+        let data = read_assets_sheet(&path).unwrap();
+        assert_eq!(data.rows[0].identifier, "AAPL US");
     }
 
     #[test]
@@ -289,7 +336,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.xlsx");
         let mut rows = sample();
-        rows[0].id = 0; // an asset that does not exist yet
+        rows[0].instrument_id = 0; // an instrument that does not exist yet
         write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
         // Proven properly in the reader task; here it is enough that the file
         // writes without turning 0 into a number the reader would parse.
@@ -372,11 +419,10 @@ mod tests {
         assert_eq!(data.rows.len(), 1);
         let r = &data.rows[0];
         assert_eq!(r.row_number, 2, "spreadsheet rows are 1-based and row 1 is the header");
-        assert_eq!(r.id, Some(7));
+        assert_eq!(r.instrument_id, Some(7));
         assert_eq!(r.label, "Apple");
         assert_eq!(r.class, "Equity");
-        assert_eq!(r.id_kind, "ticker");
-        assert_eq!(r.ticker, "AAPL US");
+        assert_eq!(r.identifier, "AAPL US");
         assert_eq!(r.yellow_key, "Equity");
         assert!(r.active);
         assert_eq!(r.views, vec!["Daily".to_string()]);
@@ -387,11 +433,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.xlsx");
         let mut rows = sample();
-        rows[0].id = 0;
+        rows[0].instrument_id = 0;
         write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
         let data = read_assets_sheet(&path).unwrap();
         assert!(data.has_id_column, "the column exists even when its cells are blank");
-        assert_eq!(data.rows[0].id, None, "a blank id means 'add this asset'");
+        assert_eq!(data.rows[0].instrument_id, None, "a blank id means 'add this instrument'");
     }
 
     #[test]
@@ -402,20 +448,19 @@ mod tests {
         let mut book = Workbook::new();
         let s = book.add_worksheet();
         s.set_name(SHEET_NAME).unwrap();
-        for (c, h) in ["label", "class", "id_kind", "ticker", "yellow_key"].iter().enumerate() {
+        for (c, h) in ["label", "class", "identifier", "yellow_key"].iter().enumerate() {
             s.write_string(0, c as u16, *h).unwrap();
         }
         s.write_string(1, 0, "Microsoft").unwrap();
         s.write_string(1, 1, "Equity").unwrap();
-        s.write_string(1, 2, "ticker").unwrap();
-        s.write_string(1, 3, "MSFT US").unwrap();
-        s.write_string(1, 4, "Equity").unwrap();
+        s.write_string(1, 2, "MSFT US").unwrap();
+        s.write_string(1, 3, "Equity").unwrap();
         book.save(&path).unwrap();
 
         let data = read_assets_sheet(&path).unwrap();
         assert!(!data.has_id_column);
         assert_eq!(data.rows.len(), 1);
-        assert_eq!(data.rows[0].id, None);
+        assert_eq!(data.rows[0].instrument_id, None);
         assert_eq!(data.rows[0].label, "Microsoft");
         assert!(data.rows[0].active, "a sheet with no `active` column means all active");
     }
@@ -452,7 +497,7 @@ mod tests {
         for (c, h) in FIXED_HEADERS.iter().enumerate() {
             s.write_string(0, c as u16, *h).unwrap();
         }
-        // Column 1 is label, column 7 is active.
+        // Column 1 is label, column 5 is active.
         let cases = [
             ("Row No", "no"),
             ("Row N", "n"),
@@ -464,7 +509,7 @@ mod tests {
         for (i, (label, value)) in cases.iter().enumerate() {
             let row = (i + 1) as u32;
             s.write_string(row, 1, *label).unwrap();
-            s.write_string(row, 7, *value).unwrap();
+            s.write_string(row, 5, *value).unwrap();
         }
         book.save(&path).unwrap();
 

@@ -406,7 +406,8 @@ pub async fn apply_assets_import(state: State<'_, AppState>, path: String,
                                  removal_modes: Vec<(i64, deletion::DeleteMode)>,
                                  confirmed_removal_count: Option<i64>)
     -> Result<bulk::ImportResult, AppError> {
-    bulk::apply_import(&state.pool, &PathBuf::from(path), &file_hash,
+    let cfg = pipeline_cfg(&state).await;
+    bulk::apply_import(&state.pool, &cfg, &PathBuf::from(path), &file_hash,
                        &removal_modes, confirmed_removal_count).await
 }
 

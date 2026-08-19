@@ -6,23 +6,21 @@
 //! here and therefore testable in milliseconds without Postgres or Excel.
 
 use crate::bulk::sheet::SheetData;
-use crate::registry::resolve_bdp_security;
+use crate::resolution::normalize::{build_security, detect_id_kind};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// An asset as the database currently holds it, flattened to names so the
+/// An instrument as the book currently holds it, flattened to names so the
 /// differ never has to resolve an id to a class or a view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DbAsset {
-    pub id: i64,
+pub struct DbInstrument {
+    pub instrument_id: i64,
     pub label: String,
     pub class: String,
-    pub id_kind: String,
-    pub ticker: String,
-    pub isin: String,
+    pub identifier: String,
     pub yellow_key: String,
     pub active: bool,
-    pub bdp_security: String,
+    pub security: String,
     pub views: Vec<String>,
 }
 
@@ -38,12 +36,12 @@ pub struct AddRow {
     pub row_number: u32,
     pub label: String,
     pub class: String,
-    pub id_kind: String,
-    pub ticker: String,
-    pub isin: String,
+    pub identifier: String,
     pub yellow_key: String,
     pub active: bool,
-    /// Resolved here so the apply step never re-derives it differently.
+    /// Resolved here so the plan is legible in a preview; the apply step
+    /// re-resolves for real through `book::add`, which is the only place an
+    /// instrument_id is actually minted.
     pub security: String,
     pub views: Vec<String>,
 }
@@ -54,9 +52,7 @@ pub struct EditRow {
     pub row_number: u32,
     pub label: String,
     pub class: String,
-    pub id_kind: String,
-    pub ticker: String,
-    pub isin: String,
+    pub identifier: String,
     pub yellow_key: String,
     pub security: String,
     /// Column names that differ from the database, for display.
@@ -110,7 +106,7 @@ fn sorted(mut v: Vec<String>) -> Vec<String> {
 
 pub fn diff(
     sheet: &SheetData,
-    db: &[DbAsset],
+    db: &[DbInstrument],
     known_classes: &[String],
     known_views: &[String],
     file_hash: &str,
@@ -131,7 +127,7 @@ pub fn diff(
 
     let classes: HashSet<&str> = known_classes.iter().map(String::as_str).collect();
     let views: HashSet<&str> = known_views.iter().map(String::as_str).collect();
-    let by_id: HashMap<i64, &DbAsset> = db.iter().map(|a| (a.id, a)).collect();
+    let by_id: HashMap<i64, &DbInstrument> = db.iter().map(|a| (a.instrument_id, a)).collect();
 
     // A view with no column in this sheet is a view the sheet does not speak
     // for. Its memberships must be left alone, symmetric with guardrail 1 (a
@@ -152,31 +148,32 @@ pub fn diff(
     }
 
     // Securities claimed by rows in this sheet, used to catch a rename that
-    // would hit UNIQUE (bdp_security) before the transaction ever opens.
+    // would collide with another instrument's identity.
     let mut claimed: HashMap<String, u32> = HashMap::new();
     let mut seen_ids: HashSet<i64> = HashSet::new();
     let mut present_ids: HashSet<i64> = HashSet::new();
 
     for r in &sheet.rows {
         // Identity comes before every other check, including label and class.
-        // A row carrying a real id must register as "still present" no matter
-        // what else is wrong with it, or a validation failure elsewhere (a
-        // class typo) gets misread by the removal pass below as "the user
-        // deleted this asset" -- exactly what guardrail 1 exists to prevent.
-        let existing = match r.id {
+        // A row carrying a real instrument_id must register as "still
+        // present" no matter what else is wrong with it, or a validation
+        // failure elsewhere (a class typo) gets misread by the removal pass
+        // below as "the user deleted this instrument" -- exactly what
+        // guardrail 1 exists to prevent.
+        let existing = match r.instrument_id {
             None => None,
             Some(id) => {
                 if !seen_ids.insert(id) {
                     plan.invalid_rows.push(InvalidRow {
                         row_number: r.row_number,
-                        reason: format!("id {id} appears twice in the sheet"),
+                        reason: format!("instrument_id {id} appears twice in the sheet"),
                     });
                     continue;
                 }
                 let Some(cur) = by_id.get(&id) else {
                     plan.invalid_rows.push(InvalidRow {
                         row_number: r.row_number,
-                        reason: format!("id {id} is not in the database"),
+                        reason: format!("instrument_id {id} is not in the database"),
                     });
                     continue;
                 };
@@ -200,9 +197,7 @@ pub fn diff(
             continue;
         }
 
-        let ticker = (!r.ticker.is_empty()).then_some(r.ticker.as_str());
-        let isin = (!r.isin.is_empty()).then_some(r.isin.as_str());
-        let security = match resolve_bdp_security(&r.id_kind, ticker, isin, &r.yellow_key) {
+        let security = match build_security(detect_id_kind(&r.identifier), &r.identifier, &r.yellow_key) {
             Ok(s) => s,
             Err(e) => {
                 plan.invalid_rows.push(InvalidRow {
@@ -220,26 +215,17 @@ pub fn diff(
             continue;
         }
 
-        // A security that belongs to a DIFFERENT asset would violate the unique
-        // index. The same asset keeping its own security is fine.
-        //
-        // This also fires, deliberately, for a blank-id row whose security
-        // matches an asset THIS SAME IMPORT just created on an earlier apply
-        // -- the sheet on disk still shows a blank id for a row the database
-        // has since assigned a real one to. The message below is written for
-        // that reader: the fix is "export again", not "delete this row". The
-        // alternative -- matching a blank-id row to an existing asset by
-        // security instead of rejecting it -- was rejected: a user pasting a
-        // ticker that already exists, meaning to add a genuinely new asset,
-        // would then silently rename the existing one instead of being told.
-        if let Some(owner) = db.iter().find(|a| a.bdp_security == security) {
-            if Some(owner.id) != r.id {
+        // A security that belongs to a DIFFERENT instrument means this row is
+        // trying to rebind an existing instrument's identity onto one it does
+        // not own. The same instrument keeping its own security is fine.
+        if let Some(owner) = db.iter().find(|a| a.security == security) {
+            if Some(owner.instrument_id) != r.instrument_id {
                 plan.invalid_rows.push(InvalidRow {
                     row_number: r.row_number,
                     reason: format!(
-                        "security '{security}' already belongs to asset #{} '{}'; \
+                        "security '{security}' already belongs to instrument #{} '{}'; \
                          if you just imported this sheet, export it again to pick up the new ids",
-                        owner.id, owner.label),
+                        owner.instrument_id, owner.label),
                 });
                 continue;
             }
@@ -257,32 +243,51 @@ pub fn diff(
                 row_number: r.row_number,
                 label: r.label.clone(),
                 class: r.class.clone(),
-                id_kind: r.id_kind.clone(),
-                ticker: r.ticker.clone(),
-                isin: r.isin.clone(),
+                identifier: r.identifier.clone(),
                 yellow_key: r.yellow_key.clone(),
                 active: r.active,
                 security,
                 views: views_now,
             }),
             Some(cur) => {
-                let id = cur.id;
+                // Changing an existing row's identifier OR its yellow key
+                // would rebind one instrument_id to a different security,
+                // which destroys the link between the history already stored
+                // and the instrument it belongs to. Compared on the resolved
+                // security rather than the identifier alone, so a yellow-key
+                // change (also an identity change: "AAPL US Equity" and
+                // "AAPL US Corp" are different instruments) is caught the same
+                // way. Removing the row and adding the new identifier is the
+                // honest way to express that -- and the only one available:
+                // book_entry stores no identity fields for an UPDATE to touch,
+                // identity lives in instrument_alias, which is append-only.
+                if !cur.security.eq_ignore_ascii_case(&security) {
+                    plan.invalid_rows.push(InvalidRow {
+                        row_number: r.row_number,
+                        reason: format!(
+                            "identifier cannot be changed in place (was {}, sheet says {}); \
+                             remove this row and add the new identifier instead",
+                            cur.identifier, r.identifier),
+                    });
+                    continue;
+                }
+
+                // Only `label` and `class` are book_entry's own columns and
+                // therefore the only fields an edit can actually touch --
+                // identifier and yellow_key together are the security, and
+                // the check above has already required it to be unchanged by
+                // the time this line runs.
+                let id = cur.instrument_id;
                 let mut changed = Vec::new();
                 if r.label != cur.label { changed.push("label".to_string()); }
                 if r.class != cur.class { changed.push("class".to_string()); }
-                if r.id_kind != cur.id_kind { changed.push("id_kind".to_string()); }
-                if r.ticker != cur.ticker { changed.push("ticker".to_string()); }
-                if r.isin != cur.isin { changed.push("isin".to_string()); }
-                if r.yellow_key != cur.yellow_key { changed.push("yellow_key".to_string()); }
                 if !changed.is_empty() {
                     plan.edits.push(EditRow {
                         id,
                         row_number: r.row_number,
                         label: r.label.clone(),
                         class: r.class.clone(),
-                        id_kind: r.id_kind.clone(),
-                        ticker: r.ticker.clone(),
-                        isin: r.isin.clone(),
+                        identifier: r.identifier.clone(),
                         yellow_key: r.yellow_key.clone(),
                         security: security.clone(),
                         changed,
@@ -299,9 +304,10 @@ pub fn diff(
 
                 // Only views this sheet has a column for are in play. A view
                 // absent from `sheet.view_columns` is not addressed by this
-                // sheet, so the asset's current membership in it is dropped
-                // from `before` too and therefore never proposed as a removal
-                // (or, symmetrically, an addition it could never have shown).
+                // sheet, so the instrument's current membership in it is
+                // dropped from `before` too and therefore never proposed as a
+                // removal (or, symmetrically, an addition it could never have
+                // shown).
                 let before = sorted(cur.views.iter()
                     .filter(|v| sheet_views.contains(v.as_str()))
                     .cloned().collect());
@@ -323,11 +329,11 @@ pub fn diff(
     // say that a missing row means "remove this".
     if sheet.has_id_column {
         for a in db {
-            if !present_ids.contains(&a.id) {
+            if !present_ids.contains(&a.instrument_id) {
                 plan.removals.push(AssetRef {
-                    id: a.id,
+                    id: a.instrument_id,
                     label: a.label.clone(),
-                    security: a.bdp_security.clone(),
+                    security: a.security.clone(),
                 });
             }
         }
@@ -350,18 +356,18 @@ mod tests {
     fn classes() -> Vec<String> { vec!["Equity".into(), "Corp".into()] }
     fn views() -> Vec<String> { vec!["Daily".into(), "Weekly".into()] }
 
-    fn db_apple() -> DbAsset {
-        DbAsset {
-            id: 1, label: "Apple".into(), class: "Equity".into(), id_kind: "ticker".into(),
-            ticker: "AAPL US".into(), isin: String::new(), yellow_key: "Equity".into(),
-            active: true, bdp_security: "AAPL US Equity".into(), views: vec!["Daily".into()],
+    fn db_apple() -> DbInstrument {
+        DbInstrument {
+            instrument_id: 1, label: "Apple".into(), class: "Equity".into(),
+            identifier: "AAPL US".into(), yellow_key: "Equity".into(),
+            active: true, security: "AAPL US Equity".into(), views: vec!["Daily".into()],
         }
     }
 
-    fn row_from(a: &DbAsset) -> SheetRow {
+    fn row_from(a: &DbInstrument) -> SheetRow {
         SheetRow {
-            row_number: 2, id: Some(a.id), label: a.label.clone(), class: a.class.clone(),
-            id_kind: a.id_kind.clone(), ticker: a.ticker.clone(), isin: a.isin.clone(),
+            row_number: 2, instrument_id: Some(a.instrument_id), label: a.label.clone(),
+            class: a.class.clone(), identifier: a.identifier.clone(),
             yellow_key: a.yellow_key.clone(), active: a.active, views: a.views.clone(),
         }
     }
@@ -385,10 +391,10 @@ mod tests {
     fn a_blank_id_is_an_add_with_a_resolved_security() {
         let db = vec![db_apple()];
         let mut new_row = row_from(&db[0]);
-        new_row.id = None;
+        new_row.instrument_id = None;
         new_row.row_number = 3;
         new_row.label = "Microsoft".into();
-        new_row.ticker = "MSFT US".into();
+        new_row.identifier = "MSFT US".into();
         new_row.views = vec!["Weekly".into()];
         let p = diff(&sheet(vec![row_from(&db[0]), new_row], true), &db,
                      &classes(), &views(), "hash");
@@ -400,18 +406,52 @@ mod tests {
     }
 
     #[test]
-    fn identity_travels_in_the_id_so_a_rename_is_an_edit() {
-        let db = vec![db_apple()];
-        let mut r = row_from(&db[0]);
-        r.label = "Apple Inc".into();
-        r.ticker = "AAPL UW".into();
-        let p = diff(&sheet(vec![r], true), &db, &classes(), &views(), "hash");
-        assert!(p.adds.is_empty() && p.removals.is_empty());
-        assert_eq!(p.edits.len(), 1);
-        assert_eq!(p.edits[0].id, 1);
-        assert_eq!(p.edits[0].security, "AAPL UW Equity");
-        assert!(p.edits[0].changed.contains(&"label".to_string()));
-        assert!(p.edits[0].changed.contains(&"ticker".to_string()));
+    fn a_new_row_is_an_addition_that_will_need_resolving() {
+        let sheet = SheetData { has_id_column: true, view_columns: vec![],
+            rows: vec![SheetRow { row_number: 2, instrument_id: None,
+                label: "Tesla".into(), class: "Equity".into(),
+                identifier: "TSLA US".into(), yellow_key: "Equity".into(),
+                active: true, views: vec![] }] };
+        let plan = diff(&sheet, &[], &["Equity".into()], &[], "hash");
+        assert_eq!(plan.adds.len(), 1);
+        assert_eq!(plan.adds[0].identifier, "TSLA US");
+    }
+
+    /// The identifier is not editable in place: changing it means a different
+    /// instrument, which is an add plus a removal, not an edit. Silently
+    /// rebinding an existing instrument_id to a new security is exactly the
+    /// history-destroying edit this phase exists to prevent.
+    #[test]
+    fn changing_the_identifier_of_an_existing_row_is_rejected() {
+        let db = vec![DbInstrument { instrument_id: 7, label: "Apple".into(),
+            class: "Equity".into(), identifier: "AAPL US".into(),
+            yellow_key: "Equity".into(), active: true,
+            security: "AAPL US Equity".into(), views: vec![] }];
+        let sheet = SheetData { has_id_column: true, view_columns: vec![],
+            rows: vec![SheetRow { row_number: 2, instrument_id: Some(7),
+                label: "Apple".into(), class: "Equity".into(),
+                identifier: "MSFT US".into(), yellow_key: "Equity".into(),
+                active: true, views: vec![] }] };
+        let plan = diff(&sheet, &db, &["Equity".into()], &[], "hash");
+        assert_eq!(plan.invalid_rows.len(), 1);
+        assert!(plan.invalid_rows[0].reason.contains("identifier"));
+        assert!(plan.edits.is_empty());
+    }
+
+    #[test]
+    fn a_label_change_is_still_an_ordinary_edit() {
+        let db = vec![DbInstrument { instrument_id: 7, label: "Apple".into(),
+            class: "Equity".into(), identifier: "AAPL US".into(),
+            yellow_key: "Equity".into(), active: true,
+            security: "AAPL US Equity".into(), views: vec![] }];
+        let sheet = SheetData { has_id_column: true, view_columns: vec![],
+            rows: vec![SheetRow { row_number: 2, instrument_id: Some(7),
+                label: "Apple Inc".into(), class: "Equity".into(),
+                identifier: "AAPL US".into(), yellow_key: "Equity".into(),
+                active: true, views: vec![] }] };
+        let plan = diff(&sheet, &db, &["Equity".into()], &[], "hash");
+        assert_eq!(plan.edits.len(), 1);
+        assert!(plan.invalid_rows.is_empty());
     }
 
     #[test]
@@ -461,9 +501,8 @@ mod tests {
     fn a_sheet_without_an_id_column_never_proposes_a_removal() {
         let db = vec![db_apple()];
         let pasted = SheetRow {
-            row_number: 2, id: None, label: "Microsoft".into(), class: "Equity".into(),
-            id_kind: "ticker".into(), ticker: "MSFT US".into(), isin: String::new(),
-            yellow_key: "Equity".into(), active: true, views: vec![],
+            row_number: 2, instrument_id: None, label: "Microsoft".into(), class: "Equity".into(),
+            identifier: "MSFT US".into(), yellow_key: "Equity".into(), active: true, views: vec![],
         };
         let p = diff(&sheet(vec![pasted], false), &db, &classes(), &views(), "hash");
         assert!(p.removals.is_empty(), "a pasted list must not delete the book");
@@ -473,12 +512,12 @@ mod tests {
     /// Guardrail 2, spec §8.1.
     #[test]
     fn removing_more_than_half_the_active_book_demands_typed_confirmation() {
-        let db: Vec<DbAsset> = (1..=4).map(|i| {
+        let db: Vec<DbInstrument> = (1..=4).map(|i| {
             let mut a = db_apple();
-            a.id = i;
+            a.instrument_id = i;
             a.label = format!("A{i}");
-            a.bdp_security = format!("A{i} US Equity");
-            a.ticker = format!("A{i} US");
+            a.security = format!("A{i} US Equity");
+            a.identifier = format!("A{i} US");
             a
         }).collect();
         let kept = SheetRow { row_number: 2, ..row_from(&db[0]) };
@@ -506,26 +545,27 @@ mod tests {
                        .invalid_rows.len(), 1);
 
         let mut bad_id = row_from(&db[0]);
-        bad_id.id = Some(999);
+        bad_id.instrument_id = Some(999);
         let p = diff(&sheet(vec![bad_id], true), &db, &classes(), &views(), "h");
         assert_eq!(p.invalid_rows.len(), 1);
         assert!(p.invalid_rows[0].reason.contains("999"));
 
-        // id_kind says ticker but only the isin column is filled.
-        let mut mismatch = row_from(&db[0]);
-        mismatch.ticker = String::new();
-        mismatch.isin = "FR0000120271".into();
-        assert_eq!(diff(&sheet(vec![mismatch], true), &db, &classes(), &views(), "h")
+        // An identifier that is only the yellow key never had a security in
+        // it -- the single-column replacement for the old ticker/isin
+        // mismatch case, which no longer exists now that id_kind is gone.
+        let mut bad_identifier = row_from(&db[0]);
+        bad_identifier.identifier = "Equity".into();
+        assert_eq!(diff(&sheet(vec![bad_identifier], true), &db, &classes(), &views(), "h")
                        .invalid_rows.len(), 1);
     }
 
     #[test]
     fn a_duplicate_id_and_a_colliding_security_are_both_rejected() {
         let mut msft = db_apple();
-        msft.id = 2;
+        msft.instrument_id = 2;
         msft.label = "Microsoft".into();
-        msft.ticker = "MSFT US".into();
-        msft.bdp_security = "MSFT US Equity".into();
+        msft.identifier = "MSFT US".into();
+        msft.security = "MSFT US Equity".into();
         let db = vec![db_apple(), msft];
 
         let dup = vec![row_from(&db[0]), SheetRow { row_number: 3, ..row_from(&db[0]) }];
@@ -533,9 +573,9 @@ mod tests {
         assert!(p.invalid_rows.iter().any(|i| i.reason.contains("twice")),
                 "got {:?}", p.invalid_rows);
 
-        // Renaming Apple onto Microsoft's security must not reach the UNIQUE index.
+        // Renaming Apple onto Microsoft's security must not reach the store.
         let mut collide = row_from(&db[0]);
-        collide.ticker = "MSFT US".into();
+        collide.identifier = "MSFT US".into();
         let q = diff(&sheet(vec![collide, SheetRow { row_number: 3, ..row_from(&db[1]) }], true),
                      &db, &classes(), &views(), "h");
         assert!(q.invalid_rows.iter().any(|i| i.reason.contains("MSFT US Equity")),
@@ -598,8 +638,8 @@ mod tests {
     }
 
     /// Regression: a class typo on a row carrying a real id must not also read
-    /// as "the user deleted this asset" -- exactly what guardrail 1 exists to
-    /// prevent, and the one place the previous fix (Task 9's first pass) did
+    /// as "the user deleted this instrument" -- exactly what guardrail 1 exists
+    /// to prevent, and the one place the previous fix (Task 9's first pass) did
     /// not go far enough.
     #[test]
     fn an_invalid_class_on_an_existing_row_is_not_also_a_removal() {
@@ -630,16 +670,16 @@ mod tests {
     #[test]
     fn a_rejected_claim_does_not_block_a_later_valid_row() {
         let mut msft = db_apple();
-        msft.id = 2;
+        msft.instrument_id = 2;
         msft.label = "Microsoft".into();
-        msft.ticker = "MSFT US".into();
-        msft.bdp_security = "MSFT US Equity".into();
+        msft.identifier = "MSFT US".into();
+        msft.security = "MSFT US Equity".into();
         let db = vec![db_apple(), msft];
 
         // Row 2 renames Apple onto Microsoft's security and is rejected. Row 3
         // is Microsoft's own, completely unmodified row.
         let mut collide = row_from(&db[0]);
-        collide.ticker = "MSFT US".into();
+        collide.identifier = "MSFT US".into();
         let rows = vec![collide, SheetRow { row_number: 3, ..row_from(&db[1]) }];
         let p = diff(&sheet(rows, true), &db, &classes(), &views(), "h");
 
@@ -647,7 +687,7 @@ mod tests {
                    "only the renamed row should be invalid, got {:?}", p.invalid_rows);
         assert_eq!(p.invalid_rows[0].row_number, 2);
         assert_eq!(p.invalid_rows[0].reason,
-                   "security 'MSFT US Equity' already belongs to asset #2 'Microsoft'; \
+                   "security 'MSFT US Equity' already belongs to instrument #2 'Microsoft'; \
                     if you just imported this sheet, export it again to pick up the new ids");
     }
 
@@ -657,30 +697,30 @@ mod tests {
     fn add_rows_are_checked_for_collisions_and_duplicates_too() {
         let db = vec![db_apple()];
 
-        // An add that resolves to a security a DB asset already owns. Apple's
-        // own row is deliberately left out of the sheet so this exercises the
-        // owner-collision check itself, not the in-sheet claimed-by-row-N path
-        // covered by the next case.
+        // An add that resolves to a security a DB instrument already owns.
+        // Apple's own row is deliberately left out of the sheet so this
+        // exercises the owner-collision check itself, not the
+        // in-sheet claimed-by-row-N path covered by the next case.
         let mut add_collides = row_from(&db[0]);
-        add_collides.id = None;
+        add_collides.instrument_id = None;
         add_collides.row_number = 2;
         add_collides.label = "Also Apple".into();
-        // ticker/yellow_key untouched -> resolves to "AAPL US Equity", Apple's own.
+        // identifier/yellow_key untouched -> resolves to "AAPL US Equity", Apple's own.
         let p = diff(&sheet(vec![add_collides], true), &db, &classes(), &views(), "h");
         assert!(p.adds.is_empty(), "the colliding add must not be proposed, got {:?}", p.adds);
         assert_eq!(p.invalid_rows.len(), 1);
         assert_eq!(p.invalid_rows[0].row_number, 2);
         assert_eq!(p.invalid_rows[0].reason,
-                   "security 'AAPL US Equity' already belongs to asset #1 'Apple'; \
+                   "security 'AAPL US Equity' already belongs to instrument #1 'Apple'; \
                     if you just imported this sheet, export it again to pick up the new ids");
 
         // Two adds in the same sheet claiming the same brand-new security.
         let mut add1 = row_from(&db[0]);
-        add1.id = None; add1.row_number = 3; add1.label = "New1".into();
-        add1.ticker = "NEW US".into();
+        add1.instrument_id = None; add1.row_number = 3; add1.label = "New1".into();
+        add1.identifier = "NEW US".into();
         let mut add2 = row_from(&db[0]);
-        add2.id = None; add2.row_number = 4; add2.label = "New2".into();
-        add2.ticker = "NEW US".into();
+        add2.instrument_id = None; add2.row_number = 4; add2.label = "New2".into();
+        add2.identifier = "NEW US".into();
         let q = diff(&sheet(vec![row_from(&db[0]), add1, add2], true), &db,
                      &classes(), &views(), "h");
         assert_eq!(q.adds.len(), 1, "only the first add should succeed, got {:?}", q.adds);

@@ -56,7 +56,7 @@ pub struct DeletionImpact {
     /// Currently only `EntityKind::Asset` (a book entry): purging one removes
     /// the book entry and its view memberships, never the instrument's
     /// identity, its aliases, or its recorded observations -- see
-    /// `purge_asset_tx`. Without this flag the dialog cannot be worded
+    /// `purge_book_entry_tx`. Without this flag the dialog cannot be worded
     /// correctly for both cases: a field purge really does delete its
     /// observations, an asset purge never does.
     pub purge_keeps_history: bool,
@@ -98,7 +98,7 @@ pub async fn describe_deletion(
     match kind {
         // "Asset" here means a book entry: identity (instrument, aliases,
         // observations) lives elsewhere and a book-entry deletion never
-        // touches it -- see purge_asset_tx. observations/issues below are
+        // touches it -- see purge_book_entry_tx. observations/issues below are
         // shown for context (how much history this instrument has), not as
         // a warning of data loss -- purge_keeps_history tells the frontend
         // to word it that way.
@@ -220,12 +220,12 @@ pub async fn delete_asset_class(pool: &PgPool, id: i64) -> AppResult<()> {
 /// observation history recorded against `instrument_id` belongs to the
 /// instrument, not to the book entry that happened to be watching it.
 ///
-/// Kept named `purge_asset_tx` (not `purge_book_entry_tx`) because
-/// `bulk/mod.rs` imports it by this name; that module still targets the
-/// removed `asset` table and is retargeted by a later task, out of scope
-/// here (see task 12 correction G) -- renaming this helper too would only
-/// break that import for no benefit.
-pub async fn purge_asset_tx(
+/// Renamed from `purge_asset_tx` in Task 13: `bulk/mod.rs` was the last
+/// caller still importing it by the old name (Task 12 correction G left it
+/// alone because `bulk/` still targeted the removed `asset` table at the
+/// time). Task 13 retargets `bulk/` onto `book_entry`, so it now owns the
+/// last caller and the rename.
+pub async fn purge_book_entry_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: i64,
 ) -> AppResult<()> {
@@ -269,7 +269,7 @@ pub async fn delete_book_entry(pool: &PgPool, id: i64, mode: DeleteMode) -> AppR
         }
         DeleteMode::Purge => {
             let mut tx = pool.begin().await?;
-            purge_asset_tx(&mut tx, id).await?;
+            purge_book_entry_tx(&mut tx, id).await?;
             tx.commit().await?;
             Ok(())
         }
