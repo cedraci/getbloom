@@ -287,6 +287,16 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
             pool, input, &security, "bloomberg_ref", None,
             &serde_json::json!([&blocks[0]]), Some(&raw_identity)).await?;
         let iid = bind_identity(pool, &blocks[0], decision_id, input.as_of).await?;
+        // Spec §5.1: one anchored history request per instrument, ever. A
+        // failure here must not undo a good binding -- the identifiers we
+        // have are still correct, we simply know less about the past.
+        let hist_start = blocks[0].listing_date
+            .unwrap_or_else(|| NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
+        if let Err(e) = crate::instrument::history::ingest(
+            pool, fetcher, iid, &blocks[0].security, hist_start).await
+        {
+            eprintln!("identifier history for {} failed: {e}", blocks[0].security);
+        }
         // Not fixed, deliberately: a crash between bind_identity committing
         // and this UPDATE leaves the decision row with chosen_instrument_id
         // still NULL even though the instrument exists. That is recoverable,
@@ -328,6 +338,14 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                 pool, input, &security, "bloomberg_list", None,
                 &candidates_json, Some(&raw_identity)).await?;
             let iid = bind_identity(pool, &block, decision_id, input.as_of).await?;
+            // See the identical history::ingest call in step 3 above.
+            let hist_start = block.listing_date
+                .unwrap_or_else(|| NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
+            if let Err(e) = crate::instrument::history::ingest(
+                pool, fetcher, iid, &block.security, hist_start).await
+            {
+                eprintln!("identifier history for {} failed: {e}", block.security);
+            }
             // See the identical UPDATE in step 3 above: a crash here is
             // recoverable on the next resolve, not silently wrong.
             sqlx::query("UPDATE resolution_decision SET chosen_instrument_id = $2 WHERE id = $1")

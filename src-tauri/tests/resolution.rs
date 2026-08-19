@@ -319,11 +319,14 @@ async fn a_hint_that_leaves_one_survivor_binds_without_review() {
     }
     // Pins the exact Bloomberg cost of this path: the mandatory step-3
     // reference probe on the bare ticker (comes back empty, no exchange
-    // qualifier), the step-4 search, and the step-5 confirming reference
-    // call for the scored winner. Nothing here should be able to grow this
-    // silently -- e.g. a second identity() call snuck into scoring.
-    assert_eq!(fetcher.call_count(), 3,
-               "1 failed reference probe + 1 search + 1 confirming reference call");
+    // qualifier), the step-4 search, the step-5 confirming reference call
+    // for the scored winner, and the one-per-instrument anchored identifier
+    // history request Task 8 fires after a successful bind. Nothing here
+    // should be able to grow this silently -- e.g. a second identity() call
+    // snuck into scoring.
+    assert_eq!(fetcher.call_count(), 4,
+               "1 failed reference probe + 1 search + 1 confirming reference call \
+                + 1 identifier history request");
 }
 
 #[tokio::test]
