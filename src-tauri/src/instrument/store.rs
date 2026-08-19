@@ -349,6 +349,18 @@ pub async fn attrs(pool: &PgPool, instrument_id: i64, as_of: NaiveDate)
         .bind(instrument_id).bind(as_of).fetch_all(pool).await?)
 }
 
+/// Every attribute period we have ever believed for this instrument, not just
+/// what is true as of some date -- mirrors `aliases` above, so a change reads
+/// as two periods rather than only its current result (Task 16's detail panel).
+pub async fn attrs_history(pool: &PgPool, instrument_id: i64) -> AppResult<Vec<Attr>> {
+    Ok(sqlx::query_as::<_, Attr>(
+        "SELECT id, instrument_id, attr, value, valid_from, valid_to, source
+           FROM instrument_attr
+          WHERE instrument_id = $1 AND system_to = 'infinity'
+          ORDER BY attr, valid_from")
+        .bind(instrument_id).fetch_all(pool).await?)
+}
+
 /// Propose a predecessor/successor relationship. Always a proposal: P0 7.2
 /// established that Bloomberg exposes no successor field, so every link here is
 /// inferred and a human must agree before anything follows it.

@@ -486,9 +486,10 @@ pub async fn instrument_aliases(state: State<'_, AppState>, instrument_id: i64)
     crate::instrument::store::aliases(&state.pool, instrument_id).await
 }
 
+/// Every attribute we have ever believed, not just today's, so the timeline
+/// shows the change rather than only its result.
 #[tauri::command]
 pub async fn instrument_attrs(state: State<'_, AppState>, instrument_id: i64)
     -> Result<Vec<crate::instrument::store::Attr>, AppError> {
-    let today = chrono::Local::now().date_naive();
-    crate::instrument::store::attrs(&state.pool, instrument_id, today).await
+    crate::instrument::store::attrs_history(&state.pool, instrument_id).await
 }

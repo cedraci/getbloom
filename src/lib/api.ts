@@ -127,12 +127,12 @@ export interface LinkProposal {
   link_type: string; effective_date: string; evidence: unknown;
 }
 export interface AliasRow {
-  id: number; id_type: string; value: string; exch_code: string | null;
-  valid_from: string; valid_to: string; source: string;
+  id: number; instrument_id: number; id_type: string; value: string;
+  exch_code: string | null; valid_from: string; valid_to: string; source: string;
   bbg_action_id: string | null; anchoring_identifier: string | null;
 }
 export interface AttrRow {
-  id: number; attr: string; value: string;
+  id: number; instrument_id: number; attr: string; value: string;
   valid_from: string; valid_to: string; source: string;
 }
 

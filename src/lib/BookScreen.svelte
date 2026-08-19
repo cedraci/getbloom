@@ -2,6 +2,7 @@
   import { api, type AssetClass, type BookEntry, type SearchHit } from "./api";
   import DeleteDialog from "./DeleteDialog.svelte";
   import ImportDiff from "./ImportDiff.svelte";
+  import InstrumentDetail from "./InstrumentDetail.svelte";
   import type { EntityKind, ImportPlan } from "./api";
 
   let classes = $state<AssetClass[]>([]);
@@ -15,6 +16,7 @@
   let label = $state("");
   let searching = $state(false);
   let pending = $state<{ kind: EntityKind; id: number } | null>(null);
+  let detailId = $state<number | null>(null);
 
   let sheetPath = $state("");
   let plan = $state<ImportPlan | null>(null);
@@ -163,7 +165,11 @@
     <tbody>
       {#each book as b}
         <tr>
-          <td>{b.label}</td>
+          <td>
+            <button class="label-link" onclick={() => (detailId = b.instrument_id)}>
+              {b.label}
+            </button>
+          </td>
           <td>{b.security ?? "—"}</td>
           <td>{classes.find((c) => c.id === b.asset_class_id)?.name ?? ""}</td>
           <td><input type="checkbox" checked={b.active}
@@ -197,6 +203,9 @@
 {#if pending}
   <DeleteDialog kind={pending.kind} id={pending.id} onclose={afterDelete} />
 {/if}
+{#if detailId !== null}
+  <InstrumentDetail instrumentId={detailId} onclose={() => (detailId = null)} />
+{/if}
 
 <style>
   .error { color: #c00; }
@@ -218,4 +227,6 @@
   .thin { color: #666; font-size: 0.9em; }
   .x { border: none; background: none; color: #c00; cursor: pointer;
        font-size: 1rem; line-height: 1; padding: 0 0.3rem; }
+  .label-link { border: none; background: none; padding: 0; font: inherit;
+                color: #06c; text-decoration: underline; cursor: pointer; }
 </style>
