@@ -403,12 +403,19 @@ CREATE TABLE instrument_attr (
                     'instrument_type','issuer','share_class','fund_vehicle','status')),
   value          TEXT NOT NULL,
   valid_from     DATE NOT NULL,
-  valid_to       DATE NOT NULL DEFAULT 'infinity',
+  -- 9999-12-31, NOT 'infinity': sqlx decodes DATE 'infinity' as i32::MAX days,
+  -- which overflows chrono::NaiveDate and PANICS the process on read. See the
+  -- no_infinity CHECK below, which makes the mistake unrepresentable.
+  valid_to       DATE NOT NULL DEFAULT DATE '9999-12-31',
   system_from    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- system_to keeps 'infinity': three partial indexes hard-code the predicate.
+  -- NEVER decode this column into chrono::DateTime -- same overflow panic.
+  -- Readers want `system_to < 'infinity' AS superseded`, not the timestamp.
   system_to      TIMESTAMPTZ NOT NULL DEFAULT 'infinity',
   source         TEXT NOT NULL CHECK (source IN ('bloomberg','user','derived')),
   decision_id    BIGINT REFERENCES resolution_decision(id),
-  CONSTRAINT instrument_attr_period CHECK (valid_from < valid_to)
+  CONSTRAINT instrument_attr_period CHECK (valid_from < valid_to),
+  CONSTRAINT instrument_attr_no_infinity CHECK (valid_to <> 'infinity')
 );
 CREATE UNIQUE INDEX instrument_attr_current
   ON instrument_attr (instrument_id, attr, valid_from)
@@ -425,14 +432,15 @@ CREATE TABLE instrument_alias (
   value                TEXT NOT NULL,
   exch_code            TEXT,
   valid_from           DATE NOT NULL,
-  valid_to             DATE NOT NULL DEFAULT 'infinity',
+  valid_to             DATE NOT NULL DEFAULT DATE '9999-12-31',  -- see above
   system_from          TIMESTAMPTZ NOT NULL DEFAULT now(),
   system_to            TIMESTAMPTZ NOT NULL DEFAULT 'infinity',
   source               TEXT NOT NULL CHECK (source IN
                          ('bloomberg_hist_ids','bloomberg_ref','user')),
   bbg_action_id        TEXT,
   anchoring_identifier TEXT,
-  CONSTRAINT instrument_alias_period CHECK (valid_from < valid_to)
+  CONSTRAINT instrument_alias_period CHECK (valid_from < valid_to),
+  CONSTRAINT instrument_alias_no_infinity CHECK (valid_to <> 'infinity')
 );
 
 -- P0 6.4: HISTORICAL_IDS_TIME_RANGE asked about META US Equity returns
@@ -1349,14 +1357,15 @@ Every write that touches identity goes through here. The point of the module is 
   - `pub async fn insert_alias(tx, instrument_id, new: &NewAlias) -> AppResult<i64>`
   - `pub async fn close_alias(tx, alias_id, valid_to: NaiveDate) -> AppResult<()>`
   - `pub async fn supersede_alias(tx, alias_id) -> AppResult<()>`
-  - `pub async fn find_by_alias(pool, id_type, value, as_of: NaiveDate) -> AppResult<Option<i64>>`
+  - `pub async fn find_all_by_alias(pool, id_type, value, as_of) -> AppResult<Vec<i64>>` — every distinct matching instrument; use this when absent must be told from ambiguous
+  - `pub async fn find_by_alias(pool, id_type, value, as_of) -> AppResult<Option<i64>>` — `Some` only when EXACTLY one instrument matches
   - `pub async fn aliases(pool, instrument_id) -> AppResult<Vec<Alias>>`
   - `pub async fn current_security(pool, instrument_id, as_of: NaiveDate) -> AppResult<Option<String>>`
   - `pub async fn set_attr(tx, instrument_id, attr, value, valid_from, source, decision_id) -> AppResult<()>`
   - `pub async fn attrs(pool, instrument_id, as_of: NaiveDate) -> AppResult<Vec<Attr>>`
   - `pub async fn propose_link(pool, pred, succ, link_type, effective_date, evidence: serde_json::Value) -> AppResult<i64>`
   - `pub async fn confirm_link(pool, link_id, by: &str) -> AppResult<()>`
-  - `pub async fn confirmed_successor(pool, instrument_id) -> AppResult<Option<i64>>`
+  - `pub async fn confirmed_successors(pool, instrument_id) -> AppResult<Vec<i64>>` — plural: a spinoff legitimately has several
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1638,10 +1647,12 @@ pub struct NewAlias {
     pub anchoring_identifier: Option<String>,
 }
 
-/// Postgres DATE 'infinity'. chrono has no infinity, so the far future stands in
-/// on the Rust side; the column default keeps the SQL side exact.
+/// The open-ended sentinel, shared by the schema default, this module and the
+/// frontend. NOT `NaiveDate::MAX` (year 262142): chrono serialises out-of-range
+/// years with an ISO expanded sign, so it crosses the Tauri boundary as
+/// "+262142-12-31", which JavaScript reads as Invalid Date.
 pub fn forever() -> NaiveDate {
-    NaiveDate::MAX
+    NaiveDate::from_ymd_opt(9999, 12, 31).unwrap()
 }
 
 pub async fn create(pool: &PgPool) -> AppResult<Instrument> {
