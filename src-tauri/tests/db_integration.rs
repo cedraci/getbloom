@@ -820,3 +820,543 @@ async fn scheduler_skips_schedules_whose_view_is_retired() {
     assert!(!due.iter().any(|(_, vid, _)| *vid == view.id),
             "a retired view must not appear in the due list");
 }
+
+/// The bulk import reasons about the WHOLE registry, so it cannot be tested
+/// against the shared fixture database: those tests never clean up and run on
+/// parallel threads, so an instrument another test inserted mid-flight would
+/// show up here as a proposed removal -- and, with Retire as the default,
+/// this test would deactivate another test's fixture. These tests get their
+/// own database, wiped at the start of each, and a mutex so they never
+/// overlap -- the counts below are safe against that isolated, single-writer
+/// database, unlike a global count against the shared `bloom_test` pool the
+/// rest of this file uses.
+static BULK_DB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn bulk_pool() -> sqlx::PgPool {
+    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
+    let (base, _) = url.rsplit_once('/').expect("database url ends with /<dbname>");
+    let admin = sqlx::PgPool::connect(&format!("{base}/postgres")).await.unwrap();
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM pg_database WHERE datname = 'bloom_test_bulk'")
+        .fetch_optional(&admin).await.unwrap();
+    if exists.is_none() {
+        sqlx::query("CREATE DATABASE bloom_test_bulk").execute(&admin).await.unwrap();
+    }
+    admin.close().await;
+    let pool = getbloomdata_lib::db::connect(&format!("{base}/bloom_test_bulk"))
+        .await.unwrap();
+    // CASCADE is transitive: truncating these three root tables also clears
+    // every table with a (possibly indirect) foreign key onto one of them --
+    // book_entry, instrument_alias, instrument_attr, instrument_candidate,
+    // instrument_link, resolution_decision/review, view_instrument,
+    // view_field, schedule, run, observation, ingest_issue, hit_ledger.
+    // `adjustment_basis` is deliberately NOT truncated: it holds the seed
+    // rows (RAW / LEGACY_DPDF) `ingest_outcome` depends on, and nothing here
+    // references it in the direction CASCADE would follow.
+    sqlx::query("TRUNCATE instrument, asset_class, view RESTART IDENTITY CASCADE")
+        .execute(&pool).await.unwrap();
+    pool
+}
+
+/// Build a book entry via `book::add` against the bulk database, returning
+/// just the instrument_id -- the shape the bulk tests below want.
+async fn mk_book_entry(pool: &sqlx::PgPool, class_id: i64, label: &str, ticker: &str) -> i64 {
+    add_book_entry(pool, class_id, label, ticker).await.instrument_id
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn export_then_import_is_a_no_op() {
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, "Daily", "").await.unwrap();
+    let a = mk_book_entry(&pool, class.id, "Round Trip", "RTP US").await;
+    let b = mk_book_entry(&pool, class.id, "Second", "SEC US").await;
+    getbloomdata_lib::views::set_view_instruments(&pool, view.id, &[a]).await.unwrap();
+    getbloomdata_lib::book::set_active(&pool, b, false).await.unwrap();
+
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
+    assert!(plan.is_empty(), "a fresh round trip must change nothing, got {plan:?}");
+    // A retired asset must survive the round trip retired, not be reactivated.
+    assert!(plan.reactivations.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_adds_edits_and_purges_in_one_transaction() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::deletion::DeleteMode;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let view = getbloomdata_lib::views::create_view(&pool, "Daily", "").await.unwrap();
+    let keep = mk_book_entry(&pool, class.id, "Keep", "KEP US").await;
+    let drop = mk_book_entry(&pool, class.id, "Drop", "DRP US").await;
+    let third = mk_book_entry(&pool, class.id, "Third", "THR US").await;
+    getbloomdata_lib::views::set_view_instruments(&pool, view.id, &[third]).await.unwrap();
+
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    // Rewrite the sheet the way a user would in Excel: rename `keep`, put it in
+    // the Daily view, add a row with a blank id, and delete `drop`'s row.
+    let data = read_assets_sheet(&path).unwrap();
+    let mut rows: Vec<ExportRow> = data.rows.iter()
+        .filter(|r| r.instrument_id != Some(drop))
+        .map(|r| ExportRow {
+            instrument_id: r.instrument_id.unwrap_or(0),
+            label: if r.instrument_id == Some(keep) { "Keep Renamed".into() } else { r.label.clone() },
+            class: r.class.clone(), identifier: r.identifier.clone(),
+            yellow_key: r.yellow_key.clone(), active: r.active,
+            security: String::new(), status: String::new(),
+            views: if r.instrument_id == Some(keep) { vec!["Daily".into()] } else { r.views.clone() },
+        }).collect();
+    rows.push(ExportRow {
+        instrument_id: 0, label: "Brand New".into(), class: "Equity".into(),
+        identifier: "NEW US".into(), yellow_key: "Equity".into(),
+        active: true, security: String::new(), status: String::new(), views: vec![],
+    });
+    write_assets_sheet(&path, &rows, &["Daily".to_string()], &["Equity".to_string()])
+        .unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
+    assert_eq!(plan.adds.len(), 1);
+    assert_eq!(plan.edits.len(), 1);
+    assert_eq!(plan.edits[0].id, keep);
+    assert_eq!(plan.membership_changes.len(), 1);
+    assert_eq!(plan.removals.len(), 1);
+    assert_eq!(plan.removals[0].id, drop);
+    assert!(!plan.requires_typed_confirmation, "1 of 3 active is not over half");
+
+    let fetcher = MockMasterFetcher {
+        identity_raw: identity_raw_for("NEW US Equity"), ..Default::default()
+    };
+    let res = apply_import_with(
+        &pool, &fetcher, &path, &plan.file_hash, &[(drop, DeleteMode::Purge)], None)
+        .await.unwrap();
+    assert_eq!(res.added, 1);
+    assert_eq!(res.edited, 1);
+    assert_eq!(res.removed, 1);
+    assert!(res.workbook_refreshed, "the happy path must refresh the workbook on disk");
+
+    let (gone,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE instrument_id = $1")
+        .bind(drop).fetch_one(&pool).await.unwrap();
+    assert_eq!(gone, 0, "purge deletes the book entry outright");
+    let (label,): (String,) = sqlx::query_as("SELECT label FROM book_entry WHERE instrument_id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(label, "Keep Renamed");
+    let (members,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM view_instrument WHERE view_id = $1 AND instrument_id = $2")
+        .bind(view.id).bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(members, 1, "the x in the Daily column added a membership");
+    let (still,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE instrument_id = $1")
+        .bind(third).fetch_one(&pool).await.unwrap();
+    assert_eq!(still, 1, "an untouched row must survive");
+    let (added,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM book_entry b JOIN instrument_alias a
+           ON a.instrument_id = b.instrument_id
+         WHERE a.id_type = 'bdp_security' AND a.value = 'NEW US Equity'
+           AND a.system_to = 'infinity'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(added, 1);
+
+    // `apply_import_with` overwrote the workbook at `path` with a fresh export
+    // as part of landing the commit (see `workbook_refreshed` above), so this
+    // is no longer testing the same sheet against a moved database -- it is
+    // testing that the refreshed file is itself consistent with the database
+    // it was just applied against: re-previewing it must find nothing left
+    // to do, the same guarantee `export_then_import_is_a_no_op` checks for a
+    // plain export, now checked for the post-apply re-export path too.
+    let replay = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert!(replay.is_empty(), "the refreshed workbook must match the database, got {replay:?}");
+}
+
+/// Finding I5: a hand-built sheet (no `instrument_id` column) has no ids to
+/// write back and, per guardrail 1, can never propose a removal -- so
+/// overwriting it with a full registry export is not a service to the user,
+/// it is destroying a file they wrote by hand (their own column order, their
+/// own extra notes, whatever they pasted). The apply must skip the rewrite
+/// entirely for such a sheet: the file on disk must be untouched, byte for
+/// byte, and `workbook_refreshed` must honestly report `false`, even though
+/// the database changes land exactly as they would for an export-produced
+/// sheet.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_from_a_hand_built_sheet_leaves_the_file_untouched() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::SHEET_NAME;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pasted.xlsx");
+
+    getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test").await.unwrap();
+
+    // Built the way a user would in Excel: no `instrument_id` column at all,
+    // only the columns they bothered to fill in.
+    let mut book = rust_xlsxwriter::Workbook::new();
+    let s = book.add_worksheet();
+    s.set_name(SHEET_NAME).unwrap();
+    for (c, h) in ["label", "class", "identifier", "yellow_key"].iter().enumerate() {
+        s.write_string(0, c as u16, *h).unwrap();
+    }
+    s.write_string(1, 0, "Hand Built").unwrap();
+    s.write_string(1, 1, "Equity").unwrap();
+    s.write_string(1, 2, "HB US").unwrap();
+    s.write_string(1, 3, "Equity").unwrap();
+    book.save(&path).unwrap();
+
+    let before_bytes = std::fs::read(&path).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert!(!plan.has_id_column, "a hand-built sheet has no id column");
+    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
+    assert_eq!(plan.adds.len(), 1);
+
+    let fetcher = MockMasterFetcher {
+        identity_raw: identity_raw_for("HB US Equity"), ..Default::default()
+    };
+    let res = apply_import_with(&pool, &fetcher, &path, &plan.file_hash, &[], None)
+        .await.unwrap();
+    assert!(!res.workbook_refreshed,
+            "a hand-built sheet must not be overwritten by the post-apply export");
+
+    let after_bytes = std::fs::read(&path).unwrap();
+    assert_eq!(before_bytes, after_bytes,
+               "the user's own file must survive an apply byte-for-byte untouched");
+
+    let (added,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM book_entry b JOIN instrument_alias a
+           ON a.instrument_id = b.instrument_id
+         WHERE a.id_type = 'bdp_security' AND a.value = 'HB US Equity'
+           AND a.system_to = 'infinity'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(added, 1, "the database changes must still land even though the file did not move");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_refuses_a_stale_hash() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::error::AppError;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+    let fetcher = MockMasterFetcher::default();
+    let err = apply_import_with(
+        &pool, &fetcher, &path, "0000000000000000000000000000000000000000000000000000000000000000",
+        &[], None).await.unwrap_err();
+    assert!(matches!(err, AppError::ImportRejected { .. }), "got {err:?}");
+}
+
+/// Fix round 1, item 2 (happy path): a blank-id add row gets a real id
+/// assigned by the commit, and the post-commit refresh must write that real
+/// id back to the file -- not leave the blank the sheet started with.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_refreshes_the_workbook_with_the_newly_assigned_id() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test").await.unwrap();
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    let rows = vec![ExportRow {
+        instrument_id: 0, label: "Brand New".into(), class: "Equity".into(),
+        identifier: "NEW US".into(), yellow_key: "Equity".into(),
+        active: true, security: String::new(), status: String::new(), views: vec![],
+    }];
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    let fetcher = MockMasterFetcher {
+        identity_raw: identity_raw_for("NEW US Equity"), ..Default::default()
+    };
+    let res = apply_import_with(&pool, &fetcher, &path, &plan.file_hash, &[], None)
+        .await.unwrap();
+    assert!(res.workbook_refreshed, "the happy path must report a successful refresh");
+
+    let refreshed = read_assets_sheet(&path).unwrap();
+    let new_row = refreshed.rows.iter().find(|r| r.label == "Brand New")
+        .expect("the new row must still be on the refreshed sheet");
+    assert!(new_row.instrument_id.is_some(),
+            "the refreshed file must carry the database's assigned id, not the blank it started with");
+}
+
+/// Fix round 1, items 1 and 2 (failure path): the reviewer reproduced this
+/// against a real database by making the workbook read-only before apply --
+/// simulating Excel's own sharing-violation lock, `os error 5` on Windows --
+/// and found the committed purge and add both landed while the caller was
+/// told the whole call failed. A failed refresh must never demote a landed
+/// commit to an `Err`: the transaction already committed, so the caller must
+/// be told it succeeded, with `workbook_refreshed` carrying the honest bad
+/// news about the file instead.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_succeeds_even_when_the_workbook_refresh_is_locked_out() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::deletion::DeleteMode;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let drop = mk_book_entry(&pool, class.id, "Drop", "DRP US").await;
+    // A second, untouched asset so this one removal is not "more than half the
+    // active book" -- guardrail 2 is a different mechanism from the one this
+    // test is about, and must not fire here.
+    mk_book_entry(&pool, class.id, "Untouched", "UNT US").await;
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    // Rewrite the sheet the way the earlier apply-path tests do: drop's row is
+    // gone (a removal) and a blank-id row proposes an add, in the same call.
+    let data = read_assets_sheet(&path).unwrap();
+    let mut rows: Vec<ExportRow> = data.rows.iter()
+        .filter(|r| r.instrument_id != Some(drop))
+        .map(|r| ExportRow {
+            instrument_id: r.instrument_id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
+            identifier: r.identifier.clone(), yellow_key: r.yellow_key.clone(), active: r.active,
+            security: String::new(), status: String::new(), views: r.views.clone(),
+        }).collect();
+    rows.push(ExportRow {
+        instrument_id: 0, label: "Brand New".into(), class: "Equity".into(),
+        identifier: "NEW US".into(), yellow_key: "Equity".into(),
+        active: true, security: String::new(), status: String::new(), views: vec![],
+    });
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+
+    // Simulate the workbook being held open elsewhere (Excel's own sharing
+    // violation): mark the file read-only so the refresh's write hits the
+    // same access-denied error a real lock produces.
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&path, perms).unwrap();
+
+    let fetcher = MockMasterFetcher {
+        identity_raw: identity_raw_for("NEW US Equity"), ..Default::default()
+    };
+    let outcome = apply_import_with(
+        &pool, &fetcher, &path, &plan.file_hash, &[(drop, DeleteMode::Purge)], None).await;
+
+    // Restore write access unconditionally, before any assertion that might
+    // panic, so the tempdir can still clean itself up.
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_readonly(false);
+    std::fs::set_permissions(&path, perms).unwrap();
+
+    let res = outcome.expect("a failed workbook refresh must not demote a committed apply to an error");
+    assert!(!res.workbook_refreshed, "the refresh genuinely failed and must say so honestly");
+
+    let (gone,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE instrument_id = $1")
+        .bind(drop).fetch_one(&pool).await.unwrap();
+    assert_eq!(gone, 0, "the committed purge must have landed despite the refresh failure");
+    let (added,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM book_entry b JOIN instrument_alias a
+           ON a.instrument_id = b.instrument_id
+         WHERE a.id_type = 'bdp_security' AND a.value = 'NEW US Equity'
+           AND a.system_to = 'infinity'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(added, 1, "the committed add must have landed despite the refresh failure");
+}
+
+/// Fix round 1, item 3: an asset the sheet no longer mentions is a removal
+/// whether the user meant it or not -- e.g. another writer changed the
+/// registry between preview and apply. Nothing may be applied against a
+/// removal the caller never actually reviewed, so an empty `removal_modes`
+/// must refuse the whole call rather than silently default to Retire.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_refuses_a_removal_the_caller_never_reviewed() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::error::AppError;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let keep = mk_book_entry(&pool, class.id, "Keep", "KEP US").await;
+    let drop = mk_book_entry(&pool, class.id, "Drop", "DRP US").await;
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    let data = read_assets_sheet(&path).unwrap();
+    let rows: Vec<ExportRow> = data.rows.iter()
+        .filter(|r| r.instrument_id != Some(drop))
+        .map(|r| ExportRow {
+            instrument_id: r.instrument_id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
+            identifier: r.identifier.clone(), yellow_key: r.yellow_key.clone(), active: r.active,
+            security: String::new(), status: String::new(), views: r.views.clone(),
+        }).collect();
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert_eq!(plan.removals.len(), 1);
+    assert_eq!(plan.removals[0].id, drop);
+    assert!(!plan.requires_typed_confirmation, "1 of 2 active is not over half");
+
+    let fetcher = MockMasterFetcher::default();
+    let err = apply_import_with(&pool, &fetcher, &path, &plan.file_hash, &[], None)
+        .await.unwrap_err();
+    let AppError::ImportRejected { reason } = &err else {
+        panic!("an unreviewed removal must be refused with ImportRejected, got {err:?}");
+    };
+    assert!(reason.contains("1 removal"),
+            "the refusal must say how many removals were not reviewed, got {reason:?}");
+
+    let (still_active,): (bool,) = sqlx::query_as("SELECT active FROM book_entry WHERE instrument_id = $1")
+        .bind(drop).fetch_one(&pool).await.unwrap();
+    assert!(still_active, "an unreviewed removal must not be silently retired");
+    let (label,): (String,) = sqlx::query_as("SELECT label FROM book_entry WHERE instrument_id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(label, "Keep", "nothing else may move either -- this is an all-or-nothing refusal");
+}
+
+/// Fix round 2, item 2: `removal_modes` naming the same asset twice with
+/// conflicting intent must be refused outright, not resolved by slice order.
+/// Collecting straight into a `HashMap` would let `(id, Purge)` silently win
+/// or lose against an earlier `(id, Retire)` depending only on which came
+/// last in the slice -- exactly the kind of silent decision a destructive
+/// action must never make on the caller's behalf.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn apply_import_refuses_conflicting_duplicate_removal_modes() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::deletion::DeleteMode;
+    use getbloomdata_lib::error::AppError;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    let keep = mk_book_entry(&pool, class.id, "Keep", "KEP US").await;
+    let drop = mk_book_entry(&pool, class.id, "Drop", "DRP US").await;
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    let data = read_assets_sheet(&path).unwrap();
+    let rows: Vec<ExportRow> = data.rows.iter()
+        .filter(|r| r.instrument_id != Some(drop))
+        .map(|r| ExportRow {
+            instrument_id: r.instrument_id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
+            identifier: r.identifier.clone(), yellow_key: r.yellow_key.clone(), active: r.active,
+            security: String::new(), status: String::new(), views: r.views.clone(),
+        }).collect();
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert_eq!(plan.removals.len(), 1);
+    assert_eq!(plan.removals[0].id, drop);
+    assert!(!plan.requires_typed_confirmation, "1 of 2 active is not over half");
+
+    // Two entries for the SAME id, opposite destructive intent.
+    let conflicting = [(drop, DeleteMode::Retire), (drop, DeleteMode::Purge)];
+    let fetcher = MockMasterFetcher::default();
+    let err = apply_import_with(
+        &pool, &fetcher, &path, &plan.file_hash, &conflicting, None).await.unwrap_err();
+    let AppError::ImportRejected { reason } = &err else {
+        panic!("conflicting duplicate removal modes must be refused with ImportRejected, got {err:?}");
+    };
+    assert!(reason.contains(&drop.to_string()),
+            "the refusal must name the duplicated asset id, got {reason:?}");
+
+    // Nothing moved: neither retired nor purged.
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE instrument_id = $1 AND active")
+        .bind(drop).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "a call refused for conflicting modes must leave the asset untouched");
+    let (label,): (String,) = sqlx::query_as("SELECT label FROM book_entry WHERE instrument_id = $1")
+        .bind(keep).fetch_one(&pool).await.unwrap();
+    assert_eq!(label, "Keep");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_large_removal_set_needs_the_typed_count() {
+    use getbloomdata_lib::bulk::apply_import_with;
+    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
+    use getbloomdata_lib::error::AppError;
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    let _guard = BULK_DB.lock().await;
+    let pool = bulk_pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assets.xlsx");
+
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
+        .await.unwrap();
+    for i in 1..=4 {
+        mk_book_entry(&pool, class.id, &format!("A{i}"), &format!("A{i} US")).await;
+    }
+    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
+
+    // Keep one row of four -- a truncated paste, which is exactly what
+    // guardrail 2 exists to catch.
+    let data = read_assets_sheet(&path).unwrap();
+    let rows: Vec<ExportRow> = data.rows.iter().take(1).map(|r| ExportRow {
+        instrument_id: r.instrument_id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
+        identifier: r.identifier.clone(), yellow_key: r.yellow_key.clone(), active: r.active,
+        security: String::new(), status: String::new(), views: r.views.clone(),
+    }).collect();
+    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
+
+    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
+    assert_eq!(plan.removals.len(), 3);
+    assert!(plan.requires_typed_confirmation);
+
+    let fetcher = MockMasterFetcher::default();
+    let err = apply_import_with(
+        &pool, &fetcher, &path, &plan.file_hash, &[], None).await.unwrap_err();
+    let AppError::ImportRejected { reason } = &err else {
+        panic!("an unconfirmed mass removal must be refused with ImportRejected, got {err:?}");
+    };
+    assert!(reason.contains("confirm the count"),
+            "the refusal must explain that the count needs confirming, got {reason:?}");
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE active")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 4, "nothing may be applied when the guardrail refuses");
+
+    // With the count typed AND every removal given an explicit mode, the same
+    // call goes through. Retire is passed explicitly for all three: since the
+    // last fix round, an id absent from `removal_modes` is refused outright
+    // rather than silently defaulted, so this is no longer "the default" but
+    // still exercises the same Retire-not-Purge behaviour end to end.
+    let modes: Vec<(i64, getbloomdata_lib::deletion::DeleteMode)> = plan.removals.iter()
+        .map(|r| (r.id, getbloomdata_lib::deletion::DeleteMode::Retire)).collect();
+    apply_import_with(&pool, &fetcher, &path, &plan.file_hash, &modes, Some(3)).await.unwrap();
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM book_entry WHERE active")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "the three missing rows are retired, not purged");
+}
