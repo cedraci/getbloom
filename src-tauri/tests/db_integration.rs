@@ -11,10 +11,6 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 /// Unique fixture name, distinct both ACROSS tests in one run (they execute on
 /// parallel threads against one database) and ACROSS repeated runs (these tests
 /// commit real rows and never clean up).
-///
-/// Without this, `asset_crud_round_trip` and `eod_pipeline_dry_run_ends_partial`
-/// both insert the security "AAPL US Equity" and whichever runs second dies on
-/// UNIQUE (bdp_security) -- a failure on the very first run, not just re-runs.
 fn uniq(stem: &str) -> String {
     static TAG: OnceLock<String> = OnceLock::new();
     let tag = TAG.get_or_init(|| {
@@ -26,6 +22,90 @@ fn uniq(stem: &str) -> String {
 
 fn test_url() -> Option<String> {
     std::env::var("BLOOM_TEST_DATABASE_URL").ok()
+}
+
+// ---------------------------------------------------------------------------
+// Shared fixture helpers.
+//
+// Task 13B: fixtures are built through the real `book::add` path with a
+// `MockMasterFetcher`, never by hand-seeding `instrument_alias` rows directly.
+// A hand-seeded fixture already hid a Critical defect on this branch once (a
+// guard that could never fire in production because nothing but the test
+// ever wrote the row it keyed on), so every fixture here goes through the
+// same resolution the app itself uses.
+// ---------------------------------------------------------------------------
+
+/// The wire shape `master_fetch::parse_identity` reads: one securityData
+/// entry, no FIGI (fixtures never need one -- `instrument.id_bb_global` is
+/// UNIQUE and the bdp_security alias already gives every fixture a unique
+/// identity via `uniq()`), no errors.
+fn identity_raw_for(security: &str) -> serde_json::Value {
+    serde_json::json!([{"securityData": [{
+        "security": security,
+        "fieldExceptions": [], "sequenceNumber": 0,
+        "fieldData": {}
+    }]}])
+}
+
+/// Build a book entry through `book::add`, with Bloomberg mocked to answer
+/// with exactly one identity block for `{ticker} Equity`. Returns the full
+/// `BookEntry` so callers can read `instrument_id`, `security`, `label`, etc.
+async fn add_book_entry(
+    pool: &sqlx::PgPool,
+    class_id: i64,
+    label: &str,
+    ticker: &str,
+) -> getbloomdata_lib::book::BookEntry {
+    use getbloomdata_lib::book::{self, AddOutcome, AddToBook};
+    use getbloomdata_lib::master_fetch::MockMasterFetcher;
+    use getbloomdata_lib::resolution::score::Hints;
+
+    let security = format!("{ticker} Equity");
+    let fetcher = MockMasterFetcher {
+        identity_raw: identity_raw_for(&security),
+        ..Default::default()
+    };
+    let req = AddToBook {
+        raw: ticker.to_string(),
+        yellow_key: "Equity".into(),
+        asset_class_id: class_id,
+        label: label.into(),
+        hints: Hints::default(),
+    };
+    match book::add(pool, &fetcher, &req, "test").await.unwrap() {
+        AddOutcome::Added(entry) => entry,
+        other => panic!("expected Added for {ticker}, got {other:?}"),
+    }
+}
+
+/// The adjustment_basis row migration 0001 seeds for "all four flags false" --
+/// the RAW basis every numeric observation fixture below needs, since
+/// `observation_numeric_needs_basis` requires a basis_id whenever value_num
+/// is set.
+async fn raw_basis_id(pool: &sqlx::PgPool) -> i16 {
+    sqlx::query_scalar(
+        "SELECT id FROM adjustment_basis
+          WHERE adj_normal = false AND adj_abnormal = false
+            AND adj_split = false AND adj_follow_dpdf = false",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `observation.run_id` is NOT NULL REFERENCES run(id), so any test that plants
+/// an observation must plant a run first. `run.status` is CHECK-constrained to
+/// ('pending','fetching','ingesting','ok','failed','partial').
+async fn new_run(pool: &sqlx::PgPool, view_id: i64) -> i64 {
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
+         VALUES ($1, 'eod', 'manual', 'ok', 1) RETURNING id",
+    )
+    .bind(view_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    id
 }
 
 #[tokio::test]
@@ -41,88 +121,100 @@ async fn migration_creates_all_tables() {
     .await
     .unwrap();
     let names: Vec<String> = rows.iter().map(|r| r.get("table_name")).collect();
-    for t in ["asset_class","asset","field_def","view","view_asset","view_field",
-              "run","observation","ingest_issue","hit_ledger","schedule"] {
+    for t in [
+        "instrument", "resolution_decision", "instrument_attr", "instrument_alias",
+        "instrument_link", "resolution_review", "book_entry", "instrument_candidate",
+        "asset_class", "field_def", "view", "view_instrument", "view_field", "run",
+        "adjustment_basis", "observation", "ingest_issue", "hit_ledger", "schedule",
+    ] {
         assert!(names.iter().any(|n| n == t), "missing table {t}");
     }
 }
 
 #[tokio::test]
 #[ignore = "requires postgres"]
-async fn asset_crud_round_trip() {
+async fn book_crud_round_trip() {
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
     let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, &uniq("EquityT3"), "test").await.unwrap();
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, &uniq("EquityT3"), "test")
+        .await
+        .unwrap();
     let ticker = format!("{} US", uniq("AAPL"));
-    let asset = getbloomdata_lib::registry::create_asset(&pool, getbloomdata_lib::registry::NewAsset {
-        asset_class_id: class.id,
-        label: "Apple".into(),
-        id_kind: "ticker".into(),
-        ticker: Some(ticker.clone()),
-        isin: None,
-        yellow_key: "Equity".into(),
-    }).await.unwrap();
-    assert_eq!(asset.bdp_security, format!("{ticker} Equity"));
+    let entry = add_book_entry(&pool, class.id, "Apple", &ticker).await;
+    assert_eq!(entry.security, Some(format!("{ticker} Equity")));
+    assert_eq!(entry.label, "Apple");
+    assert!(entry.active);
 }
 
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn view_fields_falls_back_to_class_fields() {
-    use getbloomdata_lib::{db, fields, registry, views};
+    use getbloomdata_lib::{fields, registry, views};
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = db::connect(&url).await.unwrap();
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
     let class = registry::create_asset_class(&pool, &uniq("EquityT4"), "t").await.unwrap();
-    let f = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
-    let a = registry::create_asset(&pool, registry::NewAsset {
-        asset_class_id: class.id, label: "MC".into(), id_kind: "isin".into(),
-        ticker: None, isin: Some(uniq("FR000012")), yellow_key: "Equity".into(),
-    }).await.unwrap();
+    let f = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+        .await
+        .unwrap();
+    let entry = add_book_entry(&pool, class.id, "MC", &format!("{} FP", uniq("MC"))).await;
     let v = views::create_view(&pool, &uniq("luxt4"), "").await.unwrap();
-    views::set_view_assets(&pool, v.id, &[a.id]).await.unwrap();
-    let fs = views::view_fields(&pool, v.id).await.unwrap();  // no explicit fields
+    views::set_view_instruments(&pool, v.id, &[entry.instrument_id]).await.unwrap();
+    let fs = views::view_fields(&pool, v.id).await.unwrap(); // no explicit fields
     assert!(fs.iter().any(|x| x.id == f.id));
 }
 
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn ingest_twice_converges_no_duplicates() {
-    use getbloomdata_lib::{db, fields, ingest, registry, views};
+    use getbloomdata_lib::{fields, ingest, views};
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = db::connect(&url).await.unwrap();
-    let class = registry::create_asset_class(&pool, &uniq("EquityT9"), "t").await.unwrap();
-    let f = fields::create_field(&pool, class.id, "PX_LAST_T9", "px", "numeric").await.unwrap();
-    let a = registry::create_asset(&pool, registry::NewAsset {
-        asset_class_id: class.id, label: "T9".into(), id_kind: "ticker".into(),
-        ticker: Some(format!("{} US", uniq("T9"))), isin: None, yellow_key: "Equity".into(),
-    }).await.unwrap();
+    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
+    let class = getbloomdata_lib::registry::create_asset_class(&pool, &uniq("EquityT9"), "t")
+        .await
+        .unwrap();
+    let f = fields::create_field(&pool, class.id, "PX_LAST_T9", "px", "numeric", None, None, "")
+        .await
+        .unwrap();
+    let entry = add_book_entry(&pool, class.id, "T9", &format!("{} US", uniq("T9"))).await;
     let v = views::create_view(&pool, &uniq("t9view"), "").await.unwrap();
     let run_id: i64 = sqlx::query_scalar(
         "INSERT INTO run (view_id, kind, trigger_kind, status)
-         VALUES ($1,'eod','manual','ingesting') RETURNING id")
-        .bind(v.id).fetch_one(&pool).await.unwrap();
+         VALUES ($1,'eod','manual','ingesting') RETURNING id",
+    )
+    .bind(v.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
     let mk = |val: f64| FetchOutcome {
-        cells: vec![ObsCell { asset_id: a.id, field_id: f.id,
-                              obs_date: d, value: CellValue::Num(val) }],
+        cells: vec![ObsCell {
+            instrument_id: entry.instrument_id,
+            field_id: f.id,
+            obs_date: d,
+            value: CellValue::Num(val),
+        }],
         problems: vec![],
     };
     ingest::ingest_outcome(&pool, run_id, &mk(100.0)).await.unwrap();
-    ingest::ingest_outcome(&pool, run_id, &mk(101.5)).await.unwrap();  // re-run: update, not dup
+    ingest::ingest_outcome(&pool, run_id, &mk(101.5)).await.unwrap(); // re-run: update, not dup
 
     let (count, val): (i64, f64) = sqlx::query_as(
         "SELECT count(*)::bigint, max(value_num)
-         FROM observation WHERE asset_id = $1 AND field_id = $2")
-        .bind(a.id).bind(f.id).fetch_one(&pool).await.unwrap();
+         FROM observation WHERE instrument_id = $1 AND field_id = $2",
+    )
+    .bind(entry.instrument_id)
+    .bind(f.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(count, 1);
     assert_eq!(val, 101.5);
 }
 
 // A fetcher that returns canned data. This is the payoff of the reshaped
 // `DataFetcher` trait (spec A2 §2.4): the orchestrator's whole path is now
-// exercisable with no Bloomberg, no Excel, and no network. Under the Excel-era
-// signature it could not be written at all -- that trait demanded a workbook
-// path and a `WbMeta`.
+// exercisable with no Bloomberg, no Excel, and no network.
 struct MockFetcher {
     cells: Vec<ObsCell>,
     problems: Vec<CellProblem>,
@@ -139,18 +231,20 @@ impl orchestrator::DataFetcher for MockFetcher {
     }
 }
 
-/// Creates a class + numeric field + asset + view, returns (view_id, asset_id, field_id).
+/// Creates a class + numeric field + book entry + view, returns
+/// (view_id, instrument_id, field_id).
 async fn seed_view(pool: &sqlx::PgPool) -> (i64, i64, i64) {
-    use getbloomdata_lib::{fields, registry, views};
-    let class = registry::create_asset_class(pool, &uniq("EquityE2E"), "t").await.unwrap();
-    let f = fields::create_field(pool, class.id, "PX_LAST", "px", "numeric").await.unwrap();
-    let a = registry::create_asset(pool, registry::NewAsset {
-        asset_class_id: class.id, label: "E2E".into(), id_kind: "ticker".into(),
-        ticker: Some(format!("{} US", uniq("E2E"))), isin: None, yellow_key: "Equity".into(),
-    }).await.unwrap();
+    use getbloomdata_lib::{fields, views};
+    let class = getbloomdata_lib::registry::create_asset_class(pool, &uniq("EquityE2E"), "t")
+        .await
+        .unwrap();
+    let f = fields::create_field(pool, class.id, "PX_LAST", "px", "numeric", None, None, "")
+        .await
+        .unwrap();
+    let entry = add_book_entry(pool, class.id, "E2E", &format!("{} US", uniq("E2E"))).await;
     let v = views::create_view(pool, &uniq("e2eview"), "").await.unwrap();
-    views::set_view_assets(pool, v.id, &[a.id]).await.unwrap();
-    (v.id, a.id, f.id)
+    views::set_view_instruments(pool, v.id, &[entry.instrument_id]).await.unwrap();
+    (v.id, entry.instrument_id, f.id)
 }
 
 fn mock_cfg(dir: &std::path::Path) -> orchestrator::PipelineConfig {
@@ -169,11 +263,11 @@ async fn eod_pipeline_ingests_and_ends_ok() {
     use getbloomdata_lib::{db, orchestrator};
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
     let pool = db::connect(&url).await.unwrap();
-    let (view_id, asset_id, field_id) = seed_view(&pool).await;
+    let (view_id, instrument_id, field_id) = seed_view(&pool).await;
 
     let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
     let fetcher = MockFetcher {
-        cells: vec![ObsCell { asset_id, field_id, obs_date: d,
+        cells: vec![ObsCell { instrument_id, field_id, obs_date: d,
                               value: CellValue::Num(305.59) }],
         problems: vec![],
         fail: false,
@@ -185,7 +279,7 @@ async fn eod_pipeline_ingests_and_ends_ok() {
 
     match out {
         orchestrator::RunOutcome::Completed { run_id, summary } => {
-            assert_eq!(summary.upserted, 1);
+            assert_eq!(summary.inserted, 1);
             assert_eq!(summary.issues, 0);
             let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id=$1")
                 .bind(run_id).fetch_one(&pool).await.unwrap();
@@ -194,8 +288,8 @@ async fn eod_pipeline_ingests_and_ends_ok() {
             // The observation actually landed, with the right value and date.
             let v: f64 = sqlx::query_scalar(
                 "SELECT value_num FROM observation
-                 WHERE asset_id=$1 AND field_id=$2 AND obs_date=$3")
-                .bind(asset_id).bind(field_id).bind(d)
+                 WHERE instrument_id=$1 AND field_id=$2 AND obs_date=$3")
+                .bind(instrument_id).bind(field_id).bind(d)
                 .fetch_one(&pool).await.unwrap();
             assert_eq!(v, 305.59);
 
@@ -215,14 +309,14 @@ async fn eod_pipeline_with_problems_ends_partial() {
     use getbloomdata_lib::{db, orchestrator};
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
     let pool = db::connect(&url).await.unwrap();
-    let (view_id, asset_id, field_id) = seed_view(&pool).await;
+    let (view_id, instrument_id, field_id) = seed_view(&pool).await;
 
     let d = chrono::NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
     // The holiday shape: no data, one problem, nothing to ingest.
     let fetcher = MockFetcher {
         cells: vec![],
         problems: vec![CellProblem {
-            asset_id: Some(asset_id), field_id: Some(field_id), obs_date: Some(d),
+            instrument_id: Some(instrument_id), field_id: Some(field_id), obs_date: Some(d),
             code: "no_data".into(), detail: "no trading day returned".into() }],
         fail: false,
     };
@@ -231,7 +325,7 @@ async fn eod_pipeline_with_problems_ends_partial() {
                                          view_id, "scheduled", d, false).await.unwrap();
     match out {
         orchestrator::RunOutcome::Completed { run_id, summary } => {
-            assert_eq!(summary.upserted, 0);
+            assert_eq!(summary.inserted, 0);
             assert_eq!(summary.issues, 1);
             let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id=$1")
                 .bind(run_id).fetch_one(&pool).await.unwrap();
@@ -282,7 +376,7 @@ async fn schedule_draw_persists_within_day() {
     let today = chrono::Local::now().date_naive();
     let first = scheduler::ensure_draw(&pool, sid, today).await.unwrap();
     let second = scheduler::ensure_draw(&pool, sid, today).await.unwrap();
-    assert_eq!(first, second);  // restart must not re-roll
+    assert_eq!(first, second); // restart must not re-roll
     let win_s = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
     let win_e = chrono::NaiveTime::from_hms_opt(18, 0, 0).unwrap();
     assert!(first >= win_s && first < win_e);
@@ -292,8 +386,9 @@ async fn schedule_draw_persists_within_day() {
 // End-to-end smoke test (design §8, plan task 15)
 //
 // The one test that talks to the real Bloomberg Terminal. Idempotent by
-// design: fixtures are looked up before being created, because `AAPL US
-// Equity` can exist only once under UNIQUE (bdp_security).
+// design: fixtures are looked up before being created through the real
+// `book::add` resolution path -- a hand-seeded instrument would test nothing
+// here, since the whole point of this test is exercising the real wire.
 // ---------------------------------------------------------------------------
 
 const SMOKE_CLASS: &str = "SmokeEquity";
@@ -303,6 +398,9 @@ const SMOKE_VIEW: &str = "smoke-view";
 #[tokio::test]
 #[ignore = "requires postgres AND a live Bloomberg Terminal"]
 async fn smoke_real_bloomberg_end_to_end() {
+    use getbloomdata_lib::book::{self, AddOutcome, AddToBook};
+    use getbloomdata_lib::master_fetch::BlpapiMasterFetcher;
+    use getbloomdata_lib::resolution::score::Hints;
     use getbloomdata_lib::{db, fields, orchestrator, registry, scheduler, views};
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
     let pool = db::connect(&url).await.unwrap();
@@ -318,26 +416,11 @@ async fn smoke_real_bloomberg_end_to_end() {
             "SELECT id FROM field_def WHERE asset_class_id=$1 AND mnemonic=$2")
             .bind(class_id).bind(mnemonic).fetch_optional(&pool).await.unwrap();
         if exists.is_none() {
-            fields::create_field(&pool, class_id, mnemonic, mnemonic, kind).await.unwrap();
+            fields::create_field(&pool, class_id, mnemonic, mnemonic, kind, None, None, "")
+                .await.unwrap();
         }
     }
-    let asset_id: i64 = match sqlx::query_scalar("SELECT id FROM asset WHERE bdp_security=$1")
-        .bind(SMOKE_SECURITY).fetch_optional(&pool).await.unwrap() {
-        Some(id) => id,
-        None => registry::create_asset(&pool, registry::NewAsset {
-            asset_class_id: class_id, label: "Apple".into(), id_kind: "ticker".into(),
-            ticker: Some("AAPL US".into()), isin: None, yellow_key: "Equity".into(),
-        }).await.unwrap().id,
-    };
-    let view_id: i64 = match sqlx::query_scalar("SELECT id FROM view WHERE name=$1")
-        .bind(SMOKE_VIEW).fetch_optional(&pool).await.unwrap() {
-        Some(id) => id,
-        None => views::create_view(&pool, SMOKE_VIEW, "smoke").await.unwrap().id,
-    };
-    views::set_view_assets(&pool, view_id, &[asset_id]).await.unwrap();
 
-    // --- the real thing: previous trading day, real BLPAPI, real database ---
-    let obs_date = scheduler::previous_weekday(chrono::Local::now().date_naive());
     let dir = tempfile::tempdir().unwrap();
     let cfg = orchestrator::PipelineConfig {
         data_dir: dir.path().to_path_buf(),
@@ -346,6 +429,34 @@ async fn smoke_real_bloomberg_end_to_end() {
         request_timeout_s: 120,
         soft_limit: 100_000,
     };
+
+    let instrument_id: i64 = match sqlx::query_scalar::<_, i64>(
+        "SELECT b.instrument_id FROM book_entry b
+           JOIN instrument_alias a ON a.instrument_id = b.instrument_id
+          WHERE a.id_type = 'bdp_security' AND a.value = $1 AND a.system_to = 'infinity'")
+        .bind(SMOKE_SECURITY).fetch_optional(&pool).await.unwrap() {
+        Some(id) => id,
+        None => {
+            let fetcher = BlpapiMasterFetcher { cfg: &cfg };
+            let req = AddToBook {
+                raw: "AAPL US".into(), yellow_key: "Equity".into(),
+                asset_class_id: class_id, label: "Apple".into(), hints: Hints::default(),
+            };
+            match book::add(&pool, &fetcher, &req, "smoke").await.expect("book::add failed") {
+                AddOutcome::Added(entry) => entry.instrument_id,
+                other => panic!("expected Added, got {other:?}"),
+            }
+        }
+    };
+    let view_id: i64 = match sqlx::query_scalar("SELECT id FROM view WHERE name=$1")
+        .bind(SMOKE_VIEW).fetch_optional(&pool).await.unwrap() {
+        Some(id) => id,
+        None => views::create_view(&pool, SMOKE_VIEW, "smoke").await.unwrap().id,
+    };
+    views::set_view_instruments(&pool, view_id, &[instrument_id]).await.unwrap();
+
+    // --- the real thing: previous trading day, real BLPAPI, real database ---
+    let obs_date = scheduler::previous_weekday(chrono::Local::now().date_naive());
     let out = orchestrator::run_eod(&pool, &cfg, view_id, "manual", obs_date, true)
         .await.expect("live BLPAPI run failed");
 
@@ -353,21 +464,21 @@ async fn smoke_real_bloomberg_end_to_end() {
         panic!("expected Completed, got {out:?}");
     };
     eprintln!("smoke: run {run_id} obs_date={obs_date} \
-               upserted={} issues={}", summary.upserted, summary.issues);
+               upserted={} issues={}", summary.inserted, summary.issues);
 
     // Both fields came back: PX_LAST via HistoricalDataRequest, NAME via
     // ReferenceDataRequest, both stamped with the same previous-day obs_date.
     let px: f64 = sqlx::query_scalar(
         "SELECT o.value_num FROM observation o JOIN field_def f ON f.id=o.field_id
-         WHERE o.asset_id=$1 AND f.mnemonic='PX_LAST' AND o.obs_date=$2")
-        .bind(asset_id).bind(obs_date).fetch_one(&pool).await
+         WHERE o.instrument_id=$1 AND f.mnemonic='PX_LAST' AND o.obs_date=$2")
+        .bind(instrument_id).bind(obs_date).fetch_one(&pool).await
         .expect("no PX_LAST observation ingested");
     assert!(px > 0.0, "implausible price {px}");
 
     let name: String = sqlx::query_scalar(
         "SELECT o.value_text FROM observation o JOIN field_def f ON f.id=o.field_id
-         WHERE o.asset_id=$1 AND f.mnemonic='NAME' AND o.obs_date=$2")
-        .bind(asset_id).bind(obs_date).fetch_one(&pool).await
+         WHERE o.instrument_id=$1 AND f.mnemonic='NAME' AND o.obs_date=$2")
+        .bind(instrument_id).bind(obs_date).fetch_one(&pool).await
         .expect("no NAME observation ingested");
     assert!(name.to_uppercase().contains("APPLE"), "got name {name:?}");
     eprintln!("smoke: {name} PX_LAST={px} on {obs_date}");
@@ -378,852 +489,4 @@ async fn smoke_real_bloomberg_end_to_end() {
         .bind(run_id).fetch_one(&pool).await.unwrap();
     let payload = payload.expect("run has no payload_path");
     assert!(std::path::Path::new(&payload).exists(), "missing audit payload {payload}");
-}
-
-/// `observation.run_id` is NOT NULL REFERENCES run(id), so any test that plants
-/// an observation must plant a run first. `run.status` is CHECK-constrained to
-/// ('generating','refreshing','reading','ingesting','ok','failed','partial') --
-/// 'completed' is not a legal value.
-async fn new_run(pool: &sqlx::PgPool, view_id: i64) -> i64 {
-    let (id,): (i64,) = sqlx::query_as(
-        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
-         VALUES ($1, 'eod', 'manual', 'ok', 1) RETURNING id")
-        .bind(view_id).fetch_one(pool).await.unwrap();
-    id
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn describe_deletion_counts_what_hangs_off_an_asset() {
-    use getbloomdata_lib::deletion::{describe_deletion, EntityKind};
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("DescribeCls"), "test").await.unwrap();
-    let asset = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Describe Me".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("DSC"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-    let field = getbloomdata_lib::fields::create_field(
-        &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("DescribeView"), "")
-        .await.unwrap();
-    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
-
-    let run_id = new_run(&pool, view.id).await;
-    sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3),
-                ($1, $2, DATE '2026-08-11', 2.0, $3)")
-        .bind(asset.id).bind(field.id).bind(run_id)
-        .execute(&pool).await.unwrap();
-
-    let impact = describe_deletion(&pool, EntityKind::Asset, asset.id).await.unwrap();
-    assert_eq!(impact.label, "Describe Me");
-    assert_eq!(impact.observations, 2);
-    assert_eq!(impact.first_obs, Some("2026-08-10".parse().unwrap()));
-    assert_eq!(impact.last_obs, Some("2026-08-11".parse().unwrap()));
-    assert_eq!(impact.views, 1);
-    assert!(impact.can_retire && impact.can_purge);
-    assert!(impact.blocked_reason.is_none());
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn describe_deletion_blocks_a_non_empty_asset_class() {
-    use getbloomdata_lib::deletion::{describe_deletion, EntityKind};
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("BlockedCls"), "test").await.unwrap();
-    getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Occupant".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("OCC"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-
-    let impact = describe_deletion(&pool, EntityKind::AssetClass, class.id).await.unwrap();
-    assert_eq!(impact.children, 1);
-    assert!(!impact.can_retire, "an asset class has no retired state");
-    assert!(!impact.can_purge, "a class with an asset in it cannot be deleted");
-    assert!(impact.blocked_reason.is_some());
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn delete_schedule_removes_the_row() {
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("SchedView"), "").await.unwrap();
-    sqlx::query(
-        "INSERT INTO schedule (view_id, window_start, window_end, active)
-         VALUES ($1, TIME '18:00', TIME '19:00', true)")
-        .bind(view.id).execute(&pool).await.unwrap();
-    let (sid,): (i64,) = sqlx::query_as("SELECT id FROM schedule WHERE view_id = $1")
-        .bind(view.id).fetch_one(&pool).await.unwrap();
-
-    getbloomdata_lib::deletion::delete_schedule(&pool, sid).await.unwrap();
-
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM schedule WHERE id = $1")
-        .bind(sid).fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 0);
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn delete_asset_class_refuses_while_occupied_then_succeeds_when_empty() {
-    use getbloomdata_lib::error::AppError;
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("EmptyMeCls"), "test").await.unwrap();
-    let asset = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Tenant".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("TEN"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-
-    let err = getbloomdata_lib::deletion::delete_asset_class(&pool, class.id).await.unwrap_err();
-    assert!(matches!(err, AppError::DeleteBlocked { .. }),
-            "expected DeleteBlocked, got {err:?}");
-
-    sqlx::query("DELETE FROM asset WHERE id = $1").bind(asset.id)
-        .execute(&pool).await.unwrap();
-    getbloomdata_lib::deletion::delete_asset_class(&pool, class.id).await.unwrap();
-
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset_class WHERE id = $1")
-        .bind(class.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 0);
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn retiring_an_asset_hides_it_from_views_but_keeps_its_observations() {
-    use getbloomdata_lib::deletion::{delete_asset, DeleteMode};
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("RetireCls"), "test").await.unwrap();
-    let asset = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Retiree".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("RET"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-    let field = getbloomdata_lib::fields::create_field(
-        &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("RetireView"), "").await.unwrap();
-    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
-    let run_id = new_run(&pool, view.id).await;
-    sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3)")
-        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
-
-    assert_eq!(getbloomdata_lib::views::view_assets(&pool, view.id).await.unwrap().len(), 1);
-
-    delete_asset(&pool, asset.id, DeleteMode::Retire).await.unwrap();
-
-    assert!(getbloomdata_lib::views::view_assets(&pool, view.id).await.unwrap().is_empty(),
-            "a retired asset must drop out of view resolution");
-    let (obs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM observation WHERE asset_id = $1")
-        .bind(asset.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(obs, 1, "retire never destroys collected data");
-    let (row,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(asset.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(row, 1);
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn purging_an_asset_clears_its_data_but_leaves_run_and_hit_ledger() {
-    use getbloomdata_lib::deletion::{delete_asset, DeleteMode};
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("PurgeCls"), "test").await.unwrap();
-    let asset = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Doomed".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("DOOM"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-    let field = getbloomdata_lib::fields::create_field(
-        &pool, class.id, "PX_LAST", "Last price", "numeric").await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("PurgeView"), "").await.unwrap();
-    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
-
-    let run_id = new_run(&pool, view.id).await;
-    sqlx::query("INSERT INTO hit_ledger (run_id, estimated_hits) VALUES ($1, 7)")
-        .bind(run_id).execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 1.0, $3)")
-        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO ingest_issue (run_id, asset_id, field_id, obs_date, severity, code, detail)
-         VALUES ($1, $2, $3, DATE '2026-08-10', 'warn', 'no_data', 'test')")
-        .bind(run_id).bind(asset.id).bind(field.id).execute(&pool).await.unwrap();
-
-    delete_asset(&pool, asset.id, DeleteMode::Purge).await.unwrap();
-
-    for (table, col) in [("observation", "asset_id"), ("ingest_issue", "asset_id"),
-                         ("view_asset", "asset_id"), ("asset", "id")] {
-        let (n,): (i64,) = sqlx::query_as(
-            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
-            .bind(asset.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(n, 0, "{table} should have no rows for the purged asset");
-    }
-    let (runs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM run WHERE id = $1")
-        .bind(run_id).fetch_one(&pool).await.unwrap();
-    assert_eq!(runs, 1, "a purge must never rewrite the record of work that happened");
-    let (hits,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM hit_ledger WHERE run_id = $1")
-        .bind(run_id).fetch_one(&pool).await.unwrap();
-    assert_eq!(hits, 1, "the budget ledger records money spent and is never rewritten");
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn purging_a_field_clears_its_observations_and_memberships() {
-    use getbloomdata_lib::deletion::{delete_field, DeleteMode};
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("FldPurgeCls"), "test").await.unwrap();
-    let asset = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Holder".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("HLD"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-    let field = getbloomdata_lib::fields::create_field(
-        &pool, class.id, "PX_VOLUME", "Volume", "numeric").await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("FldPurgeView"), "").await.unwrap();
-    getbloomdata_lib::views::set_view_fields(&pool, view.id, &[field.id]).await.unwrap();
-    let run_id = new_run(&pool, view.id).await;
-    sqlx::query(
-        "INSERT INTO observation (asset_id, field_id, obs_date, value_num, run_id)
-         VALUES ($1, $2, DATE '2026-08-10', 5.0, $3)")
-        .bind(asset.id).bind(field.id).bind(run_id).execute(&pool).await.unwrap();
-
-    delete_field(&pool, field.id, DeleteMode::Purge).await.unwrap();
-
-    for (table, col) in [("observation", "field_id"), ("ingest_issue", "field_id"),
-                         ("view_field", "field_id"), ("field_def", "id")] {
-        let (n,): (i64,) = sqlx::query_as(
-            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
-            .bind(field.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(n, 0, "{table} should have no rows for the purged field");
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn a_view_with_runs_refuses_to_purge_but_still_retires() {
-    use getbloomdata_lib::deletion::{delete_view, DeleteMode};
-    use getbloomdata_lib::error::AppError;
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("HistoricView"), "").await.unwrap();
-    sqlx::query(
-        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
-         VALUES ($1, 'eod', 'manual', 'ok', 1)")
-        .bind(view.id).execute(&pool).await.unwrap();
-
-    let err = delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap_err();
-    assert!(matches!(err, AppError::DeleteBlocked { .. }), "got {err:?}");
-
-    delete_view(&pool, view.id, DeleteMode::Retire).await.unwrap();
-    let (active,): (bool,) = sqlx::query_as("SELECT active FROM view WHERE id = $1")
-        .bind(view.id).fetch_one(&pool).await.unwrap();
-    assert!(!active);
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn purging_a_never_run_view_takes_its_schedule_and_memberships_with_it() {
-    use getbloomdata_lib::deletion::{delete_view, DeleteMode};
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let class = getbloomdata_lib::registry::create_asset_class(
-        &pool, &uniq("VPurgeCls"), "test").await.unwrap();
-    let asset = getbloomdata_lib::registry::create_asset(
-        &pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class.id,
-            label: "Member".into(),
-            id_kind: "ticker".into(),
-            ticker: Some(format!("{} US", uniq("MEM"))),
-            isin: None,
-            yellow_key: "Equity".into(),
-        }).await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("FreshView"), "").await.unwrap();
-    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[asset.id]).await.unwrap();
-    sqlx::query(
-        "INSERT INTO schedule (view_id, window_start, window_end, active)
-         VALUES ($1, TIME '18:00', TIME '19:00', true)")
-        .bind(view.id).execute(&pool).await.unwrap();
-
-    delete_view(&pool, view.id, DeleteMode::Purge).await.unwrap();
-
-    for table in ["schedule", "view_asset", "view_field"] {
-        let (n,): (i64,) = sqlx::query_as(
-            &format!("SELECT COUNT(*) FROM {table} WHERE view_id = $1"))
-            .bind(view.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(n, 0, "{table} should be empty for the purged view");
-    }
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM view WHERE id = $1")
-        .bind(view.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 0);
-    // The asset itself is untouched: a view is a selection, not an owner.
-    let (a,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(asset.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(a, 1);
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn scheduler_skips_schedules_whose_view_is_retired() {
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
-
-    let view = getbloomdata_lib::views::create_view(&pool, &uniq("RetiredSched"), "").await.unwrap();
-    sqlx::query(
-        "INSERT INTO schedule (view_id, window_start, window_end, active)
-         VALUES ($1, TIME '00:01', TIME '00:02', true)")
-        .bind(view.id).execute(&pool).await.unwrap();
-    sqlx::query("UPDATE view SET active = false WHERE id = $1")
-        .bind(view.id).execute(&pool).await.unwrap();
-
-    let due = getbloomdata_lib::scheduler::due_schedules(&pool).await.unwrap();
-    assert!(!due.iter().any(|(_, vid, _)| *vid == view.id),
-            "a retired view must not appear in the due list");
-}
-
-/// The bulk import reasons about the WHOLE registry, so it cannot be tested
-/// against the shared fixture database: those tests never clean up and run on
-/// parallel threads, so an asset another test inserted mid-flight would show up
-/// here as a proposed removal -- and, with Retire as the default, this test
-/// would deactivate another test's fixture. These tests get their own database,
-/// wiped at the start of each, and a mutex so they never overlap.
-static BULK_DB: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn bulk_pool() -> sqlx::PgPool {
-    let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
-    let (base, _) = url.rsplit_once('/').expect("database url ends with /<dbname>");
-    let admin = sqlx::PgPool::connect(&format!("{base}/postgres")).await.unwrap();
-    let exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM pg_database WHERE datname = 'bloom_test_bulk'")
-        .fetch_optional(&admin).await.unwrap();
-    if exists.is_none() {
-        sqlx::query("CREATE DATABASE bloom_test_bulk").execute(&admin).await.unwrap();
-    }
-    admin.close().await;
-    let pool = getbloomdata_lib::db::connect(&format!("{base}/bloom_test_bulk"))
-        .await.unwrap();
-    sqlx::query(
-        "TRUNCATE hit_ledger, ingest_issue, observation, run, view_field, view_asset,
-                  schedule, view, field_def, asset, asset_class RESTART IDENTITY CASCADE")
-        .execute(&pool).await.unwrap();
-    pool
-}
-
-async fn mk_asset(pool: &sqlx::PgPool, class_id: i64, label: &str, ticker: &str) -> i64 {
-    getbloomdata_lib::registry::create_asset(
-        pool, getbloomdata_lib::registry::NewAsset {
-            asset_class_id: class_id, label: label.into(), id_kind: "ticker".into(),
-            ticker: Some(ticker.into()), isin: None, yellow_key: "Equity".into(),
-        }).await.unwrap().id
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn export_then_import_is_a_no_op() {
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
-        .await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, "Daily", "").await.unwrap();
-    let a = mk_asset(&pool, class.id, "Round Trip", "RTP US").await;
-    let b = mk_asset(&pool, class.id, "Second", "SEC US").await;
-    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[a]).await.unwrap();
-    getbloomdata_lib::registry::set_asset_active(&pool, b, false).await.unwrap();
-
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
-    assert!(plan.is_empty(), "a fresh round trip must change nothing, got {plan:?}");
-    // A retired asset must survive the round trip retired, not be reactivated.
-    assert!(plan.reactivations.is_empty());
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_adds_edits_and_purges_in_one_transaction() {
-    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
-    use getbloomdata_lib::deletion::DeleteMode;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
-        .await.unwrap();
-    let view = getbloomdata_lib::views::create_view(&pool, "Daily", "").await.unwrap();
-    let keep = mk_asset(&pool, class.id, "Keep", "KEP US").await;
-    let drop = mk_asset(&pool, class.id, "Drop", "DRP US").await;
-    let third = mk_asset(&pool, class.id, "Third", "THR US").await;
-    getbloomdata_lib::views::set_view_assets(&pool, view.id, &[third]).await.unwrap();
-
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-
-    // Rewrite the sheet the way a user would in Excel: rename `keep`, put it in
-    // the Daily view, add a row with a blank id, and delete `drop`'s row.
-    let data = read_assets_sheet(&path).unwrap();
-    let mut rows: Vec<ExportRow> = data.rows.iter()
-        .filter(|r| r.id != Some(drop))
-        .map(|r| ExportRow {
-            id: r.id.unwrap_or(0),
-            label: if r.id == Some(keep) { "Keep Renamed".into() } else { r.label.clone() },
-            class: r.class.clone(), id_kind: r.id_kind.clone(),
-            ticker: r.ticker.clone(), isin: r.isin.clone(),
-            yellow_key: r.yellow_key.clone(), active: r.active,
-            security: String::new(),
-            views: if r.id == Some(keep) { vec!["Daily".into()] } else { r.views.clone() },
-        }).collect();
-    rows.push(ExportRow {
-        id: 0, label: "Brand New".into(), class: "Equity".into(),
-        id_kind: "ticker".into(), ticker: "NEW US".into(), isin: String::new(),
-        yellow_key: "Equity".into(), active: true, security: String::new(), views: vec![],
-    });
-    write_assets_sheet(&path, &rows, &["Daily".to_string()], &["Equity".to_string()])
-        .unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
-    assert_eq!(plan.adds.len(), 1);
-    assert_eq!(plan.edits.len(), 1);
-    assert_eq!(plan.edits[0].id, keep);
-    assert_eq!(plan.membership_changes.len(), 1);
-    assert_eq!(plan.removals.len(), 1);
-    assert_eq!(plan.removals[0].id, drop);
-    assert!(!plan.requires_typed_confirmation, "1 of 3 active is not over half");
-
-    let res = getbloomdata_lib::bulk::apply_import(
-        &pool, &path, &plan.file_hash, &[(drop, DeleteMode::Purge)], None).await.unwrap();
-    assert_eq!(res.added, 1);
-    assert_eq!(res.edited, 1);
-    assert_eq!(res.removed, 1);
-    assert!(res.workbook_refreshed, "the happy path must refresh the workbook on disk");
-
-    let (gone,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(drop).fetch_one(&pool).await.unwrap();
-    assert_eq!(gone, 0, "purge deletes the row outright");
-    let (label,): (String,) = sqlx::query_as("SELECT label FROM asset WHERE id = $1")
-        .bind(keep).fetch_one(&pool).await.unwrap();
-    assert_eq!(label, "Keep Renamed");
-    let (members,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM view_asset WHERE view_id = $1 AND asset_id = $2")
-        .bind(view.id).bind(keep).fetch_one(&pool).await.unwrap();
-    assert_eq!(members, 1, "the x in the Daily column added a membership");
-    let (still,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(third).fetch_one(&pool).await.unwrap();
-    assert_eq!(still, 1, "an untouched row must survive");
-    let (added,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM asset WHERE bdp_security = 'NEW US Equity'")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(added, 1);
-
-    // `apply_import` overwrote the workbook at `path` with a fresh export as
-    // part of landing the commit (see `workbook_refreshed` above), so this is
-    // no longer testing the same sheet against a moved database -- it is
-    // testing that the refreshed file is itself consistent with the database
-    // it was just applied against: re-previewing it must find nothing left
-    // to do, the same guarantee `export_then_import_is_a_no_op` checks for a
-    // plain export, now checked for the post-apply re-export path too.
-    let replay = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert!(replay.is_empty(), "the refreshed workbook must match the database, got {replay:?}");
-}
-
-/// Finding I5: a hand-built sheet (no `id` column) has no ids to write back
-/// and, per guardrail 1, can never propose a removal -- so overwriting it
-/// with a full registry export is not a service to the user, it is
-/// destroying a file they wrote by hand (their own column order, their own
-/// extra notes, whatever they pasted). The apply must skip the rewrite
-/// entirely for such a sheet: the file on disk must be untouched, byte for
-/// byte, and `workbook_refreshed` must honestly report `false`, even though
-/// the database changes land exactly as they would for an export-produced
-/// sheet.
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_from_a_hand_built_sheet_leaves_the_file_untouched() {
-    use getbloomdata_lib::bulk::sheet::SHEET_NAME;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("pasted.xlsx");
-
-    getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test").await.unwrap();
-
-    // Built the way a user would in Excel: no `id` column at all, only the
-    // columns they bothered to fill in.
-    let mut book = rust_xlsxwriter::Workbook::new();
-    let s = book.add_worksheet();
-    s.set_name(SHEET_NAME).unwrap();
-    for (c, h) in ["label", "class", "id_kind", "ticker", "yellow_key"].iter().enumerate() {
-        s.write_string(0, c as u16, *h).unwrap();
-    }
-    s.write_string(1, 0, "Hand Built").unwrap();
-    s.write_string(1, 1, "Equity").unwrap();
-    s.write_string(1, 2, "ticker").unwrap();
-    s.write_string(1, 3, "HB US").unwrap();
-    s.write_string(1, 4, "Equity").unwrap();
-    book.save(&path).unwrap();
-
-    let before_bytes = std::fs::read(&path).unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert!(!plan.has_id_column, "a hand-built sheet has no id column");
-    assert!(plan.invalid_rows.is_empty(), "invalid rows: {:?}", plan.invalid_rows);
-    assert_eq!(plan.adds.len(), 1);
-
-    let res = getbloomdata_lib::bulk::apply_import(&pool, &path, &plan.file_hash, &[], None)
-        .await.unwrap();
-    assert!(!res.workbook_refreshed,
-            "a hand-built sheet must not be overwritten by the post-apply export");
-
-    let after_bytes = std::fs::read(&path).unwrap();
-    assert_eq!(before_bytes, after_bytes,
-               "the user's own file must survive an apply byte-for-byte untouched");
-
-    let (added,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM asset WHERE bdp_security = 'HB US Equity'")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(added, 1, "the database changes must still land even though the file did not move");
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_refuses_a_stale_hash() {
-    use getbloomdata_lib::error::AppError;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-    let err = getbloomdata_lib::bulk::apply_import(
-        &pool, &path, "0000000000000000000000000000000000000000000000000000000000000000",
-        &[], None).await.unwrap_err();
-    assert!(matches!(err, AppError::ImportRejected { .. }), "got {err:?}");
-}
-
-/// Fix round 1, item 2 (happy path): a blank-id add row gets a real id
-/// assigned by the commit, and the post-commit refresh must write that real
-/// id back to the file -- not leave the blank the sheet started with.
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_refreshes_the_workbook_with_the_newly_assigned_id() {
-    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test").await.unwrap();
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-
-    let rows = vec![ExportRow {
-        id: 0, label: "Brand New".into(), class: "Equity".into(),
-        id_kind: "ticker".into(), ticker: "NEW US".into(), isin: String::new(),
-        yellow_key: "Equity".into(), active: true, security: String::new(), views: vec![],
-    }];
-    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    let res = getbloomdata_lib::bulk::apply_import(&pool, &path, &plan.file_hash, &[], None)
-        .await.unwrap();
-    assert!(res.workbook_refreshed, "the happy path must report a successful refresh");
-
-    let refreshed = read_assets_sheet(&path).unwrap();
-    let new_row = refreshed.rows.iter().find(|r| r.label == "Brand New")
-        .expect("the new row must still be on the refreshed sheet");
-    assert!(new_row.id.is_some(),
-            "the refreshed file must carry the database's assigned id, not the blank it started with");
-}
-
-/// Fix round 1, items 1 and 2 (failure path): the reviewer reproduced this
-/// against a real database by making the workbook read-only before apply --
-/// simulating Excel's own sharing-violation lock, `os error 5` on Windows --
-/// and found the committed purge and add both landed while the caller was
-/// told the whole call failed. A failed refresh must never demote a landed
-/// commit to an `Err`: the transaction already committed, so the caller must
-/// be told it succeeded, with `workbook_refreshed` carrying the honest bad
-/// news about the file instead.
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_succeeds_even_when_the_workbook_refresh_is_locked_out() {
-    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
-    use getbloomdata_lib::deletion::DeleteMode;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
-        .await.unwrap();
-    let drop = mk_asset(&pool, class.id, "Drop", "DRP US").await;
-    // A second, untouched asset so this one removal is not "more than half the
-    // active book" -- guardrail 2 is a different mechanism from the one this
-    // test is about, and must not fire here.
-    mk_asset(&pool, class.id, "Untouched", "UNT US").await;
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-
-    // Rewrite the sheet the way the earlier apply-path tests do: drop's row is
-    // gone (a removal) and a blank-id row proposes an add, in the same call.
-    let data = read_assets_sheet(&path).unwrap();
-    let mut rows: Vec<ExportRow> = data.rows.iter()
-        .filter(|r| r.id != Some(drop))
-        .map(|r| ExportRow {
-            id: r.id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
-            id_kind: r.id_kind.clone(), ticker: r.ticker.clone(), isin: r.isin.clone(),
-            yellow_key: r.yellow_key.clone(), active: r.active,
-            security: String::new(), views: r.views.clone(),
-        }).collect();
-    rows.push(ExportRow {
-        id: 0, label: "Brand New".into(), class: "Equity".into(),
-        id_kind: "ticker".into(), ticker: "NEW US".into(), isin: String::new(),
-        yellow_key: "Equity".into(), active: true, security: String::new(), views: vec![],
-    });
-    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-
-    // Simulate the workbook being held open elsewhere (Excel's own sharing
-    // violation): mark the file read-only so the refresh's write hits the
-    // same access-denied error a real lock produces.
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).unwrap();
-
-    let outcome = getbloomdata_lib::bulk::apply_import(
-        &pool, &path, &plan.file_hash, &[(drop, DeleteMode::Purge)], None).await;
-
-    // Restore write access unconditionally, before any assertion that might
-    // panic, so the tempdir can still clean itself up.
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_readonly(false);
-    std::fs::set_permissions(&path, perms).unwrap();
-
-    let res = outcome.expect("a failed workbook refresh must not demote a committed apply to an error");
-    assert!(!res.workbook_refreshed, "the refresh genuinely failed and must say so honestly");
-
-    let (gone,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1")
-        .bind(drop).fetch_one(&pool).await.unwrap();
-    assert_eq!(gone, 0, "the committed purge must have landed despite the refresh failure");
-    let (added,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM asset WHERE bdp_security = 'NEW US Equity'")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(added, 1, "the committed add must have landed despite the refresh failure");
-}
-
-/// Fix round 1, item 3: an asset the sheet no longer mentions is a removal
-/// whether the user meant it or not -- e.g. another writer changed the
-/// registry between preview and apply. Nothing may be applied against a
-/// removal the caller never actually reviewed, so an empty `removal_modes`
-/// must refuse the whole call rather than silently default to Retire.
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_refuses_a_removal_the_caller_never_reviewed() {
-    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
-    use getbloomdata_lib::error::AppError;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
-        .await.unwrap();
-    let keep = mk_asset(&pool, class.id, "Keep", "KEP US").await;
-    let drop = mk_asset(&pool, class.id, "Drop", "DRP US").await;
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-
-    let data = read_assets_sheet(&path).unwrap();
-    let rows: Vec<ExportRow> = data.rows.iter()
-        .filter(|r| r.id != Some(drop))
-        .map(|r| ExportRow {
-            id: r.id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
-            id_kind: r.id_kind.clone(), ticker: r.ticker.clone(), isin: r.isin.clone(),
-            yellow_key: r.yellow_key.clone(), active: r.active,
-            security: String::new(), views: r.views.clone(),
-        }).collect();
-    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert_eq!(plan.removals.len(), 1);
-    assert_eq!(plan.removals[0].id, drop);
-    assert!(!plan.requires_typed_confirmation, "1 of 2 active is not over half");
-
-    let err = getbloomdata_lib::bulk::apply_import(&pool, &path, &plan.file_hash, &[], None)
-        .await.unwrap_err();
-    let AppError::ImportRejected { reason } = &err else {
-        panic!("an unreviewed removal must be refused with ImportRejected, got {err:?}");
-    };
-    assert!(reason.contains("1 removal"),
-            "the refusal must say how many removals were not reviewed, got {reason:?}");
-
-    let (still_active,): (bool,) = sqlx::query_as("SELECT active FROM asset WHERE id = $1")
-        .bind(drop).fetch_one(&pool).await.unwrap();
-    assert!(still_active, "an unreviewed removal must not be silently retired");
-    let (label,): (String,) = sqlx::query_as("SELECT label FROM asset WHERE id = $1")
-        .bind(keep).fetch_one(&pool).await.unwrap();
-    assert_eq!(label, "Keep", "nothing else may move either -- this is an all-or-nothing refusal");
-}
-
-/// Fix round 2, item 2: `removal_modes` naming the same asset twice with
-/// conflicting intent must be refused outright, not resolved by slice order.
-/// Collecting straight into a `HashMap` would let `(id, Purge)` silently win
-/// or lose against an earlier `(id, Retire)` depending only on which came
-/// last in the slice -- exactly the kind of silent decision a destructive
-/// action must never make on the caller's behalf.
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn apply_import_refuses_conflicting_duplicate_removal_modes() {
-    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
-    use getbloomdata_lib::deletion::DeleteMode;
-    use getbloomdata_lib::error::AppError;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
-        .await.unwrap();
-    let keep = mk_asset(&pool, class.id, "Keep", "KEP US").await;
-    let drop = mk_asset(&pool, class.id, "Drop", "DRP US").await;
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-
-    let data = read_assets_sheet(&path).unwrap();
-    let rows: Vec<ExportRow> = data.rows.iter()
-        .filter(|r| r.id != Some(drop))
-        .map(|r| ExportRow {
-            id: r.id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
-            id_kind: r.id_kind.clone(), ticker: r.ticker.clone(), isin: r.isin.clone(),
-            yellow_key: r.yellow_key.clone(), active: r.active,
-            security: String::new(), views: r.views.clone(),
-        }).collect();
-    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert_eq!(plan.removals.len(), 1);
-    assert_eq!(plan.removals[0].id, drop);
-    assert!(!plan.requires_typed_confirmation, "1 of 2 active is not over half");
-
-    // Two entries for the SAME id, opposite destructive intent.
-    let conflicting = [(drop, DeleteMode::Retire), (drop, DeleteMode::Purge)];
-    let err = getbloomdata_lib::bulk::apply_import(
-        &pool, &path, &plan.file_hash, &conflicting, None).await.unwrap_err();
-    let AppError::ImportRejected { reason } = &err else {
-        panic!("conflicting duplicate removal modes must be refused with ImportRejected, got {err:?}");
-    };
-    assert!(reason.contains(&drop.to_string()),
-            "the refusal must name the duplicated asset id, got {reason:?}");
-
-    // Nothing moved: neither retired nor purged.
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE id = $1 AND active")
-        .bind(drop).fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 1, "a call refused for conflicting modes must leave the asset untouched");
-    let (label,): (String,) = sqlx::query_as("SELECT label FROM asset WHERE id = $1")
-        .bind(keep).fetch_one(&pool).await.unwrap();
-    assert_eq!(label, "Keep");
-}
-
-#[tokio::test]
-#[ignore = "requires postgres"]
-async fn a_large_removal_set_needs_the_typed_count() {
-    use getbloomdata_lib::bulk::sheet::{read_assets_sheet, write_assets_sheet, ExportRow};
-    use getbloomdata_lib::error::AppError;
-    let _guard = BULK_DB.lock().await;
-    let pool = bulk_pool().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assets.xlsx");
-
-    let class = getbloomdata_lib::registry::create_asset_class(&pool, "Equity", "test")
-        .await.unwrap();
-    for i in 1..=4 {
-        mk_asset(&pool, class.id, &format!("A{i}"), &format!("A{i} US")).await;
-    }
-    getbloomdata_lib::bulk::export_assets_xlsx(&pool, &path).await.unwrap();
-
-    // Keep one row of four -- a truncated paste, which is exactly what
-    // guardrail 2 exists to catch.
-    let data = read_assets_sheet(&path).unwrap();
-    let rows: Vec<ExportRow> = data.rows.iter().take(1).map(|r| ExportRow {
-        id: r.id.unwrap_or(0), label: r.label.clone(), class: r.class.clone(),
-        id_kind: r.id_kind.clone(), ticker: r.ticker.clone(), isin: r.isin.clone(),
-        yellow_key: r.yellow_key.clone(), active: r.active,
-        security: String::new(), views: r.views.clone(),
-    }).collect();
-    write_assets_sheet(&path, &rows, &[], &["Equity".to_string()]).unwrap();
-
-    let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
-    assert_eq!(plan.removals.len(), 3);
-    assert!(plan.requires_typed_confirmation);
-
-    let err = getbloomdata_lib::bulk::apply_import(
-        &pool, &path, &plan.file_hash, &[], None).await.unwrap_err();
-    let AppError::ImportRejected { reason } = &err else {
-        panic!("an unconfirmed mass removal must be refused with ImportRejected, got {err:?}");
-    };
-    assert!(reason.contains("confirm the count"),
-            "the refusal must explain that the count needs confirming, got {reason:?}");
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE active")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 4, "nothing may be applied when the guardrail refuses");
-
-    // With the count typed AND every removal given an explicit mode, the same
-    // call goes through. Retire is passed explicitly for all three: since the
-    // last fix round, an id absent from `removal_modes` is refused outright
-    // rather than silently defaulted, so this is no longer "the default" but
-    // still exercises the same Retire-not-Purge behaviour end to end.
-    let modes: Vec<(i64, getbloomdata_lib::deletion::DeleteMode)> = plan.removals.iter()
-        .map(|r| (r.id, getbloomdata_lib::deletion::DeleteMode::Retire)).collect();
-    getbloomdata_lib::bulk::apply_import(
-        &pool, &path, &plan.file_hash, &modes, Some(3)).await.unwrap();
-    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM asset WHERE active")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(n, 1, "the three missing rows are retired, not purged");
 }
