@@ -470,8 +470,15 @@ The constraint is hard: the tool calls Bloomberg only when it must.
 | typing in the search box | **none, ever** |
 | selecting a locally-known instrument | none |
 | explicit "Search Bloomberg" | 1 `instrumentListRequest` |
-| resolving a never-seen instrument | 1 `ReferenceDataRequest` + 1 `HISTORICAL_IDS_TIME_RANGE`, once per instrument for its lifetime |
+| resolving a never-seen instrument, **unambiguously** | 1 `ReferenceDataRequest` + 1 `HISTORICAL_IDS_TIME_RANGE`, once per instrument for its lifetime |
+| resolving a never-seen instrument **that needs the search** | 3 + 1: the identity probe, then `instrumentListRequest`, then a second `ReferenceDataRequest` to resolve the winner, then `HISTORICAL_IDS_TIME_RANGE` |
+| a locally ambiguous identifier (two instruments wear it) | **none** — it goes straight to review; a Bloomberg call cannot resolve a local ambiguity |
 | re-resolving a known instrument | none — served from `instrument_alias` |
+
+The second row is not an inefficiency to be optimised away. `instrumentListRequest`
+returns a security string and a description — not a FIGI, not an ISIN — so the
+candidate a user picks still has to be resolved for real before anything can be
+bound to it. Binding the clicked string directly is what §6.2 forbids.
 
 All of these are recorded in `hit_ledger` and counted conservatively, matching
 the existing over-count-is-safe policy. Whether `instrumentListRequest` is
