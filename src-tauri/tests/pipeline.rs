@@ -242,3 +242,89 @@ async fn a_member_with_no_security_today_is_skipped_and_recorded_as_an_issue() {
     assert_eq!(code, "no_security_today");
     assert!(detail.contains(&inst.instrument_id.to_string()), "detail: {detail}");
 }
+
+// ---------------------------------------------------------------------------
+// I2: gaps are per instrument, not per view.
+// ---------------------------------------------------------------------------
+
+/// `detect_gaps` collected `DISTINCT o.obs_date` across the whole view, so one
+/// healthy instrument marked a date covered for every member. An instrument
+/// that failed for a week, or was added mid-history, produced no gap and
+/// therefore no backfill -- which is exactly the silent hole in a time series
+/// the spec promises cannot happen, arrived at through the one function whose
+/// job is to find them.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_gap_in_one_instrument_is_not_hidden_by_another_that_reported() {
+    let pool = common::pool().await;
+    let (healthy, fid, vid, rid) = scaffold(&pool, "GAPOK").await;
+
+    // A second member of the same view, same class, that will report nothing.
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM book_entry WHERE instrument_id = $1")
+        .bind(healthy).fetch_one(&pool).await.unwrap();
+    let silent_inst = store::create(&pool).await.unwrap();
+    let silent = silent_inst.instrument_id;
+    let silent_security = format!("{} US Equity", uniq("GAPBAD"));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, silent, &NewAlias {
+        id_type: "bdp_security".into(), value: silent_security.clone(),
+        exch_code: Some("US".into()), valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(silent).bind(class).bind(&silent_security)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(vid).bind(silent).execute(&pool).await.unwrap();
+
+    // The healthy instrument reports on every weekday of the window; the
+    // other reports on none of them.
+    let today = d("2026-08-19");
+    let mut day = today - chrono::Duration::days(6);
+    while day < today {
+        if !getbloomdata_lib::scheduler::is_weekend(day) {
+            sqlx::query(
+                "INSERT INTO observation
+                   (instrument_id, field_id, obs_date, layer, basis_id, value_num, run_id)
+                 VALUES ($1,$2,$3,'raw',1,1.0,$4)")
+                .bind(healthy).bind(fid).bind(day).bind(rid)
+                .execute(&pool).await.unwrap();
+        }
+        day += chrono::Duration::days(1);
+    }
+
+    let gaps = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 6, today).await.unwrap();
+    assert!(gaps.iter().all(|g| g.instrument_id != healthy),
+            "the instrument that reported every day has no gap: {gaps:?}");
+    assert!(gaps.iter().any(|g| g.instrument_id == silent),
+            "the instrument that reported nothing MUST have one -- under the old \
+             per-view query its silence was hidden by its neighbour: {gaps:?}");
+    assert!(gaps.iter().filter(|g| g.instrument_id == silent)
+                .any(|g| g.label == silent_security),
+            "a gap names the instrument, so the user can see which one is missing");
+}
+
+/// The members come from `views::view_instruments`, so an instrument retired
+/// from the book is not reported as a gap: it is not supposed to be
+/// collecting, and a permanent, unfixable "gap" is noise that hides the real
+/// ones.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_retired_member_is_not_reported_as_a_gap() {
+    let pool = common::pool().await;
+    let (inst, _fid, vid, _rid) = scaffold(&pool, "GAPRET").await;
+    let today = d("2026-08-19");
+
+    let before = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 6, today).await.unwrap();
+    assert!(before.iter().any(|g| g.instrument_id == inst),
+            "an active member with no observations is a gap");
+
+    sqlx::query("UPDATE book_entry SET active = FALSE WHERE instrument_id = $1")
+        .bind(inst).execute(&pool).await.unwrap();
+    let after = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 6, today).await.unwrap();
+    assert!(after.iter().all(|g| g.instrument_id != inst),
+            "a retired member is not collecting, so it is not a gap: {after:?}");
+}

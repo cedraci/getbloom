@@ -74,7 +74,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_asset_classes, commands::create_asset_class,
             commands::list_book, commands::add_to_book, commands::set_book_active,
-            commands::list_pending_reviews, commands::resolve_review, commands::reject_review,
+            commands::list_pending_reviews, commands::resolve_review,
+            commands::resolve_review_local, commands::reject_review,
+            commands::ingest_identifier_history,
             commands::list_link_proposals, commands::confirm_link,
             commands::list_fields, commands::create_field,
             commands::list_views, commands::create_view,

@@ -319,14 +319,17 @@ async fn a_hint_that_leaves_one_survivor_binds_without_review() {
     }
     // Pins the exact Bloomberg cost of this path: the mandatory step-3
     // reference probe on the bare ticker (comes back empty, no exchange
-    // qualifier), the step-4 search, the step-5 confirming reference call
-    // for the scored winner, and the one-per-instrument anchored identifier
-    // history request Task 8 fires after a successful bind. Nothing here
-    // should be able to grow this silently -- e.g. a second identity() call
-    // snuck into scoring.
-    assert_eq!(fetcher.call_count(), 4,
-               "1 failed reference probe + 1 search + 1 confirming reference call \
-                + 1 identifier history request");
+    // qualifier), the step-4 search, and the step-5 confirming reference call
+    // for the scored winner. Nothing here should be able to grow this
+    // silently -- e.g. a second identity() call snuck into scoring.
+    //
+    // Three, not four: the anchored identifier-history request that used to
+    // fire after every successful bind is gone (P0 §6.5 -- resolution knows
+    // the chain's END and the field is anchored on its START, so it returned
+    // another company's chain). It is now an explicit user action.
+    assert_eq!(fetcher.call_count(), 3,
+               "1 failed reference probe + 1 search + 1 confirming reference call, \
+                and NO identifier-history request");
 }
 
 #[tokio::test]
@@ -610,4 +613,300 @@ async fn nothing_found_is_recorded_as_a_decision_too() {
         "SELECT chosen_instrument_id FROM resolution_decision WHERE id = $1")
         .bind(decision_id).fetch_one(&pool).await.unwrap();
     assert_eq!(chosen, None);
+}
+
+// ---------------------------------------------------------------------------
+// C1: a rename must be able to land on an instrument that already exists.
+// ---------------------------------------------------------------------------
+
+/// Same FIGI, different security string. `bind_identity` used to return the
+/// existing instrument id before writing anything at all, so an instrument
+/// bound while it wore `FB US Equity` went on answering `FB US Equity`
+/// forever: `current_security` handed a dead ticker to every fetch and the
+/// series stopped without one error. This is the branch's headline promise.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn re_resolving_the_same_figi_under_a_new_security_records_the_rename() {
+    let pool = common::pool().await;
+    let old_ticker = uniq("FBZ");
+    let new_ticker = uniq("METAZ");
+    let figi = uniq("BBG000RENAME");
+    let old_security = format!("{old_ticker} US Equity");
+    let new_security = format!("{new_ticker} US Equity");
+
+    let first = identity_mock(&old_security, &figi, "US");
+    let r = engine::resolve(&pool, &first, &input(&format!("{old_ticker} US")))
+        .await.unwrap();
+    let Resolution::Bound { instrument_id, .. } = r else { panic!("expected Bound, got {r:?}") };
+    assert_eq!(store::current_security(&pool, instrument_id, d("2026-08-19"))
+                   .await.unwrap().as_deref(), Some(old_security.as_str()));
+
+    // Bloomberg now answers for a different security string with the SAME
+    // FIGI -- which is exactly what a rename looks like from here.
+    let mut second = identity_mock(&new_security, &figi, "US");
+    second.identity_raw[0]["securityData"][0]["fieldData"]["NAME"] =
+        serde_json::json!("META PLATFORMS INC");
+    let r2 = engine::resolve(&pool, &second, &input(&format!("{new_ticker} US")))
+        .await.unwrap();
+    let Resolution::Bound { instrument_id: same, .. } = r2 else {
+        panic!("expected Bound, got {r2:?}")
+    };
+    assert_eq!(same, instrument_id, "one FIGI is one instrument, not two");
+
+    // Two bdp_security periods, the earlier one closed where the later starts.
+    let aliases = store::aliases(&pool, instrument_id).await.unwrap();
+    let mut secs: Vec<_> = aliases.iter()
+        .filter(|a| a.id_type == "bdp_security")
+        .collect();
+    secs.sort_by_key(|a| a.valid_from);
+    assert_eq!(secs.len(), 2, "a rename is two periods, never an edit: {secs:?}");
+    assert_eq!(secs[0].value, old_security);
+    assert_eq!(secs[1].value, new_security);
+    assert_eq!(secs[0].valid_to, secs[1].valid_from,
+               "the old period ends exactly where the new one begins");
+    assert_eq!(secs[1].valid_from, d("2026-08-19"), "closed at today, not backdated");
+    assert_eq!(secs[1].valid_to, store::forever());
+
+    // The current security is the NEW one -- the whole point.
+    assert_eq!(store::current_security(&pool, instrument_id, d("2026-08-19"))
+                   .await.unwrap().as_deref(), Some(new_security.as_str()));
+    // ...and the old string still resolves to the same instrument in its own era.
+    assert_eq!(store::find_by_alias(&pool, "bdp_security", &old_security,
+                                    d("2020-01-01")).await.unwrap(), Some(instrument_id));
+
+    // Attributes were refreshed too, not left at the values of the first bind.
+    let attrs = store::attrs(&pool, instrument_id, d("2026-08-19")).await.unwrap();
+    assert!(attrs.iter().any(|a| a.attr == "name" && a.value == "META PLATFORMS INC"),
+            "the identity block's attributes are re-run on reconciliation: {attrs:?}");
+}
+
+/// The reconciliation must be a no-op when nothing actually changed --
+/// otherwise every re-resolution would pile up a fresh alias period and a
+/// superseded attribute row for the same facts. (Step 2 answers first here,
+/// which is the strongest form of that guarantee: no call is made at all.)
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn re_resolving_an_unchanged_identity_writes_no_new_period() {
+    let pool = common::pool().await;
+    let ticker = uniq("SAMEZ");
+    let figi = uniq("BBG000SAMEZ");
+    let security = format!("{ticker} US Equity");
+    let mock = identity_mock(&security, &figi, "US");
+
+    let r = engine::resolve(&pool, &mock, &input(&format!("{ticker} US"))).await.unwrap();
+    let Resolution::Bound { instrument_id, .. } = r else { panic!("expected Bound") };
+    let before = store::aliases(&pool, instrument_id).await.unwrap().len();
+
+    let r2 = engine::resolve(&pool, &mock, &input(&format!("{ticker} US Equity")))
+        .await.unwrap();
+    let Resolution::Bound { instrument_id: same, method, .. } = r2 else {
+        panic!("expected Bound")
+    };
+    assert_eq!(same, instrument_id);
+    assert_eq!(method, "local_alias", "already local: no Bloomberg call at all");
+    assert_eq!(store::aliases(&pool, instrument_id).await.unwrap().len(), before,
+               "nothing changed, so nothing was written");
+}
+
+// ---------------------------------------------------------------------------
+// I1: a locally ambiguous review is a local re-point, not a Bloomberg call.
+// ---------------------------------------------------------------------------
+
+/// The placeholder `local_ambiguity_candidates` writes when an existing
+/// instrument has no current security string must be unbindable, even if the
+/// UI regresses and hands it back. Before this guard, clicking "This one"
+/// spent a real Bloomberg call on `instrument #42`, got nothing, took the
+/// bare-block fallback, and minted a permanent instrument whose bdp_security
+/// alias was that literal text.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn resolve_review_refuses_a_chosen_security_that_is_not_a_security_string() {
+    let pool = common::pool().await;
+    let ticker = uniq("ZPPP");
+    let mock = MockMasterFetcher {
+        identity_raw: serde_json::json!([]),
+        list_raw: serde_json::json!([{"results": [
+            {"security": format!("{ticker} US<equity>"), "description": "Test Inc"},
+            {"security": format!("{ticker} LN<equity>"), "description": "Test Inc"}]}]),
+        ..Default::default()
+    };
+    let r = engine::resolve(&pool, &mock, &input(&ticker)).await.unwrap();
+    let Resolution::NeedsReview { review_id, .. } = r else { panic!("expected review") };
+    let calls_before = mock.call_count();
+
+    for bad in ["instrument #42", "AAPL US", "", "   ", "AAPL US Nonsense"] {
+        let err = engine::resolve_review(&pool, &mock, review_id, bad, "laurent")
+            .await.unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)),
+                "{bad:?} must be refused as a security string, got {err:?}");
+    }
+    assert_eq!(mock.call_count(), calls_before,
+               "a refused chosen_security must not cost a Bloomberg hit");
+
+    // And the review is untouched -- still available for a real decision.
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM resolution_review WHERE id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "pending");
+}
+
+/// Spec 7: "a locally ambiguous identifier -- none; a Bloomberg call cannot
+/// resolve a local ambiguity." Until `resolve_review_local` existed, the only
+/// action the review screen could take on such a row was `resolve_review`,
+/// which always calls out -- so the free path was documented and unreachable.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_local_ambiguity_is_re_pointed_at_an_existing_instrument_for_free() {
+    let pool = common::pool().await;
+    let ticker = uniq("BMWZ");
+    let security = format!("{ticker} GY Equity");
+
+    let a = store::create(&pool).await.unwrap();
+    let b = store::create(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for inst in [&a, &b] {
+        store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
+            id_type: "bdp_security".into(), value: security.clone(),
+            exch_code: Some("GY".into()), valid_from: d("2000-01-01"), valid_to: None,
+            source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+        }).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let mock = MockMasterFetcher::default();
+    let r = engine::resolve(&pool, &mock, &input(&format!("{ticker} GY"))).await.unwrap();
+    let Resolution::NeedsReview { review_id, candidates, .. } = r else {
+        panic!("expected NeedsReview, got {r:?}")
+    };
+    // Each scored entry names the instrument it stands for, so the screen can
+    // hand back an id rather than a string.
+    let ids: Vec<i64> = candidates.iter().filter_map(|c| c.instrument_id).collect();
+    assert_eq!(ids.len(), 2, "every local-ambiguity candidate carries its instrument id");
+    assert!(ids.contains(&a.instrument_id) && ids.contains(&b.instrument_id));
+
+    // The stored decision carries the marker the UI branches on.
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT d.candidates FROM resolution_decision d
+           JOIN resolution_review r ON r.decision_id = d.id WHERE r.id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored["local_ambiguity"], true,
+               "without this marker the review screen renders it as a Bloomberg \
+                candidate list and offers a button that spends a call");
+
+    let chosen = engine::resolve_review_local(&pool, review_id, b.instrument_id, "laurent")
+        .await.unwrap();
+    assert_eq!(chosen, b.instrument_id);
+    assert_eq!(mock.call_count(), 0, "a local re-point costs zero Bloomberg calls");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM resolution_review WHERE id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "resolved");
+    let decision: (Option<i64>, serde_json::Value) = sqlx::query_as(
+        "SELECT chosen_instrument_id, candidates FROM resolution_decision
+          WHERE method = 'manual' AND chosen_instrument_id = $1
+          ORDER BY id DESC LIMIT 1")
+        .bind(b.instrument_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(decision.0, Some(b.instrument_id));
+    assert_eq!(decision.1["local_repoint"], true);
+    assert_eq!(decision.1["bloomberg_calls"], 0);
+}
+
+/// The re-point may only name an instrument the decision actually offered.
+/// Otherwise a caller could point an input at something the user never saw,
+/// and the closed review would look identical afterwards.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_local_re_point_refuses_an_instrument_that_was_never_a_candidate() {
+    let pool = common::pool().await;
+    let ticker = uniq("BMWY");
+    let security = format!("{ticker} GY Equity");
+    let a = store::create(&pool).await.unwrap();
+    let b = store::create(&pool).await.unwrap();
+    let outsider = store::create(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for inst in [&a, &b] {
+        store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
+            id_type: "bdp_security".into(), value: security.clone(),
+            exch_code: Some("GY".into()), valid_from: d("2000-01-01"), valid_to: None,
+            source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+        }).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let mock = MockMasterFetcher::default();
+    let r = engine::resolve(&pool, &mock, &input(&format!("{ticker} GY"))).await.unwrap();
+    let Resolution::NeedsReview { review_id, .. } = r else { panic!("expected review") };
+
+    let err = engine::resolve_review_local(&pool, review_id, outsider.instrument_id, "laurent")
+        .await.unwrap_err();
+    assert!(matches!(err, AppError::Validation(_)));
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM resolution_review WHERE id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "pending", "a refused re-point must not close the review");
+}
+
+// ---------------------------------------------------------------------------
+// I3: reject_review has to guard on status like resolve_review does.
+// ---------------------------------------------------------------------------
+
+/// Rejecting an already-resolved review used to succeed silently, flipping
+/// `status` and OVERWRITING `note` -- destroying the record of what was bound
+/// and by whom, while the instrument stayed in the book.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn reject_review_refuses_a_review_that_is_already_resolved() {
+    let pool = common::pool().await;
+    let ticker = uniq("ZRRR");
+    let list_mock = MockMasterFetcher {
+        identity_raw: serde_json::json!([]),
+        list_raw: serde_json::json!([{"results": [
+            {"security": format!("{ticker} US<equity>"), "description": "Test Inc"},
+            {"security": format!("{ticker} LN<equity>"), "description": "Test Inc"}]}]),
+        ..Default::default()
+    };
+    let r = engine::resolve(&pool, &list_mock, &input(&ticker)).await.unwrap();
+    let Resolution::NeedsReview { review_id, .. } = r else { panic!("expected review") };
+
+    let chosen = format!("{ticker} US Equity");
+    let resolve_mock = identity_mock(&chosen, &uniq("BBG000TESTZR"), "US");
+    engine::resolve_review(&pool, &resolve_mock, review_id, &chosen, "laurent")
+        .await.unwrap();
+    let note_before: String = sqlx::query_scalar(
+        "SELECT note FROM resolution_review WHERE id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+
+    let err = engine::reject_review(&pool, review_id, "changed my mind").await.unwrap_err();
+    assert!(matches!(err, AppError::Validation(_)),
+            "rejecting a resolved review must error, not silently succeed");
+
+    let (status, note): (String, String) = sqlx::query_as(
+        "SELECT status, note FROM resolution_review WHERE id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "resolved");
+    assert_eq!(note, note_before, "the record of the binding survives intact");
+}
+
+/// The same guard, from the other direction: rejecting twice.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn reject_review_refuses_a_review_that_is_already_rejected() {
+    let pool = common::pool().await;
+    let ticker = uniq("ZSSS");
+    let mock = MockMasterFetcher {
+        identity_raw: serde_json::json!([]),
+        list_raw: serde_json::json!([{"results": [
+            {"security": format!("{ticker} US<equity>"), "description": "Test Inc"},
+            {"security": format!("{ticker} LN<equity>"), "description": "Test Inc"}]}]),
+        ..Default::default()
+    };
+    let r = engine::resolve(&pool, &mock, &input(&ticker)).await.unwrap();
+    let Resolution::NeedsReview { review_id, .. } = r else { panic!("expected review") };
+    engine::reject_review(&pool, review_id, "first rejection").await.unwrap();
+    let err = engine::reject_review(&pool, review_id, "second rejection").await.unwrap_err();
+    assert!(matches!(err, AppError::Validation(_)));
+    let note: String = sqlx::query_scalar("SELECT note FROM resolution_review WHERE id = $1")
+        .bind(review_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(note, "first rejection", "the original note is not overwritten");
 }

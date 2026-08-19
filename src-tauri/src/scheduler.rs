@@ -201,19 +201,58 @@ pub fn group_ranges(dates: &[NaiveDate], cap_days: i64) -> Vec<(NaiveDate, Naive
     out
 }
 
+/// A stretch of weekdays for which ONE instrument in a view has no
+/// observation. Per-instrument, deliberately: see `detect_gaps`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Gap {
+    pub instrument_id: i64,
+    pub label: String,
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+}
+
+/// Which weekdays each member of a view is missing, over the lookback window.
+///
+/// Per `(instrument_id, obs_date)`, not `DISTINCT obs_date` across the whole
+/// view. The old query asked "did ANY instrument report on this date", so a
+/// single healthy member marked every date covered for all of them: an
+/// instrument that failed for a week, or was added mid-history, produced no
+/// gap and therefore no backfill. That is precisely the silent hole in a time
+/// series the spec promises cannot happen, arrived at through the one function
+/// whose job is to find them.
+///
+/// Members come from `views::view_instruments`, so a retired book entry and an
+/// instrument with a pending review are both excluded -- neither should be
+/// reported as a gap, because neither is supposed to be collecting.
 pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
-                         today: NaiveDate) -> AppResult<Vec<(NaiveDate, NaiveDate)>> {
+                         today: NaiveDate) -> AppResult<Vec<Gap>> {
     let start = today - Duration::days(lookback_days);
     let end = today - Duration::days(1);
-    let rows: Vec<(NaiveDate,)> = sqlx::query_as(
-        "SELECT DISTINCT o.obs_date FROM observation o
+    let members = crate::views::view_instruments(pool, view_id).await?;
+    if members.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows: Vec<(i64, NaiveDate)> = sqlx::query_as(
+        "SELECT DISTINCT o.instrument_id, o.obs_date FROM observation o
          JOIN view_instrument vi ON vi.instrument_id = o.instrument_id
          WHERE vi.view_id = $1 AND o.obs_date BETWEEN $2 AND $3
            AND o.system_to = 'infinity'")
         .bind(view_id).bind(start).bind(end).fetch_all(pool).await?;
-    let present: HashSet<NaiveDate> = rows.into_iter().map(|r| r.0).collect();
-    Ok(group_ranges(&missing_weekdays(&present, start, end),
-                    orchestrator::BACKFILL_CAP_DAYS))
+
+    let mut out = Vec::new();
+    for m in members {
+        let present: HashSet<NaiveDate> = rows.iter()
+            .filter(|(iid, _)| *iid == m.instrument_id)
+            .map(|(_, d)| *d)
+            .collect();
+        for (s, e) in group_ranges(&missing_weekdays(&present, start, end),
+                                   orchestrator::BACKFILL_CAP_DAYS) {
+            out.push(Gap { instrument_id: m.instrument_id, label: m.label.clone(),
+                           start: s, end: e });
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

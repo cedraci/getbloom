@@ -121,10 +121,50 @@ pub async fn resolve_review(state: State<'_, AppState>, review_id: i64,
     engine::resolve_review(&state.pool, &fetcher, review_id, &chosen_security, "user").await
 }
 
+/// A locally ambiguous review, resolved by pointing at one of the existing
+/// instruments the identifier already matched. Costs zero Bloomberg calls --
+/// there is nothing for Bloomberg to answer about an ambiguity that is
+/// entirely local (spec §7). Deliberately a separate command from
+/// `resolve_review`, which always calls out.
+#[tauri::command]
+pub async fn resolve_review_local(state: State<'_, AppState>, review_id: i64,
+                                  instrument_id: i64) -> Result<i64, AppError> {
+    engine::resolve_review_local(&state.pool, review_id, instrument_id, "user").await
+}
+
 #[tauri::command]
 pub async fn reject_review(state: State<'_, AppState>, review_id: i64, note: String)
     -> Result<(), AppError> {
     engine::reject_review(&state.pool, review_id, &note).await
+}
+
+/// Identifier history (`HISTORICAL_IDS_TIME_RANGE`), as an explicit user
+/// action and nothing else.
+///
+/// It used to fire automatically on every successful resolution. P0 §6.5
+/// measured why it cannot: `HISTORICAL_STARTING_IDENTIFIER` names the
+/// identifier the chain STARTED from, and resolution only ever knows the one
+/// it ENDED at. Anchored on the resolved current security, the request
+/// returned a well-formed chain belonging to a different company -- for
+/// `META US Equity`, the Roundhill Ball Metaverse ETF's rename to `METV`. It
+/// cannot discover a rename; it can only confirm one somebody already knows
+/// about. So the anchor comes from the user, who is the only party that can
+/// know it.
+///
+/// Costs one bulk `ReferenceDataRequest`, charged to the ledger at the wire
+/// seam under purpose `resolve_history`.
+#[tauri::command]
+pub async fn ingest_identifier_history(state: State<'_, AppState>, instrument_id: i64,
+                                       anchor: String, range_start: String)
+    -> Result<crate::instrument::history::HistoryOutcome, AppError>
+{
+    let start: chrono::NaiveDate = range_start.parse().map_err(|_| {
+        AppError::Validation(format!("range start {range_start:?} is not a date (YYYY-MM-DD)"))
+    })?;
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
+    crate::instrument::history::ingest(&state.pool, &fetcher, instrument_id,
+                                       &anchor, start).await
 }
 
 /// Bloomberg exposes no successor field (P0 7.2), so every `instrument_link`
@@ -309,12 +349,28 @@ pub async fn list_issues(state: State<'_, AppState>, run_id: i64)
         .bind(run_id).fetch_all(&state.pool).await?)
 }
 
+/// Gaps are per instrument, not per view: one member reporting on a date does
+/// not mean the others did. Backfilling still runs the whole view for the
+/// range -- the range is what `run_backfill_now` takes -- but the user now
+/// sees which instrument is actually missing data, which is the difference
+/// between a visible hole and a silent one.
+#[derive(Debug, Serialize)]
+pub struct GapRow {
+    pub instrument_id: i64,
+    pub label: String,
+    pub start: String,
+    pub end: String,
+}
+
 #[tauri::command]
 pub async fn detect_view_gaps(state: State<'_, AppState>, view_id: i64)
-    -> Result<Vec<(String, String)>, AppError> {
+    -> Result<Vec<GapRow>, AppError> {
     let today = chrono::Local::now().date_naive();
     Ok(scheduler::detect_gaps(&state.pool, view_id, 30, today).await?
-        .into_iter().map(|(s, e)| (s.to_string(), e.to_string())).collect())
+        .into_iter()
+        .map(|g| GapRow { instrument_id: g.instrument_id, label: g.label,
+                          start: g.start.to_string(), end: g.end.to_string() })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

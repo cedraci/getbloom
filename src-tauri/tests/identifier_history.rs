@@ -266,15 +266,22 @@ async fn both_ends_owned_by_the_same_other_instrument_proposes_nothing() {
     let pool = common::pool().await;
     let old_tick = uniq("SAMEOLD");
     let new_tick = uniq("SAMENEW");
+    // One instrument that wore both tickers, one after the other. The periods
+    // are consecutive rather than both open-ended: an instrument cannot hold
+    // two tickers at once, and `instrument_alias_no_overlap` now says so --
+    // this fixture used to write both open and inserted cleanly.
     let owner = store::create(&pool).await.unwrap();
     let mut tx = pool.begin().await.unwrap();
-    for ticker in [&old_tick, &new_tick] {
-        store::insert_alias(&mut tx, owner.instrument_id, &NewAlias {
-            id_type: "ticker".into(), value: ticker.clone(), exch_code: Some("US".into()),
-            valid_from: d("2000-01-01"), valid_to: None, source: "user".into(),
-            bbg_action_id: None, anchoring_identifier: None,
-        }).await.unwrap();
-    }
+    store::insert_alias(&mut tx, owner.instrument_id, &NewAlias {
+        id_type: "ticker".into(), value: old_tick.clone(), exch_code: Some("US".into()),
+        valid_from: d("2000-01-01"), valid_to: Some(d("2010-06-01")), source: "user".into(),
+        bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    store::insert_alias(&mut tx, owner.instrument_id, &NewAlias {
+        id_type: "ticker".into(), value: new_tick.clone(), exch_code: Some("US".into()),
+        valid_from: d("2010-06-01"), valid_to: None, source: "user".into(),
+        bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
     tx.commit().await.unwrap();
     let unrelated = instrument_with_ticker(&pool, &uniq("SELFY"), "2000-01-01").await;
 
@@ -290,6 +297,15 @@ async fn both_ends_owned_by_the_same_other_instrument_proposes_nothing() {
 /// (e.g. a manual entry made before its history was known), must have that
 /// period closed when Bloomberg later reports the rename -- not silently
 /// discard the event by treating "already ours" as a no-op.
+///
+/// Both ends have to be ours for this arm to fire. P0 §6.5: only when
+/// Bloomberg's New ID is provably an identifier we already hold is the row
+/// confirming a chain we independently know; a New ID nobody owns is the
+/// METV shape, and closing our own live alias off it is what left the
+/// instrument unfetchable (see the test below). So the fixture gives the
+/// instrument BOTH identifiers -- old ticker open-ended, new ticker starting
+/// at the change -- which is what a real "we already knew the new name"
+/// looks like.
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn a_rename_of_an_identifier_we_already_own_closes_it_instead_of_discarding_it() {
@@ -298,9 +314,19 @@ async fn a_rename_of_an_identifier_we_already_own_closes_it_instead_of_discardin
     let meta = uniq("METAX");
     let inst = store::create(&pool).await.unwrap();
     let mut tx = pool.begin().await.unwrap();
+    // The Old ID, still open-ended: the manual entry made before the history
+    // was known, which is what this test is about.
     store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
         id_type: "ticker".into(), value: fb.clone(), exch_code: Some("US".into()),
         valid_from: d("2000-01-01"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    // The New ID, held as this instrument's current security string -- what
+    // makes Bloomberg's row confirm a chain we independently know rather than
+    // assert one we do not.
+    store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
+        id_type: "bdp_security".into(), value: format!("{meta} US Equity"),
+        exch_code: Some("US".into()), valid_from: d("2000-01-01"), valid_to: None,
         source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
     }).await.unwrap();
     tx.commit().await.unwrap();
@@ -414,4 +440,138 @@ async fn a_row_without_an_action_id_is_still_idempotent_on_reingest() {
     let second = history::apply(&pool, inst.instrument_id, "TEST Anchor", &rows).await.unwrap();
     assert_eq!(second.aliases_added, 0,
                "no Action ID to key on, but (id_type, value, valid_from) still catches it");
+}
+
+// ---------------------------------------------------------------------------
+// C2b: only a row whose New ID is provably ours may write.
+// ---------------------------------------------------------------------------
+
+/// The METV case, on a CLEAN fixture -- no other instrument seeded, no
+/// pollution from a previous test to lean on.
+///
+/// This is the shape the pre-fix code got most dangerously wrong. Anchored on
+/// the current identifier (which is what `resolve()` used to pass), Bloomberg
+/// answers `META -> METV`. On a clean database nobody owns `METV`, so
+/// `new_own = Free`; `META` is ours, so `old_own = Ours`. The old match arms
+/// were ordered `(_, Ours)` before anything else could catch it, so the code
+/// read that as "our own identifier just ended" and CLOSED our live
+/// `bdp_security` alias at the change date. `correct_current_security_period`
+/// then found no open row, and the instrument was left with no security valid
+/// today -- silently unfetchable, with no error anywhere.
+///
+/// The gate is `new_own == Ours`: only then is the row confirming a chain we
+/// independently know. Anything else is evidence, and evidence gets recorded,
+/// not applied.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_new_id_nobody_owns_never_closes_our_own_live_alias() {
+    let pool = common::pool().await;
+    let meta = uniq("METAQ");
+    let metv = uniq("METVQ");
+    let meta_security = format!("{meta} US Equity");
+    let iid = instrument_via_engine(&pool, &meta, "2012-05-18").await;
+
+    // Sanity: the instrument is fetchable before ingestion.
+    assert_eq!(store::current_security(&pool, iid, d("2026-08-19")).await.unwrap()
+                   .as_deref(), Some(meta_security.as_str()));
+
+    let action = uniq("ACT");
+    let rows = vec![row(&meta, &metv, "2022-01-31", Some(&action))];
+    let out = history::apply(&pool, iid, &meta_security, &rows).await.unwrap();
+
+    assert_eq!(out.aliases_added, 0, "nothing is asserted from an unowned New ID");
+    assert!(out.links_proposed.is_empty(),
+            "there is no successor instrument to propose a link to");
+
+    // The whole point: the instrument is still fetchable.
+    assert_eq!(store::current_security(&pool, iid, d("2026-08-19")).await.unwrap()
+                   .as_deref(), Some(meta_security.as_str()),
+               "our own live alias must survive a row we cannot confirm");
+    let secs: Vec<_> = store::aliases(&pool, iid).await.unwrap().into_iter()
+        .filter(|a| a.id_type == "bdp_security").collect();
+    assert_eq!(secs.len(), 1, "no period was opened, closed or split: {secs:?}");
+    assert_eq!(secs[0].valid_to, store::forever());
+
+    // Refused, but not silently: a durable, queryable record, the same
+    // standard an ambiguous owner already gets.
+    let issues: Vec<(String,)> = sqlx::query_as(
+        "SELECT detail FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'unconfirmed_identifier_change'")
+        .bind(iid).fetch_all(&pool).await.unwrap();
+    assert_eq!(issues.len(), 1);
+    assert!(issues[0].0.contains(&metv), "the unconfirmable New ID is named: {}", issues[0].0);
+    assert!(issues[0].0.contains(&meta_security), "so is the anchor that produced it");
+
+    // Re-ingesting the same response does not pile up a second issue.
+    history::apply(&pool, iid, &meta_security, &rows).await.unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'unconfirmed_identifier_change'")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "no duplicate issue on re-ingest");
+}
+
+/// The other half of the gate: both ends free. Nobody owns either identifier,
+/// so the row says nothing about this instrument at all and must not become
+/// one of its aliases.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_row_about_two_identifiers_nobody_owns_writes_no_alias() {
+    let pool = common::pool().await;
+    let ticker = uniq("FREEA");
+    let iid = instrument_via_engine(&pool, &ticker, "2000-01-01").await;
+    let security = format!("{ticker} US Equity");
+
+    let action = uniq("ACT");
+    let rows = vec![row(&uniq("NOBODYA"), &uniq("NOBODYB"), "2010-01-01", Some(&action))];
+    let out = history::apply(&pool, iid, &security, &rows).await.unwrap();
+
+    assert_eq!(out.aliases_added, 0);
+    assert!(out.links_proposed.is_empty());
+    assert_eq!(store::current_security(&pool, iid, d("2026-08-19")).await.unwrap()
+                   .as_deref(), Some(security.as_str()));
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'unconfirmed_identifier_change'")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "refused, and recorded rather than dropped");
+}
+
+/// C2a: `engine::resolve` no longer issues a HISTORICAL_IDS_TIME_RANGE
+/// request at all. It cannot: the field is anchored on the identifier the
+/// chain STARTED from and resolution only ever knows the one it ENDED at
+/// (P0 6.5), so what came back was a well-formed chain belonging to someone
+/// else. One call for the identity block, and nothing more.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn resolving_an_instrument_makes_no_identifier_history_request() {
+    let pool = common::pool().await;
+    let ticker = uniq("NOHIST");
+    let security = format!("{ticker} US Equity");
+    let mock = MockMasterFetcher {
+        identity_raw: serde_json::json!([{"securityData": [{
+            "security": security, "fieldExceptions": [], "sequenceNumber": 0,
+            "fieldData": {
+                "ID_BB_GLOBAL": uniq("BBG000NOHIST"), "ID_ISIN": uniq("US0000000000"),
+                "EXCH_CODE": "US", "CRNCY": "USD", "CNTRY_ISSUE_ISO": "US",
+                "SECURITY_TYP2": "Common Stock", "MARKET_SECTOR_DES": "Equity",
+                "NAME": "TEST INC", "LISTING_DATE": "2000-01-01",
+            }}]}]),
+        // If anything did call hist_ids, this capture would answer -- so a
+        // regression shows up as a call in the log, not as a silent no-op.
+        hist_ids_raw: capture(ANCHORED),
+        ..Default::default()
+    };
+    let input = ResolveInput {
+        raw: format!("{ticker} US"), yellow_key: "Equity".into(),
+        hints: Hints::default(), as_of: d("2026-08-19"), decided_by: "auto".into(),
+    };
+    let r = engine::resolve(&pool, &mock, &input).await.unwrap();
+    assert!(matches!(r, Resolution::Bound { .. }), "got {r:?}");
+
+    let calls = mock.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "exactly one Bloomberg call: {calls:?}");
+    assert!(calls[0].starts_with("identity:"), "and it is the identity probe: {calls:?}");
+    assert!(!calls.iter().any(|c| c.starts_with("hist_ids:")),
+            "identifier history is an explicit user action now, never automatic");
 }

@@ -16,7 +16,7 @@
 use crate::error::{AppError, AppResult};
 use crate::instrument::store::{self, NewAlias};
 use crate::master_fetch::{IdentityBlock, MasterFetcher};
-use crate::resolution::normalize::{build_security, detect_id_kind};
+use crate::resolution::normalize::{build_security, detect_id_kind, normalize_bbg_security};
 use crate::resolution::score::{score_all, verdict, Candidate, Hints, Scored, Verdict};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -331,6 +331,12 @@ async fn local_ambiguity_candidates(pool: &PgPool, matches: &[i64], id_type: &st
             reasons: vec![format!(
                 "local alias '{probe}' ({id_type}) already matches {} instruments",
                 matches.len())],
+            // The load-bearing field. The review screen re-points to THIS
+            // instrument id; it must never be asked to hand the security
+            // string back, because that string may be the placeholder above,
+            // which Bloomberg cannot resolve and which must never become an
+            // alias value.
+            instrument_id: Some(*iid),
         });
     }
     Ok(out)
@@ -372,7 +378,22 @@ pub async fn resolve<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
             _ => {
                 let scored = local_ambiguity_candidates(
                     pool, &matches, id_type, probe, input.as_of).await?;
-                let candidates_json = serde_json::to_value(&scored).unwrap_or(serde_json::json!([]));
+                // An OBJECT carrying the list, not the bare list. A bare
+                // Vec<Scored> is indistinguishable on the wire from the
+                // Bloomberg-candidate list, so the review screen matched it
+                // with its scored-list guard and offered "This one" -- which
+                // spends a Bloomberg call, and, where the security string was
+                // the `instrument #42` placeholder, minted a permanent
+                // instrument wearing that literal text. The marker is what
+                // lets the screen tell the two apart and offer a free local
+                // re-point instead.
+                let candidates_json = serde_json::json!({
+                    "local_ambiguity": true,
+                    "matched": id_type,
+                    "bloomberg_calls": 0,
+                    "candidates": serde_json::to_value(&scored)
+                        .unwrap_or(serde_json::json!([])),
+                });
                 let decision_id = record_decision(
                     pool, input, &security, "local_alias", None,
                     &candidates_json, None).await?;
@@ -512,9 +533,29 @@ struct ReviewContext {
 /// Refuses a review that is not currently `pending`: resolving twice, or
 /// resolving a review someone already rejected, must not mint a second
 /// instrument for the same identifier out from under the first.
+///
+/// Refuses, too, a `chosen_security` that `resolution::normalize` does not
+/// accept as a security string. The UI is not trusted to be the only guard:
+/// `local_ambiguity_candidates` puts an `instrument #42` placeholder in the
+/// security field when an existing instrument has no current security string,
+/// and a UI regression that handed that back would spend a real Bloomberg call
+/// on it, then -- since Bloomberg cannot answer -- fall through to the
+/// bare-block path and mint a permanent instrument whose `bdp_security` alias
+/// is the literal text `instrument #42`. Making the placeholder unbindable
+/// here means the UI can only ever regress into an error.
 pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review_id: i64,
                                               chosen_security: &str, by: &str) -> AppResult<i64>
 {
+    // Before anything else, including before the review is read: a refused
+    // request must not cost a Bloomberg hit or a database round trip.
+    let Some(sec) = normalize_bbg_security(chosen_security) else {
+        return Err(AppError::Validation(format!(
+            "{chosen_security:?} is not a security string -- it must end in a \
+             Bloomberg market sector (e.g. 'AAPL US Equity'). A locally \
+             ambiguous review is re-pointed at an existing instrument, not \
+             bound from a string.")));
+    };
+
     let ctx: ReviewContext = sqlx::query_as(
         "SELECT d.id AS decision_id, d.raw_input, r.status, d.candidates
            FROM resolution_review r JOIN resolution_decision d ON d.id = r.decision_id
@@ -525,7 +566,6 @@ pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review
             "review {review_id} is not pending (status: {})", ctx.status)));
     }
 
-    let sec = chosen_security.to_string();
     let answered = fetcher.identity(std::slice::from_ref(&sec)).await?;
     let raw_identity = answered.raw;
     let (block, fell_back) = match answered.parsed.into_iter().next() {
@@ -560,11 +600,100 @@ pub async fn resolve_review<F: MasterFetcher>(pool: &PgPool, fetcher: &F, review
     Ok(iid)
 }
 
+/// A human resolved a LOCAL ambiguity by pointing at one of the existing
+/// instruments the identifier already matched. Costs zero Bloomberg calls, by
+/// construction: there is nothing for Bloomberg to answer.
+///
+/// Spec §7 says so outright -- "a locally ambiguous identifier: none; a
+/// Bloomberg call cannot resolve a local ambiguity" -- but until this function
+/// existed the review screen had no way to act on that row except
+/// `resolve_review`, which always calls out. So the free path was documented,
+/// tested at the engine level, and unreachable from the UI.
+///
+/// Nothing is bound here that was not already bound: the instrument exists and
+/// keeps every alias and attribute it had. What is recorded is the human's
+/// decision -- a `manual` decision naming the chosen instrument, and the
+/// review closed against it -- so the audit trail answers "why is this input
+/// pointing at that instrument" the same way every other path does.
+///
+/// The chosen instrument must be one of the candidates the decision actually
+/// recorded. A caller free to name any instrument id could point an input at
+/// something the user never saw, and the review would look identical
+/// afterwards.
+pub async fn resolve_review_local(pool: &PgPool, review_id: i64,
+                                  instrument_id: i64, by: &str) -> AppResult<i64>
+{
+    let ctx: ReviewContext = sqlx::query_as(
+        "SELECT d.id AS decision_id, d.raw_input, r.status, d.candidates
+           FROM resolution_review r JOIN resolution_decision d ON d.id = r.decision_id
+          WHERE r.id = $1")
+        .bind(review_id).fetch_one(pool).await?;
+    if ctx.status != "pending" {
+        return Err(AppError::Validation(format!(
+            "review {review_id} is not pending (status: {})", ctx.status)));
+    }
+
+    let offered: Vec<i64> = ctx.candidates.get("candidates")
+        .and_then(|c| c.as_array())
+        .map(|list| list.iter()
+            .filter_map(|s| s.get("instrument_id").and_then(|v| v.as_i64()))
+            .collect())
+        .unwrap_or_default();
+    if !offered.contains(&instrument_id) {
+        return Err(AppError::Validation(format!(
+            "instrument {instrument_id} was not one of the candidates review \
+             {review_id} recorded ({offered:?})")));
+    }
+
+    let candidates = serde_json::json!({
+        "local_repoint": true,
+        "chosen_instrument_id": instrument_id,
+        "bloomberg_calls": 0,
+        "review_id": review_id,
+        "source_decision_id": ctx.decision_id,
+        "original_candidates": ctx.candidates,
+    });
+    let manual_id = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO resolution_decision
+           (raw_input, normalized, method, chosen_instrument_id, candidates, decided_by)
+         VALUES ($1,$2,'manual',$3,$4,$5) RETURNING id")
+        .bind(&ctx.raw_input).bind(&ctx.raw_input).bind(instrument_id)
+        .bind(&candidates).bind(by)
+        .fetch_one(pool).await?;
+
+    let done = sqlx::query(
+        "UPDATE resolution_review SET status = 'resolved', closed_at = now(),
+                note = note || $2
+          WHERE id = $1 AND status = 'pending'")
+        .bind(review_id)
+        .bind(format!(" re-pointed by {by} to existing instrument {instrument_id} \
+                        (0 Bloomberg calls)"))
+        .execute(pool).await?;
+    if done.rows_affected() == 0 {
+        return Err(AppError::Validation(format!(
+            "review {review_id} stopped being pending before it could be closed")));
+    }
+    let _ = manual_id;
+    Ok(instrument_id)
+}
+
 /// Also needed by the UI: a review the user judges unresolvable.
+///
+/// Guarded on `status = 'pending'` for the same reason `resolve_review` is.
+/// Without it, rejecting an already-`resolved` review flipped it to
+/// `rejected` and OVERWROTE `note` -- destroying the record of what the
+/// binding was and who made it, while the instrument it bound stayed in the
+/// book. A `rows_affected` check turns that into an error rather than a
+/// silent success, because "nothing happened" and "it worked" must not look
+/// the same to the caller.
 pub async fn reject_review(pool: &PgPool, review_id: i64, note: &str) -> AppResult<()> {
-    sqlx::query("UPDATE resolution_review
+    let done = sqlx::query("UPDATE resolution_review
                     SET status = 'rejected', closed_at = now(), note = $2
-                  WHERE id = $1")
+                  WHERE id = $1 AND status = 'pending'")
         .bind(review_id).bind(note).execute(pool).await?;
+    if done.rows_affected() == 0 {
+        return Err(AppError::Validation(format!(
+            "review {review_id} is not pending; it cannot be rejected")));
+    }
     Ok(())
 }

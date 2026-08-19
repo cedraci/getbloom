@@ -33,6 +33,20 @@ pub struct Scored {
     pub score: i32,
     pub disqualified: bool,
     pub reasons: Vec<String>,
+    /// The existing instrument this entry stands for, when the entry describes
+    /// a purely LOCAL ambiguity -- two instruments already in the master
+    /// wearing one identifier. `None` for a Bloomberg candidate, which by
+    /// definition is not yet any instrument.
+    ///
+    /// It exists so the review screen can offer "this existing instrument" as
+    /// a re-point that costs zero Bloomberg calls. Without it the screen had
+    /// only a security string to hand back, and where the string was
+    /// `local_ambiguity_candidates`' `instrument #42` placeholder, clicking
+    /// spent a real call on a string the Terminal cannot possibly know and
+    /// then minted an instrument whose bdp_security alias was that literal
+    /// text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument_id: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -78,7 +92,7 @@ pub fn score_all(candidates: Vec<Candidate>, hints: &Hints) -> Vec<Scored> {
             let score = dims.iter().map(|(p, _, _)| p).sum();
             let disqualified = dims.iter().any(|(_, d, _)| *d);
             let reasons = dims.iter().filter_map(|(_, _, r)| r.clone()).collect();
-            Scored { candidate: c, score, disqualified, reasons }
+            Scored { candidate: c, score, disqualified, reasons, instrument_id: None }
         })
         .collect()
 }
