@@ -205,7 +205,7 @@ async fn a_view_refresh_covers_every_member_in_one_batched_call() {
     let mock = mock_with(serde_json::json!([
         factor_table(&sec_a, "2020-08-31", 4.0),
         factor_table(&sec_b, "2014-06-09", 7.0)]));
-    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false).await.unwrap();
     assert_eq!(s.instruments, 2);
     assert_eq!(s.inserted, 2);
     assert_eq!(s.skipped, 0);
@@ -233,7 +233,7 @@ async fn a_member_without_a_security_is_skipped_and_reported() {
     let vid = view_with(&pool, &[a, b]).await;
 
     let mock = mock_with(serde_json::json!([factor_table(&sec_a, "2020-08-31", 4.0)]));
-    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false).await.unwrap();
     assert_eq!((s.instruments, s.skipped), (1, 1));
     let calls = mock.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
@@ -260,7 +260,7 @@ async fn one_failing_member_does_not_abort_the_view_refresh() {
         factor_table(&sec_a, "2020-08-31", 4.0),
         {"security": sec_b, "field": "BOGUS_FIELD",
          "rows": [{"Adjustment Date": "2020-08-31"}]}]));
-    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false).await.unwrap();
     assert_eq!((s.instruments, s.failed, s.inserted), (1, 1, 1),
                "the healthy member committed, the bad one is counted as failed");
     let n: i64 = sqlx::query_scalar(
@@ -274,6 +274,68 @@ async fn one_failing_member_does_not_abort_the_view_refresh() {
     assert_eq!(issues, 1);
 }
 
+/// Live 2026-08-21 (YODA LN Equity, accumulating ETF): both fields answer
+/// "Field not applicable to security". The member is flagged once, and the
+/// automatic (skip_na) path stops requesting it -- no hits, no issue spam.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_field_not_applicable_member_is_flagged_and_then_skipped() {
+    let pool = common::pool().await;
+    let (a, sec_a) = instrument_with_security(&pool, "CAVH").await;
+    let (b, sec_b) = instrument_with_security(&pool, "CAVI").await;
+    let vid = view_with(&pool, &[a, b]).await;
+    let mock = MockMasterFetcher {
+        corp_actions_raw: serde_json::json!([factor_table(&sec_a, "2020-08-31", 4.0)]),
+        corp_actions_problems: serde_json::json!([
+            {"security": sec_b, "field": "EQY_DVD_ADJUST_FACT",
+             "code": "field_error", "detail": "Field not applicable to security"},
+            {"security": sec_b, "field": "DVD_HIST_ALL_WITH_AMT_STATUS",
+             "code": "field_error", "detail": "Field not applicable to security"}]),
+        ..Default::default()
+    };
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false)
+        .await.unwrap();
+    assert_eq!((s.instruments, s.not_applicable), (1, 1));
+    let flagged: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM corp_actions_na WHERE instrument_id = $1")
+        .bind(b).fetch_one(&pool).await.unwrap();
+    assert_eq!(flagged, 1);
+    let issues: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'corp_actions_not_applicable'")
+        .bind(b).fetch_one(&pool).await.unwrap();
+    assert_eq!(issues, 1);
+
+    // The automatic path skips the flagged member entirely.
+    let s2 = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), true)
+        .await.unwrap();
+    assert_eq!(s2.not_applicable, 0, "not re-diagnosed");
+    let calls = mock.calls.lock().unwrap().clone();
+    assert!(!calls.last().unwrap().contains(&sec_b),
+            "the flagged member is not requested again: {calls:?}");
+}
+
+/// A manual retry that comes back with tables clears the flag: the verdict
+/// was Bloomberg's, and so is its reversal.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_recovered_security_clears_the_na_flag() {
+    let pool = common::pool().await;
+    let (a, sec_a) = instrument_with_security(&pool, "CAVJ").await;
+    let vid = view_with(&pool, &[a]).await;
+    sqlx::query("INSERT INTO corp_actions_na (instrument_id, detail)
+                 VALUES ($1,'Field not applicable to security')")
+        .bind(a).execute(&pool).await.unwrap();
+    let mock = mock_with(serde_json::json!([factor_table(&sec_a, "2020-08-31", 4.0)]));
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false)
+        .await.unwrap();
+    assert_eq!((s.instruments, s.inserted), (1, 1));
+    let flagged: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM corp_actions_na WHERE instrument_id = $1")
+        .bind(a).fetch_one(&pool).await.unwrap();
+    assert_eq!(flagged, 0, "recovery clears the not-applicable verdict");
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn a_view_refresh_is_idempotent() {
@@ -281,8 +343,8 @@ async fn a_view_refresh_is_idempotent() {
     let (a, sec_a) = instrument_with_security(&pool, "CAVE").await;
     let vid = view_with(&pool, &[a]).await;
     let mock = mock_with(serde_json::json!([factor_table(&sec_a, "2020-08-31", 4.0)]));
-    corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
-    let s2 = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false).await.unwrap();
+    let s2 = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21"), false).await.unwrap();
     assert_eq!((s2.inserted, s2.unchanged), (0, 1), "second pass changes nothing");
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM corp_action WHERE instrument_id = $1")

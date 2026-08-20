@@ -66,9 +66,9 @@ impl MasterFetcher for TwoRowFetcher {
     }
 
     async fn corp_actions(&self, _securities: &[String])
-        -> AppResult<Answered<Vec<getbloomdata_lib::fetch::SidecarBulkRows>>>
+        -> AppResult<Answered<getbloomdata_lib::master_fetch::CorpActionsTables>>
     {
-        Ok(Answered { parsed: vec![], raw: serde_json::json!([]) })
+        Ok(Answered { parsed: Default::default(), raw: serde_json::json!([]) })
     }
 
     async fn instrument_list(&self, _q: &str, _yk: Option<&str>, _max: u32)

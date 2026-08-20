@@ -135,7 +135,17 @@ pub trait MasterFetcher {
     /// chunk to `fetch::MAX_SECURITIES_PER_REQUEST`.
     fn corp_actions(&self, securities: &[String])
         -> impl std::future::Future<
-            Output = AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>> + Send;
+            Output = AppResult<Answered<CorpActionsTables>>> + Send;
+}
+
+/// A corp-actions answer is tables AND problems: "Field not applicable to
+/// security" (live 2026-08-21, YODA LN Equity) arrives as a field_error
+/// problem with zero tables, and swallowing it would make an ETF look
+/// perpetually unfetched instead of legitimately empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CorpActionsTables {
+    pub tables: Vec<crate::fetch::SidecarBulkRows>,
+    pub problems: Vec<crate::fetch::SidecarProblem>,
 }
 
 // ------------------------------------------------------------------ parsing
@@ -343,7 +353,7 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
     }
 
     async fn corp_actions(&self, securities: &[String])
-        -> AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>
+        -> AppResult<Answered<CorpActionsTables>>
     {
         let resp = self.call(serde_json::json!({
             "kind": "bulk_reference",
@@ -354,11 +364,13 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
         })).await?;
         self.charge("corp_actions", corp_actions_hit_cost(securities.len())).await;
         // The sidecar's top-level bulk_rows section, not raw_messages: the
-        // tables arrive already row-shaped from parse_bulk_message.
-        let raw = resp["bulk_rows"].clone();
-        let parsed: Vec<crate::fetch::SidecarBulkRows> =
-            serde_json::from_value(raw.clone()).unwrap_or_default();
-        Ok(Answered { parsed, raw })
+        // tables arrive already row-shaped from parse_bulk_message. The
+        // problems section rides along -- "field not applicable" lives there.
+        let parsed = CorpActionsTables {
+            tables: serde_json::from_value(resp["bulk_rows"].clone()).unwrap_or_default(),
+            problems: serde_json::from_value(resp["problems"].clone()).unwrap_or_default(),
+        };
+        Ok(Answered { parsed, raw: resp })
     }
 }
 
@@ -372,6 +384,8 @@ pub struct MockMasterFetcher {
     pub list_raw: serde_json::Value,
     /// A `bulk_rows`-shaped array (security/field/rows objects).
     pub corp_actions_raw: serde_json::Value,
+    /// A `problems`-shaped array (security/field/code/detail objects).
+    pub corp_actions_problems: serde_json::Value,
     /// Every call recorded, so a test can assert Bloomberg was NOT called.
     pub calls: std::sync::Mutex<Vec<String>>,
 }
@@ -383,6 +397,7 @@ impl Default for MockMasterFetcher {
             hist_ids_raw: serde_json::json!([]),
             list_raw: serde_json::json!([]),
             corp_actions_raw: serde_json::json!([]),
+            corp_actions_problems: serde_json::json!([]),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -434,11 +449,15 @@ impl MasterFetcher for MockMasterFetcher {
     }
 
     async fn corp_actions(&self, securities: &[String])
-        -> AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>
+        -> AppResult<Answered<CorpActionsTables>>
     {
         self.record(&format!("corp_actions:{}", securities.join(",")));
-        let parsed = serde_json::from_value(self.corp_actions_raw.clone())
-            .unwrap_or_default();
+        let parsed = CorpActionsTables {
+            tables: serde_json::from_value(self.corp_actions_raw.clone())
+                .unwrap_or_default(),
+            problems: serde_json::from_value(self.corp_actions_problems.clone())
+                .unwrap_or_default(),
+        };
         Ok(Answered { parsed, raw: self.corp_actions_raw.clone() })
     }
 }
@@ -576,8 +595,9 @@ mod tests {
         };
         let ans = mock.corp_actions(&["AAPL US Equity".to_string(),
                                       "MSFT US Equity".to_string()]).await.unwrap();
-        assert_eq!(ans.parsed.len(), 1);
-        assert_eq!(ans.parsed[0].field, "EQY_DVD_ADJUST_FACT");
+        assert_eq!(ans.parsed.tables.len(), 1);
+        assert_eq!(ans.parsed.tables[0].field, "EQY_DVD_ADJUST_FACT");
+        assert!(ans.parsed.problems.is_empty());
         assert_eq!(mock.call_count(), 1, "one BATCH is one call, however many names");
     }
 

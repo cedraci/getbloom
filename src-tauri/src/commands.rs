@@ -617,5 +617,6 @@ pub async fn refresh_view_corp_actions(state: State<'_, AppState>, view_id: i64)
     let cfg = pipeline_cfg(&state).await;
     let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
     let as_of = chrono::Local::now().date_naive();
-    crate::corp_actions::refresh_view(&state.pool, &fetcher, view_id, as_of).await
+    // A click is an explicit retry: do NOT skip not-applicable instruments.
+    crate::corp_actions::refresh_view(&state.pool, &fetcher, view_id, as_of, false).await
 }

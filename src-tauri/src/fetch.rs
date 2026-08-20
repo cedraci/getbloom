@@ -123,7 +123,7 @@ pub struct SidecarObservation {
     pub text: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarProblem {
     pub security: Option<String>,
     pub field: Option<String>,

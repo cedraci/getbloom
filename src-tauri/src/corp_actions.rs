@@ -147,8 +147,62 @@ pub async fn refresh<F: crate::master_fetch::MasterFetcher>(
         .ok_or_else(|| crate::error::AppError::Validation(format!(
             "instrument {instrument_id} has no security valid as of {as_of}")))?;
     let answered = fetcher.corp_actions(std::slice::from_ref(&security)).await?;
-    let tables: Vec<&SidecarBulkRows> = answered.parsed.iter().collect();
+    if let Some(detail) = not_applicable_detail(&security, &answered.parsed) {
+        mark_not_applicable(pool, instrument_id, &detail).await?;
+        return Ok(RefreshSummary::default());
+    }
+    let tables: Vec<&SidecarBulkRows> = answered.parsed.tables.iter().collect();
+    if !tables.is_empty() {
+        clear_not_applicable(pool, instrument_id).await?;
+    }
     apply_tables(pool, instrument_id, &tables).await
+}
+
+/// Some(detail) when Bloomberg said "not applicable" for EVERY corp-action
+/// field of this security -- zero tables back, and each field carries a
+/// field_error (live 2026-08-21: YODA LN Equity, an accumulating ETF). A
+/// transient security-level error does not qualify.
+fn not_applicable_detail(security: &str,
+                         ans: &crate::master_fetch::CorpActionsTables)
+    -> Option<String>
+{
+    if ans.tables.iter().any(|t| t.security == security && !t.rows.is_empty()) {
+        return None;
+    }
+    let mut detail = String::new();
+    for field in crate::master_fetch::CORP_ACTIONS_FIELDS {
+        let p = ans.problems.iter().find(|p| {
+            p.security.as_deref() == Some(security)
+                && p.field.as_deref() == Some(field)
+                && p.code == "field_error"
+        })?;
+        detail = p.detail.clone();
+    }
+    Some(detail)
+}
+
+async fn mark_not_applicable(pool: &PgPool, instrument_id: i64, detail: &str)
+    -> AppResult<()>
+{
+    sqlx::query(
+        "INSERT INTO corp_actions_na (instrument_id, detail) VALUES ($1,$2)
+         ON CONFLICT (instrument_id)
+         DO UPDATE SET noted_at = now(), detail = EXCLUDED.detail")
+        .bind(instrument_id).bind(detail).execute(pool).await?;
+    sqlx::query(
+        "INSERT INTO ingest_issue (instrument_id, severity, code, detail)
+         VALUES ($1,'warn','corp_actions_not_applicable',$2)")
+        .bind(instrument_id)
+        .bind(format!("Bloomberg: {detail}; the automatic refresh will skip \
+                       this instrument until a manual refresh succeeds"))
+        .execute(pool).await?;
+    Ok(())
+}
+
+async fn clear_not_applicable(pool: &PgPool, instrument_id: i64) -> AppResult<()> {
+    sqlx::query("DELETE FROM corp_actions_na WHERE instrument_id = $1")
+        .bind(instrument_id).execute(pool).await?;
+    Ok(())
 }
 
 /// Diff one instrument's fresh tables against its current rows, in ONE
@@ -247,6 +301,7 @@ pub struct ViewRefreshSummary {
     pub instruments: u64,
     pub skipped: u64,
     pub failed: u64,
+    pub not_applicable: u64,
     pub inserted: u64,
     pub amended: u64,
     pub withdrawn: u64,
@@ -260,14 +315,27 @@ pub struct ViewRefreshSummary {
 /// diffed per instrument. Members without a security valid today are skipped
 /// and reported (`corp_actions_skipped`), mirroring the run pipeline's
 /// `no_security_today`.
+///
+/// `skip_na`: the automatic per-run path passes true so instruments Bloomberg
+/// already declared not-applicable are not re-charged every day; a manual
+/// click passes false -- it IS the retry.
 pub async fn refresh_view<F: crate::master_fetch::MasterFetcher>(
-    pool: &PgPool, fetcher: &F, view_id: i64, as_of: NaiveDate)
+    pool: &PgPool, fetcher: &F, view_id: i64, as_of: NaiveDate, skip_na: bool)
     -> AppResult<ViewRefreshSummary>
 {
     let members = crate::views::view_instruments(pool, view_id).await?;
+    let na_flagged: std::collections::HashSet<i64> = if skip_na {
+        sqlx::query_scalar::<_, i64>("SELECT instrument_id FROM corp_actions_na")
+            .fetch_all(pool).await?.into_iter().collect()
+    } else {
+        Default::default()
+    };
     let mut sum = ViewRefreshSummary::default();
     let mut targets: Vec<(String, i64)> = Vec::with_capacity(members.len());
     for m in &members {
+        if na_flagged.contains(&m.instrument_id) {
+            continue; // known not-applicable: no hits, no issue spam
+        }
         match &m.security {
             Some(s) => targets.push((s.clone(), m.instrument_id)),
             None => {
@@ -287,9 +355,19 @@ pub async fn refresh_view<F: crate::master_fetch::MasterFetcher>(
         let secs: Vec<String> = chunk.iter().map(|(s, _)| s.clone()).collect();
         let answered = fetcher.corp_actions(&secs).await?;
         for (sec, iid) in chunk {
-            let tables: Vec<&SidecarBulkRows> = answered.parsed.iter()
+            if let Some(detail) = not_applicable_detail(sec, &answered.parsed) {
+                sum.not_applicable += 1;
+                mark_not_applicable(pool, *iid, &detail).await?;
+                continue;
+            }
+            let tables: Vec<&SidecarBulkRows> = answered.parsed.tables.iter()
                 .filter(|t| t.security == *sec)
                 .collect();
+            if !tables.is_empty() {
+                // The fields answered after all: a previous not-applicable
+                // verdict no longer stands.
+                clear_not_applicable(pool, *iid).await?;
+            }
             // No tables for this security (rejected, or both fields empty)
             // touches nothing: the per-field empty guard in apply_tables is
             // what protects the local history either way.
