@@ -38,8 +38,8 @@ pub fn plan_chain(target: i64, links: &[LinkRow]) -> (Vec<Junction>, ChainStop);
 ```
 `plan_chain`: repeatedly find confirmed non-spinoff links whose `successor_id` is the current instrument and whose `effective_date` is strictly before the previous junction's date (first step: unbounded); pick the latest; tie → `Ambiguous`; seen-set → `Cycle`; 10 junctions → `DepthCap`.
 
-- [ ] Unit tests first: straight chain A→B→C queried at C yields junctions [B@d2, A@d1] with d2 > d1; spinoff links ignored; tie on effective_date → `Ambiguous`; cycle A→B, B→A → `Cycle`; link dated inside an already-covered range is skipped as candidate (dates must descend).
-- [ ] Implement; `cargo test --lib stitch` green. Commit `feat: P5 chain planner over confirmed links`.
+- [x] Unit tests first: straight chain A→B→C queried at C yields junctions [B@d2, A@d1] with d2 > d1; spinoff links ignored; tie on effective_date → `Ambiguous`; cycle A→B, B→A → `Cycle`; link dated inside an already-covered range is skipped as candidate (dates must descend).
+- [x] Implement; `cargo test --lib stitch` green. Commit `feat: P5 chain planner over confirmed links`.
 
 ### Task 2: `stitched_series` — DB composition + integration tests
 
@@ -65,32 +65,32 @@ pub async fn has_confirmed_predecessors(pool, instrument_id) -> AppResult<bool>;
 ```
 Loads confirmed links touching the walk (`WHERE successor_id = ANY(...)` iteratively is fine at depth ≤10), plans the chain, then per segment calls `adjust::adjusted_series` (limit 5000) on that instrument, truncates to the segment's date window, derives the junction ratio from the adjusted values (predecessor field: same field_id — the field belongs to the shared asset class), multiplies the cumulative ratio into older segments (volume kind: ratio 1 + note "volumes concatenated unscaled"). Total rows clamped to `limit` after concatenation.
 
-- [ ] Integration tests (scaffold like tests/adjust.rs, two instruments in one class):
+- [x] Integration tests (scaffold like tests/adjust.rs, two instruments in one class):
   1. `a_confirmed_merger_extends_the_survivor_backward` — A has obs 100.0@2026-01-05 (its last), B has 25.0@2026-01-12 onward; confirmed merger link A→B effective 2026-01-12; query B → A's row appears as 25.0 (ratio 0.25 applied), `segments[1].ratio == Some(0.25)`, source ids correct.
   2. `an_unconfirmed_link_is_never_followed` — same setup, link NOT confirmed → only B's rows, one segment.
   3. `a_rename_splices_at_ratio_one` — link_type 'rename', junction values differ slightly → predecessor values UNCHANGED, ratio Some(1.0).
   4. `a_missing_junction_observation_stops_the_walk_with_a_reason` — predecessor has no obs before D → only B's segment, `stopped` mentions the ratio.
-- [ ] Suites green. Commit `feat: stitched series across confirmed merger links`.
+- [x] Suites green. Commit `feat: stitched series across confirmed merger links`.
 
 ### Task 3: command + CSV export
 
 **Files:** `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/stitch.rs`, `src-tauri/tests/stitch.rs`.
 
-- [ ] `list_stitched(instrument_id, field_id, mode: String, limit) -> StitchedSeries`; `has_confirmed_predecessors(instrument_id) -> bool`; `export_stitched_csv(instrument_id, field_id, mode, path) -> u64` header `obs_date,value,source_instrument_id` (full depth 5000). Register all three.
-- [ ] Integration test: CSV line count and the spliced value on the predecessor row.
-- [ ] Suites green. Commit `feat: stitched-series command and CSV export`.
+- [x] `list_stitched(instrument_id, field_id, mode: String, limit) -> StitchedSeries`; `has_confirmed_predecessors(instrument_id) -> bool`; `export_stitched_csv(instrument_id, field_id, mode, path) -> u64` header `obs_date,value,source_instrument_id` (full depth 5000). Register all three.
+- [x] Integration test: CSV line count and the spliced value on the predecessor row.
+- [x] Suites green. Commit `feat: stitched-series command and CSV export`.
 
 ### Task 4: Data tab UI
 
 **Files:** `src/lib/api.ts`, `src/lib/DataScreen.svelte`.
 
-- [ ] `api.ts`: `StitchRow`/`SegmentInfo`/`StitchedSeries` types; `listStitched`, `hasConfirmedPredecessors`, `exportStitchedCsv`.
-- [ ] DataScreen: when the selected instrument `hasConfirmedPredecessors`, show a checkbox `Extend through confirmed mergers`; when checked, the observations area renders the stitched table (Date / Value / Source label or id on foreign rows), a thin segment-report line (`B 2026-01-12→…; A ×0.25 until 2026-01-11`), the `stopped` reason as a hint when present; CSV path seeds `stitched_{iid}_{fid}_{mode}.csv` and exports via the new command. Works combined with the Series selector (mode passes through).
-- [ ] `svelte-check` 0 errors. Commit `feat(ui): merger-stitched series in the Data tab`.
+- [x] `api.ts`: `StitchRow`/`SegmentInfo`/`StitchedSeries` types; `listStitched`, `hasConfirmedPredecessors`, `exportStitchedCsv`.
+- [x] DataScreen: when the selected instrument `hasConfirmedPredecessors`, show a checkbox `Extend through confirmed mergers`; when checked, the observations area renders the stitched table (Date / Value / Source label or id on foreign rows), a thin segment-report line (`B 2026-01-12→…; A ×0.25 until 2026-01-11`), the `stopped` reason as a hint when present; CSV path seeds `stitched_{iid}_{fid}_{mode}.csv` and exports via the new command. Works combined with the Series selector (mode passes through).
+- [x] `svelte-check` 0 errors. Commit `feat(ui): merger-stitched series in the Data tab`.
 
 ### Task 5: Verification + docs + merge
 
-- [ ] Full suites (unit + `--ignored` minus live smoke) green; svelte-check clean.
-- [ ] Spec status → IMPLEMENTED; memory updated; plan ticked.
-- [ ] Fast-forward `master`; relaunch the app.
-- [ ] Commit `docs: P5 merger stitching shipped`.
+- [x] Full suites (unit + `--ignored` minus live smoke) green; svelte-check clean.
+- [x] Spec status → IMPLEMENTED; memory updated; plan ticked.
+- [x] Fast-forward `master`; relaunch the app.
+- [x] Commit `docs: P5 merger stitching shipped`.

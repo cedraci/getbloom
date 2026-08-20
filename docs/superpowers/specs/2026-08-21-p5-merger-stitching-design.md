@@ -1,7 +1,7 @@
 # P5 — Fund-merger stitching (design)
 
 **Date:** 2026-08-21
-**Status:** APPROVED (user, 2026-08-21: "go for P5")
+**Status:** IMPLEMENTED 2026-08-21 (plan: ../plans/2026-08-21-p5-merger-stitching.md)
 **Branch:** `bloomberg-security-master`
 **Depends on:** P4 `2026-08-21-p4-adjustment-engine-design.md` (per-segment
 adjustment), `instrument_link` (0001_init.sql: proposal/confirm flow, P0 §7.2
