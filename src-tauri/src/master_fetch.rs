@@ -54,6 +54,15 @@ pub fn identity_hit_cost(securities: usize) -> i64 {
 /// One security, one (bulk) field.
 pub const HIST_IDS_HIT_COST: i64 = 1;
 
+/// P3's one refresh request: both bulk fields in a single bulk_reference
+/// call, with the corporate-actions filter that makes the factor chain a
+/// superset (splits + cash dividends -- P0 10.1).
+pub const CORP_ACTIONS_FIELDS: [&str; 2] =
+    ["EQY_DVD_ADJUST_FACT", "DVD_HIST_ALL_WITH_AMT_STATUS"];
+pub const CORP_ACTIONS_FILTER: &str = "CORPORATE_ACTIONS_FILTER";
+/// 1 security x 2 fields, the standing per-security-field unit.
+pub const CORP_ACTIONS_HIT_COST: i64 = CORP_ACTIONS_FIELDS.len() as i64;
+
 pub const HIST_IDS_FIELD: &str = "HISTORICAL_IDS_TIME_RANGE";
 /// Overrides on HIST_IDS_FIELD, resolved from its own FieldInfoRequest (P0 §6.3).
 pub const HIST_IDS_ANCHOR: &str = "HISTORICAL_STARTING_IDENTIFIER";
@@ -116,6 +125,11 @@ pub trait MasterFetcher {
     fn instrument_list(&self, query: &str, yellow_key_filter: Option<&str>,
                        max_results: u32)
         -> impl std::future::Future<Output = AppResult<Answered<Vec<Candidate>>>> + Send;
+
+    /// Both corporate-action bulk fields for one security, verbatim tables.
+    fn corp_actions(&self, security: &str)
+        -> impl std::future::Future<
+            Output = AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>> + Send;
 }
 
 // ------------------------------------------------------------------ parsing
@@ -321,6 +335,25 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
         let parsed = parse_list(&raw);
         Ok(Answered { parsed, raw })
     }
+
+    async fn corp_actions(&self, security: &str)
+        -> AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>
+    {
+        let resp = self.call(serde_json::json!({
+            "kind": "bulk_reference",
+            "securities": [security],
+            "fields": CORP_ACTIONS_FIELDS,
+            "overrides": [{"fieldId": CORP_ACTIONS_FILTER,
+                           "value": crate::corp_actions::CORP_ACTIONS_FILTER_VALUE}],
+        })).await?;
+        self.charge("corp_actions", CORP_ACTIONS_HIT_COST).await;
+        // The sidecar's top-level bulk_rows section, not raw_messages: the
+        // tables arrive already row-shaped from parse_bulk_message.
+        let raw = resp["bulk_rows"].clone();
+        let parsed: Vec<crate::fetch::SidecarBulkRows> =
+            serde_json::from_value(raw.clone()).unwrap_or_default();
+        Ok(Answered { parsed, raw })
+    }
 }
 
 // ------------------------------------------------------------------ mock
@@ -331,6 +364,8 @@ pub struct MockMasterFetcher {
     pub identity_raw: serde_json::Value,
     pub hist_ids_raw: serde_json::Value,
     pub list_raw: serde_json::Value,
+    /// A `bulk_rows`-shaped array (security/field/rows objects).
+    pub corp_actions_raw: serde_json::Value,
     /// Every call recorded, so a test can assert Bloomberg was NOT called.
     pub calls: std::sync::Mutex<Vec<String>>,
 }
@@ -341,6 +376,7 @@ impl Default for MockMasterFetcher {
             identity_raw: serde_json::json!([]),
             hist_ids_raw: serde_json::json!([]),
             list_raw: serde_json::json!([]),
+            corp_actions_raw: serde_json::json!([]),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -389,6 +425,15 @@ impl MasterFetcher for MockMasterFetcher {
     {
         self.record(&format!("instrument_list:{query}"));
         Ok(Answered { parsed: parse_list(&self.list_raw), raw: self.list_raw.clone() })
+    }
+
+    async fn corp_actions(&self, security: &str)
+        -> AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>
+    {
+        self.record(&format!("corp_actions:{security}"));
+        let parsed = serde_json::from_value(self.corp_actions_raw.clone())
+            .unwrap_or_default();
+        Ok(Answered { parsed, raw: self.corp_actions_raw.clone() })
     }
 }
 
@@ -499,6 +544,32 @@ mod tests {
         assert_eq!(identity_hit_cost(3), 36);
         assert_eq!(identity_hit_cost(0), 0, "a request for nothing costs nothing");
         assert_eq!(HIST_IDS_HIT_COST, 1);
+    }
+
+    /// The refresh cost is a promise to the budget screen: 1 security x 2
+    /// bulk fields, same per-security-field unit as every other estimate.
+    #[test]
+    fn corp_actions_cost_matches_the_field_count() {
+        assert_eq!(CORP_ACTIONS_FIELDS.len(), 2);
+        assert_eq!(CORP_ACTIONS_HIT_COST, CORP_ACTIONS_FIELDS.len() as i64);
+        assert_eq!(CORP_ACTIONS_FIELDS[0], crate::corp_actions::FACTOR_FIELD);
+        assert_eq!(CORP_ACTIONS_FIELDS[1], crate::corp_actions::DVD_FIELD);
+    }
+
+    #[tokio::test]
+    async fn the_mock_replays_corp_action_tables_and_records_the_call() {
+        let mock = MockMasterFetcher {
+            corp_actions_raw: serde_json::json!([
+                {"security": "AAPL US Equity", "field": "EQY_DVD_ADJUST_FACT",
+                 "rows": [{"Adjustment Date": "2020-08-31", "Adjustment Factor": 4.0,
+                           "Adjustment Factor Operator Type": 1.0,
+                           "Adjustment Factor Flag": 3.0}]}]),
+            ..Default::default()
+        };
+        let ans = mock.corp_actions("AAPL US Equity").await.unwrap();
+        assert_eq!(ans.parsed.len(), 1);
+        assert_eq!(ans.parsed[0].field, "EQY_DVD_ADJUST_FACT");
+        assert_eq!(mock.call_count(), 1);
     }
 
     #[tokio::test]

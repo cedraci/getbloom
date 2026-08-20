@@ -275,6 +275,13 @@ impl MasterFetcher for KeyedFetcher {
         Ok(vec![])
     }
 
+    async fn corp_actions(&self, _security: &str)
+        -> AppResult<Answered<Vec<getbloomdata_lib::fetch::SidecarBulkRows>>>
+    {
+        self.record();
+        Ok(Answered { parsed: vec![], raw: serde_json::json!([]) })
+    }
+
     async fn instrument_list(&self, _query: &str, _yellow_key_filter: Option<&str>,
                              _max_results: u32) -> AppResult<Answered<Vec<Candidate>>>
     {
