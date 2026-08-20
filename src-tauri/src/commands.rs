@@ -574,6 +574,41 @@ pub async fn list_corp_actions(state: State<'_, AppState>, instrument_id: i64)
     crate::corp_actions::list_current(&state.pool, instrument_id).await
 }
 
+// ---------------------------------------------------------------------------
+// Data tab (read-only; never calls Bloomberg)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_observations(state: State<'_, AppState>, instrument_id: i64,
+                               field_id: i64, include_superseded: bool, limit: i64)
+    -> Result<Vec<crate::dataview::ObsRow>, AppError> {
+    crate::dataview::observations(&state.pool, instrument_id, field_id,
+                                  include_superseded, limit).await
+}
+
+#[tauri::command]
+pub async fn list_corp_actions_full(state: State<'_, AppState>, instrument_id: i64,
+                                    include_superseded: bool)
+    -> Result<Vec<crate::dataview::CorpActionFull>, AppError> {
+    crate::dataview::corp_actions_full(&state.pool, instrument_id,
+                                       include_superseded).await
+}
+
+#[tauri::command]
+pub async fn export_observations_csv(state: State<'_, AppState>, instrument_id: i64,
+                                     field_id: i64, path: String)
+    -> Result<u64, AppError> {
+    crate::dataview::export_observations_csv(&state.pool, instrument_id, field_id,
+                                             &PathBuf::from(path)).await
+}
+
+#[tauri::command]
+pub async fn export_corp_actions_csv(state: State<'_, AppState>, instrument_id: i64,
+                                     path: String) -> Result<u64, AppError> {
+    crate::dataview::export_corp_actions_csv(&state.pool, instrument_id,
+                                             &PathBuf::from(path)).await
+}
+
 /// Whole-view refresh: batched Bloomberg calls (100 securities each), 2 hits
 /// per instrument, charged at the wire seam. Still an explicit user action.
 #[tauri::command]

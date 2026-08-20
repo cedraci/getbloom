@@ -4,6 +4,7 @@ pub mod budget;
 pub mod bulk;
 pub mod commands;
 pub mod corp_actions;
+pub mod dataview;
 pub mod db;
 pub mod deletion;
 pub mod error;
@@ -96,6 +97,8 @@ pub fn run() {
             commands::instrument_aliases, commands::instrument_attrs,
             commands::refresh_corp_actions, commands::list_corp_actions,
             commands::refresh_view_corp_actions,
+            commands::list_observations, commands::list_corp_actions_full,
+            commands::export_observations_csv, commands::export_corp_actions_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
