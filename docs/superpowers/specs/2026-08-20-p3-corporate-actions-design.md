@@ -48,6 +48,18 @@ instrument detail panel (same pattern as identifier history — explicit,
 costed, never automatic). No scheduled fetch in P3; cadence is a P4 question
 because only the adjustment engine knows how stale a factor chain can be.
 
+**Shipped 2026-08-21 — view-level refresh.** One stock at a time does not
+scale (user requirement), so the seam takes a *batch* of securities
+(`MasterFetcher::corp_actions(&[String])`, one `bulk_reference` request per
+100 securities, charged securities × 2 hits per request) and
+`corp_actions::refresh_view` covers a whole view: members without a security
+valid today are skipped and reported (`corp_actions_skipped`), each
+instrument diffs its own tables out of the shared response in its own
+transaction, and the Views screen carries the per-view "Corp actions"
+button. A read-only **Data** tab renders stored observations (with basis and
+supersession history) and corporate actions with their verbatim payload,
+plus CSV export — the accuracy-check surface.
+
 ## 3. Storage — `corp_action`
 
 One table, source-field discriminated, bitemporal on system time only (the
