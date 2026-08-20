@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, type EstimateOut, type GapRow, type IssueRow, type RunRow, type View } from "./api";
+  import { api, type EstimateOut, type GapRow, type IssueRow, type RunOutcome,
+           type RunRow, type View } from "./api";
 
   let views = $state<View[]>([]);
   let selectedViewId = $state<number | null>(null);
@@ -19,6 +20,21 @@
     | { kind: "backfill"; start: string; end: string; instrument_ids: number[] | null;
         estimated: number; today_total: number };
   let pending = $state<PendingConfirm | null>(null);
+
+  // Corporate actions ride with every run; the completed outcome carries
+  // their summary and it deserves its own visible line.
+  let caLine = $state("");
+  function noteCorpActions(outcome: RunOutcome) {
+    const ca = "Completed" in outcome ? outcome.Completed.corp_actions : null;
+    caLine = ca
+      ? `Corporate actions: ${ca.inserted} new, ${ca.amended} amended, `
+        + `${ca.withdrawn} withdrawn, ${ca.unchanged} unchanged`
+        + (ca.unparsed ? `, ${ca.unparsed} unparsed` : "")
+        + (ca.failed ? `, ${ca.failed} failed` : "")
+        + (ca.not_applicable ? `, ${ca.not_applicable} not applicable` : "")
+        + (ca.skipped ? `, ${ca.skipped} skipped (no current security)` : "") + "."
+      : "";
+  }
 
   async function loadViews() {
     try {
@@ -57,6 +73,7 @@
         pending = { kind: "eod", ...outcome.NeedsConfirmation };
       } else {
         pending = null;
+        noteCorpActions(outcome);
         await Promise.all([loadViewData(), refreshRuns()]);
       }
     } catch (e) { error = String(e); }
@@ -74,6 +91,7 @@
                     ...outcome.NeedsConfirmation };
       } else {
         pending = null;
+        noteCorpActions(outcome);
         await Promise.all([loadViewData(), refreshRuns()]);
       }
     } catch (e) { error = String(e); }
@@ -84,12 +102,11 @@
     if (selectedViewId === null || pending === null) return;
     inFlight = true;
     try {
-      if (pending.kind === "eod") {
-        await api.runEodNow(selectedViewId, true);
-      } else {
-        await api.runBackfillNow(selectedViewId, pending.start, pending.end, true,
-                                 pending.instrument_ids);
-      }
+      const outcome = pending.kind === "eod"
+        ? await api.runEodNow(selectedViewId, true)
+        : await api.runBackfillNow(selectedViewId, pending.start, pending.end, true,
+                                   pending.instrument_ids);
+      noteCorpActions(outcome);
       pending = null;
       await Promise.all([loadViewData(), refreshRuns()]);
     } catch (e) { error = String(e); }
@@ -117,6 +134,8 @@
   {/if}
 
   <button onclick={runNow} disabled={inFlight || selectedViewId === null}>Run now</button>
+
+  {#if caLine}<p class="thin">{caLine}</p>{/if}
 
   {#if pending}
     <div class="confirm">

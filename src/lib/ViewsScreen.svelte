@@ -102,6 +102,8 @@
         + `${s.inserted} new, ${s.amended} amended, ${s.withdrawn} withdrawn, `
         + `${s.unchanged} unchanged`
         + (s.unparsed ? `, ${s.unparsed} unparsed` : "")
+        + (s.failed ? `, ${s.failed} failed` : "")
+        + (s.not_applicable ? `, ${s.not_applicable} not applicable (Bloomberg has no corporate actions for them)` : "")
         + (s.skipped ? `, ${s.skipped} skipped (no current security)` : "") + ".";
     } catch (e) { error = String(e); }
     finally { caBusyViewId = null; }

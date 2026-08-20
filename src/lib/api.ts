@@ -14,7 +14,8 @@ export interface EstimateOut {
 export type RunOutcome =
   | { Completed: { run_id: number;
                     summary: { inserted: number; superseded: number;
-                               unchanged: number; issues: number } } }
+                               unchanged: number; issues: number };
+                    corp_actions?: ViewRefreshCorpActionsSummary | null } }
   | { NeedsConfirmation: { estimated: number; today_total: number } };
 export interface RunRow {
   id: number; view_id: number; kind: string; trigger_kind: string; status: string;
@@ -178,7 +179,8 @@ export interface CorpActionFull {
   payload: Record<string, unknown>; system_from: string; current: boolean;
 }
 export interface ViewRefreshCorpActionsSummary {
-  instruments: number; skipped: number; inserted: number; amended: number;
+  instruments: number; skipped: number; failed: number; not_applicable: number;
+  inserted: number; amended: number;
   withdrawn: number; unchanged: number; unparsed: number;
 }
 export interface CorpActionRow {
