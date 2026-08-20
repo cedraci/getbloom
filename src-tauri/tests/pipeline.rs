@@ -435,3 +435,77 @@ async fn a_filtered_backfill_fetches_only_the_target_instrument() {
     assert_eq!(seen, vec![vec![b]],
                "only the targeted instrument may reach the fetcher: {seen:?}");
 }
+
+/// Rule A: a dated no_data with no cells and no other problem for that
+/// (instrument, day) is Bloomberg saying "no trading session". Recording it
+/// is what lets detect_gaps stop reporting the holiday forever.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_dated_no_data_marks_a_non_trading_day_and_clears_the_gap() {
+    let pool = common::pool().await;
+    let (iid, fid, vid, rid) = scaffold(&pool, "NTD1").await;
+    let holiday = d("2026-08-18");
+    let req = FetchRequest { run_id: rid, assets: vec![], fields: vec![],
+                             start: holiday, end: holiday };
+    let out = FetchOutcome {
+        cells: vec![],
+        problems: vec![getbloomdata_lib::fetch::CellProblem {
+            instrument_id: Some(iid), field_id: Some(fid),
+            obs_date: Some(holiday), code: "no_data".into(),
+            detail: "no trading day returned".into(),
+        }],
+    };
+    let n = ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+    assert_eq!(n, 1);
+
+    let gaps = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 1, d("2026-08-19"))
+        .await.unwrap();
+    assert!(gaps.iter().all(|g| g.instrument_id != iid),
+            "a recorded non-trading day is not a gap: {gaps:?}");
+}
+
+/// An invalid_security day is NOT a holiday -- nothing may be recorded.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_invalid_security_day_is_not_recorded_as_non_trading() {
+    let pool = common::pool().await;
+    let (iid, fid, _vid, rid) = scaffold(&pool, "NTD2").await;
+    let day = d("2026-08-18");
+    let req = FetchRequest { run_id: rid, assets: vec![], fields: vec![],
+                             start: day, end: day };
+    let out = FetchOutcome {
+        cells: vec![],
+        problems: vec![
+            getbloomdata_lib::fetch::CellProblem {
+                instrument_id: Some(iid), field_id: Some(fid),
+                obs_date: Some(day), code: "no_data".into(), detail: String::new() },
+            getbloomdata_lib::fetch::CellProblem {
+                instrument_id: Some(iid), field_id: None,
+                obs_date: Some(day), code: "invalid_security".into(), detail: String::new() },
+        ],
+    };
+    let n = ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+    assert_eq!(n, 0, "mixed signals are not holiday evidence");
+}
+
+/// Rule B: inside a multi-day range, ACTIVE_DAYS_ONLY omits a non-trading
+/// day silently. A weekday with no cells, for an instrument that DID return
+/// cells on other days of the range, is non-trading by inference.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_silent_weekday_inside_a_range_with_neighbours_is_non_trading() {
+    let pool = common::pool().await;
+    let (iid, fid, _vid, rid) = scaffold(&pool, "NTD3").await;
+    let (mon, tue, wed) = (d("2026-08-17"), d("2026-08-18"), d("2026-08-19"));
+    let req = FetchRequest { run_id: rid, assets: vec![], fields: vec![],
+                             start: mon, end: wed };
+    let cell = |dt| ObsCell { instrument_id: iid, field_id: fid, obs_date: dt,
+                              value: CellValue::Num(1.0) };
+    let out = FetchOutcome { cells: vec![cell(mon), cell(wed)], problems: vec![] };
+    let n = ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+    assert_eq!(n, 1);
+    let src: String = sqlx::query_scalar(
+        "SELECT source FROM non_trading_day WHERE instrument_id=$1 AND obs_date=$2")
+        .bind(iid).bind(tue).fetch_one(&pool).await.unwrap();
+    assert_eq!(src, "range_inference");
+}

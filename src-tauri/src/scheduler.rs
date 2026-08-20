@@ -255,6 +255,15 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
           GROUP BY o.instrument_id, o.obs_date")
         .bind(view_id).bind(start).bind(end).fetch_all(pool).await?;
 
+    // Days Bloomberg itself declared sessionless (holiday, suspension) are
+    // covered by definition: there is nothing a backfill could fetch.
+    let non_trading: Vec<(i64, NaiveDate)> = sqlx::query_as(
+        "SELECT n.instrument_id, n.obs_date
+           FROM non_trading_day n
+           JOIN view_instrument vi ON vi.instrument_id = n.instrument_id
+          WHERE vi.view_id = $1 AND n.obs_date BETWEEN $2 AND $3")
+        .bind(view_id).bind(start).bind(end).fetch_all(pool).await?;
+
     let mut out = Vec::new();
     for m in members {
         let Some(&need) = expected.get(&m.asset_class_id) else {
@@ -262,10 +271,13 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
             // date can be missing anything backfill could supply.
             continue;
         };
-        let present: HashSet<NaiveDate> = rows.iter()
+        let mut present: HashSet<NaiveDate> = rows.iter()
             .filter(|(iid, _, have)| *iid == m.instrument_id && *have >= need)
             .map(|(_, d, _)| *d)
             .collect();
+        present.extend(non_trading.iter()
+            .filter(|(iid, _)| *iid == m.instrument_id)
+            .map(|(_, d)| *d));
         for (s, e) in group_ranges(&missing_weekdays(&present, start, end),
                                    orchestrator::BACKFILL_CAP_DAYS) {
             out.push(Gap { instrument_id: m.instrument_id, label: m.label.clone(),

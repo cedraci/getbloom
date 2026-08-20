@@ -92,3 +92,64 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
     Ok(IngestSummary { inserted, superseded, unchanged,
                        issues: outcome.problems.len() as u64 })
 }
+
+/// Evidence-based non-trading days -- no external holiday calendar exists in
+/// this system, so a day is recorded only when Bloomberg itself said there
+/// was no session:
+/// - rule A: a (instrument, day) with zero cells, >=1 dated `no_data`, and
+///   no other-coded dated problem;
+/// - rule B (multi-day ranges): ACTIVE_DAYS_ONLY omits non-trading days
+///   silently, so a weekday with zero cells and zero dated problems, for an
+///   instrument that returned cells elsewhere in the range, is non-trading
+///   by inference (this also covers per-security suspensions, which equally
+///   have no price to backfill).
+pub async fn record_non_trading_days(pool: &PgPool, req: &crate::fetch::FetchRequest,
+                                     outcome: &FetchOutcome) -> AppResult<u64> {
+    use chrono::NaiveDate;
+    use std::collections::{HashMap, HashSet};
+
+    let mut cells: HashMap<i64, HashSet<NaiveDate>> = HashMap::new();
+    for c in &outcome.cells {
+        cells.entry(c.instrument_id).or_default().insert(c.obs_date);
+    }
+    let mut no_data: HashSet<(i64, NaiveDate)> = HashSet::new();
+    let mut other: HashSet<(i64, NaiveDate)> = HashSet::new();
+    for p in &outcome.problems {
+        if let (Some(iid), Some(d)) = (p.instrument_id, p.obs_date) {
+            if p.code == "no_data" { no_data.insert((iid, d)); }
+            else { other.insert((iid, d)); }
+        }
+    }
+
+    let mut marks: Vec<(i64, NaiveDate, &'static str)> = Vec::new();
+    for &(iid, d) in &no_data {
+        let has_cell = cells.get(&iid).is_some_and(|s| s.contains(&d));
+        if !has_cell && !other.contains(&(iid, d)) {
+            marks.push((iid, d, "no_data"));
+        }
+    }
+    if req.start < req.end {
+        for (&iid, have) in &cells {
+            let mut day = req.start;
+            while day <= req.end {
+                if !crate::scheduler::is_weekend(day)
+                    && !have.contains(&day)
+                    && !no_data.contains(&(iid, day))
+                    && !other.contains(&(iid, day)) {
+                    marks.push((iid, day, "range_inference"));
+                }
+                day += chrono::Duration::days(1);
+            }
+        }
+    }
+
+    let mut inserted = 0u64;
+    for (iid, d, src) in marks {
+        let r = sqlx::query(
+            "INSERT INTO non_trading_day (instrument_id, obs_date, source)
+             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(iid).bind(d).bind(src).execute(pool).await?;
+        inserted += r.rows_affected();
+    }
+    Ok(inserted)
+}

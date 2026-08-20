@@ -235,6 +235,12 @@ async fn execute<F: DataFetcher>(
         }
     };
 
+    // Advisory, like the hit ledger: losing a holiday mark must not fail a
+    // run that already fetched its data.
+    if let Err(e) = ingest::record_non_trading_days(pool, &req, &outcome).await {
+        eprintln!("warning: non-trading-day recording failed for run {run_id}: {e}");
+    }
+
     set_status(pool, run_id, "ingesting").await?;
     let summary = match ingest::ingest_outcome(pool, run_id, &outcome).await {
         Ok(s) => s,
