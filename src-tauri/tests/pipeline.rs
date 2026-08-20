@@ -43,6 +43,8 @@ async fn scaffold(pool: &sqlx::PgPool, stem: &str) -> (i64, i64, i64, i64) {
         .bind(&vname).fetch_one(pool).await.unwrap();
     sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
         .bind(vid).bind(inst.instrument_id).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
+        .bind(vid).bind(fid).execute(pool).await.unwrap();
     let rid: i64 = sqlx::query_scalar(
         "INSERT INTO run (view_id, kind, trigger_kind, status)
          VALUES ($1,'eod','manual','ok') RETURNING id")
@@ -327,4 +329,55 @@ async fn a_retired_member_is_not_reported_as_a_gap() {
     let after = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 6, today).await.unwrap();
     assert!(after.iter().all(|g| g.instrument_id != inst),
             "a retired member is not collecting, so it is not a gap: {after:?}");
+}
+
+/// Gap detection is per (instrument, field-complete date): a PX_LAST hole
+/// must not hide behind a PX_VOLUME that succeeded. Text fields do not
+/// count -- backfill cannot recover them by design, and an unfixable gap is
+/// noise that buries the fixable ones.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_missing_field_behind_a_present_sibling_is_still_a_gap() {
+    let pool = common::pool().await;
+    let (iid, px_last, vid, rid) = scaffold(&pool, "GAPFLD").await;
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM book_entry WHERE instrument_id = $1")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    let px_volume: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind)
+         VALUES ($1,'PX_VOLUME','Volume','numeric') RETURNING id")
+        .bind(class).fetch_one(&pool).await.unwrap();
+    let name_fld: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind)
+         VALUES ($1,'NAME','Name','text') RETURNING id")
+        .bind(class).fetch_one(&pool).await.unwrap();
+    for f in [px_volume, name_fld] {
+        sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
+            .bind(vid).bind(f).execute(&pool).await.unwrap();
+    }
+
+    // Tuesday 2026-08-18: PX_LAST present, PX_VOLUME missing, NAME missing.
+    let day = d("2026-08-18");
+    sqlx::query(
+        "INSERT INTO observation
+           (instrument_id, field_id, obs_date, layer, basis_id, value_num, run_id)
+         VALUES ($1,$2,$3,'raw',1,100.0,$4)")
+        .bind(iid).bind(px_last).bind(day).bind(rid)
+        .execute(&pool).await.unwrap();
+
+    let today = d("2026-08-19");
+    let gaps = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 1, today).await.unwrap();
+    assert!(gaps.iter().any(|g| g.instrument_id == iid && g.start == day),
+            "PX_VOLUME missing on {day} must surface as a gap: {gaps:?}");
+
+    // Fill PX_VOLUME; NAME (text) stays absent -- and must not keep the gap open.
+    sqlx::query(
+        "INSERT INTO observation
+           (instrument_id, field_id, obs_date, layer, basis_id, value_num, run_id)
+         VALUES ($1,$2,$3,'raw',1,5.0e6,$4)")
+        .bind(iid).bind(px_volume).bind(day).bind(rid)
+        .execute(&pool).await.unwrap();
+    let gaps = getbloomdata_lib::scheduler::detect_gaps(&pool, vid, 1, today).await.unwrap();
+    assert!(gaps.iter().all(|g| g.instrument_id != iid),
+            "both numeric fields present; a missing TEXT field is not a gap: {gaps:?}");
 }

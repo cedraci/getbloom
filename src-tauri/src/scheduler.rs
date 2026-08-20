@@ -232,19 +232,39 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
     if members.is_empty() {
         return Ok(Vec::new());
     }
+    // A date is covered only when EVERY non-text field the view configures
+    // for the member's class has a current raw EOD row. Text fields are
+    // excluded: backfill cannot recover them by design (plan_requests), and
+    // an unfixable gap is noise that buries the fixable ones.
+    let fields = crate::views::view_fields(pool, view_id).await?;
+    let mut expected: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for f in fields.iter().filter(|f| f.value_kind != "text") {
+        *expected.entry(f.asset_class_id).or_insert(0) += 1;
+    }
 
-    let rows: Vec<(i64, NaiveDate)> = sqlx::query_as(
-        "SELECT DISTINCT o.instrument_id, o.obs_date FROM observation o
-         JOIN view_instrument vi ON vi.instrument_id = o.instrument_id
-         WHERE vi.view_id = $1 AND o.obs_date BETWEEN $2 AND $3
-           AND o.system_to = 'infinity'")
+    let rows: Vec<(i64, NaiveDate, i64)> = sqlx::query_as(
+        "SELECT o.instrument_id, o.obs_date, count(DISTINCT o.field_id)::bigint
+           FROM observation o
+           JOIN view_instrument vi ON vi.instrument_id = o.instrument_id
+                                  AND vi.view_id = $1
+           JOIN view_field vf ON vf.view_id = vi.view_id AND vf.field_id = o.field_id
+           JOIN field_def fd ON fd.id = o.field_id AND fd.value_kind <> 'text'
+          WHERE o.obs_date BETWEEN $2 AND $3
+            AND o.system_to = 'infinity'
+            AND o.layer = 'raw' AND o.granularity = 'eod'
+          GROUP BY o.instrument_id, o.obs_date")
         .bind(view_id).bind(start).bind(end).fetch_all(pool).await?;
 
     let mut out = Vec::new();
     for m in members {
+        let Some(&need) = expected.get(&m.asset_class_id) else {
+            // The view fetches nothing history-shaped for this class, so no
+            // date can be missing anything backfill could supply.
+            continue;
+        };
         let present: HashSet<NaiveDate> = rows.iter()
-            .filter(|(iid, _)| *iid == m.instrument_id)
-            .map(|(_, d)| *d)
+            .filter(|(iid, _, have)| *iid == m.instrument_id && *have >= need)
+            .map(|(_, d, _)| *d)
             .collect();
         for (s, e) in group_ranges(&missing_weekdays(&present, start, end),
                                    orchestrator::BACKFILL_CAP_DAYS) {
