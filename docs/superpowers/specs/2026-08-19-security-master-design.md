@@ -1,7 +1,7 @@
 # P1 — Instrument/Security Master (design)
 
 **Date:** 2026-08-19
-**Status:** PROPOSED — awaiting review
+**Status:** IMPLEMENTED (P1, this branch) — §4.2, §5.1 and §7 corrected 2026-08-20 to match the shipped code; the authoritative verification record is `docs/superpowers/plans/2026-08-19-p1-smoke-checklist.md`.
 **Branch:** `bloomberg-security-master`
 **Depends on:** `2026-08-19-blpapi-field-facts.md` (P0). Every Bloomberg field
 name used here is verified there. **Do not add a mnemonic to this design that
@@ -137,10 +137,15 @@ This is what makes both readings the objectives require possible:
 Retrofitting a system-time axis later is far harder than carrying it now, which
 is why it appears in P1 even though P2 is what exploits it.
 
-Attribute values are sourced from the P0-verified fields: `NAME`, `EXCH_CODE`,
-`CNTRY_ISSUE_ISO`, `CRNCY`, `SECURITY_TYP2`, `MARKET_SECTOR_DES`,
-`ID_BB_COMPANY`, `FUND_SHR_CLASS_DESG`, `SHARE_CLASS_TYPE`, `FUND_TYP`.
-Validity dates come from `LISTING_DATE` and `INACTIVE_DATE`.
+Attribute values written in P1 come from the six identity-block fields the
+code actually fetches (`master_fetch::IDENTITY_FIELDS` →
+`engine::attr_pairs`): `NAME` → name, `EXCH_CODE` → exchange,
+`CNTRY_ISSUE_ISO` → country, `CRNCY` → currency, `SECURITY_TYP2` →
+instrument_type, `MARKET_SECTOR_DES` → asset_class. Validity dates come from
+`LISTING_DATE` and `INACTIVE_DATE`. `issuer`, `share_class` and
+`fund_vehicle` remain in the CHECK domain but are **not fetched in P1** —
+`ID_BB_COMPANY`, `FUND_SHR_CLASS_DESG`, `SHARE_CLASS_TYPE` and `FUND_TYP`
+are P5 work (the live smoke pass caught this drift; see the P1 checklist).
 
 The `status` attribute is defined in the CHECK constraint but **nothing in P1
 writes it.** `SIMP_SEC_STATUS` was the intended source, and P0 §10.2 established
@@ -419,12 +424,18 @@ time series.
 
 ### 5.1 Identifier history
 
-On first resolution, one `HISTORICAL_IDS_TIME_RANGE` request is issued with
-`HISTORICAL_STARTING_IDENTIFIER` set to the resolved security and
-`HISTORICAL_ID_TM_RANGE_START_DT` set to `LISTING_DATE` (or a configured floor).
-Returned rows become `instrument_alias` rows with `valid_from`/`valid_to` from
-the `Date` column, `bbg_action_id` from `Action ID`, and `anchoring_identifier`
-set to the identifier that was passed.
+Identifier history is an **explicit user action**, never automatic. The
+design originally issued `HISTORICAL_IDS_TIME_RANGE` on first resolution,
+anchored on the resolved security; P0 §6.5 measured why that is unsafe:
+`HISTORICAL_STARTING_IDENTIFIER` names the identifier the chain *started*
+from, and resolution only knows the one it *ended* at — anchored on
+`META US Equity` the response described the Roundhill Ball Metaverse ETF.
+The call now lives in the instrument detail panel
+(`commands::ingest_identifier_history`) with a **user-supplied anchor** and
+range start, costing 1 call when asked for. Returned rows become
+`instrument_alias` rows with `valid_from`/`valid_to` from the `Date` column,
+`bbg_action_id` from `Action ID`, and `anchoring_identifier` set to the
+anchor that was passed.
 
 An `Old ID` that already belongs to a different instrument is **not** merged
 automatically: it opens an `instrument_link` proposal with `confirmed_by NULL`.
@@ -478,8 +489,9 @@ The constraint is hard: the tool calls Bloomberg only when it must.
 | typing in the search box | **none, ever** |
 | selecting a locally-known instrument | none |
 | explicit "Search Bloomberg" | 1 `instrumentListRequest` |
-| resolving a never-seen instrument, **unambiguously** | 1 `ReferenceDataRequest` + 1 `HISTORICAL_IDS_TIME_RANGE`, once per instrument for its lifetime |
-| resolving a never-seen instrument **that needs the search** | 3 + 1: the identity probe, then `instrumentListRequest`, then a second `ReferenceDataRequest` to resolve the winner, then `HISTORICAL_IDS_TIME_RANGE` |
+| resolving a never-seen instrument, **unambiguously** | 1 `ReferenceDataRequest` |
+| resolving a never-seen instrument **that needs the search** | 3: the identity probe, then `instrumentListRequest`, then a second `ReferenceDataRequest` to resolve the winner |
+| identifier history (user-initiated, instrument detail panel) | 1 `HISTORICAL_IDS_TIME_RANGE`, with a user-supplied anchor |
 | a locally ambiguous identifier (two instruments wear it) | **none** — it goes straight to review; a Bloomberg call cannot resolve a local ambiguity |
 | re-resolving a known instrument | none — served from `instrument_alias` |
 
@@ -491,6 +503,10 @@ bound to it. Binding the clicked string directly is what §6.2 forbids.
 All of these are recorded in `hit_ledger` and counted conservatively, matching
 the existing over-count-is-safe policy. Whether `instrumentListRequest` is
 metered at all is unknown (§10).
+
+The ledger's *hits* and this table's *calls* are different units: an identity
+request is charged securities × 12 `IDENTITY_FIELDS`, matching
+`budget::estimate_eod_hits`' security-field accounting.
 
 ---
 

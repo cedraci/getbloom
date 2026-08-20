@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-08-20).** This is the pre-P1 draft; it still references
+> the deleted `asset` table, TimescaleDB, and the removed Assets screen.
+> The live, executed record is
+> `docs/superpowers/plans/2026-08-19-p1-smoke-checklist.md`.
+
 # Bloomberg EOD pipeline — end-to-end smoke test
 
 Rewritten for Amendment A2 (BLPAPI). The Excel/COM version of this checklist is
