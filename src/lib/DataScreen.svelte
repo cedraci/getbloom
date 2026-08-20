@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, type AdjSeries, type AdjustModeStr, type BookEntry,
-           type CorpActionFull, type FieldDef, type ObsRow } from "./api";
+           type CorpActionFull, type FieldDef, type ObsRow,
+           type StitchedSeries } from "./api";
 
   let book = $state<BookEntry[]>([]);
   let fields = $state<FieldDef[]>([]);
@@ -19,6 +20,26 @@
   // from the factor chain on read -- nothing is stored.
   let seriesMode = $state<AdjustModeStr>("raw");
   let adjSeries = $state<AdjSeries | null>(null);
+
+  // P5: extend backward through confirmed merger/rename links.
+  let canStitch = $state(false);
+  let stitchOn = $state(false);
+  let stitched = $state<StitchedSeries | null>(null);
+  $effect(() => {
+    const iid = instrumentId;
+    if (iid === null) { canStitch = false; stitchOn = false; return; }
+    api.hasConfirmedPredecessors(iid)
+      .then((v) => { canStitch = v; if (!v) stitchOn = false; })
+      .catch((e) => { error = String(e); });
+  });
+  const segLabel = (id: number) =>
+    stitched?.segments.find((s) => s.instrument_id === id)?.label ?? `#${id}`;
+  const segReport = (s: StitchedSeries) =>
+    s.segments.map((g) => {
+      const range = `${g.from ?? "…"} → ${g.to ?? "latest"}`;
+      const ratio = g.ratio !== null && g.ratio !== 1 ? ` ×${g.ratio.toFixed(6)}` : "";
+      return `${g.label ?? "#" + g.instrument_id} (${range}${ratio}${g.note ? "; " + g.note : ""})`;
+    }).join("  ·  ");
 
   // Fields that apply to the selected instrument's asset class.
   let classFields = $derived.by(() => {
@@ -47,15 +68,17 @@
     if (fieldId === null && classFields.length) fieldId = classFields[0].id;
   });
   $effect(() => {
-    // Reads all five inputs so any change reloads.
-    instrumentId; fieldId; includeSuperseded; limit; seriesMode;
+    // Reads all six inputs so any change reloads.
+    instrumentId; fieldId; includeSuperseded; limit; seriesMode; stitchOn;
     load();
   });
   $effect(() => {
     if (instrumentId !== null && dataDir) {
-      obsPath = seriesMode === "raw"
-        ? `${dataDir}\\obs_${instrumentId}_${fieldId ?? "field"}.csv`
-        : `${dataDir}\\adj_${instrumentId}_${fieldId ?? "field"}_${seriesMode}.csv`;
+      obsPath = stitchOn
+        ? `${dataDir}\\stitched_${instrumentId}_${fieldId ?? "field"}_${seriesMode}.csv`
+        : seriesMode === "raw"
+          ? `${dataDir}\\obs_${instrumentId}_${fieldId ?? "field"}.csv`
+          : `${dataDir}\\adj_${instrumentId}_${fieldId ?? "field"}_${seriesMode}.csv`;
       caPath = `${dataDir}\\corp_actions_${instrumentId}.csv`;
     }
   });
@@ -66,13 +89,16 @@
     try {
       corpActions = await api.listCorpActionsFull(instrumentId, includeSuperseded);
       if (fieldId === null) {
+        observations = []; adjSeries = null; stitched = null;
+      } else if (stitchOn) {
         observations = []; adjSeries = null;
+        stitched = await api.listStitched(instrumentId, fieldId, seriesMode, limit);
       } else if (seriesMode === "raw") {
-        adjSeries = null;
+        adjSeries = null; stitched = null;
         observations = await api.listObservations(instrumentId, fieldId,
                                                   includeSuperseded, limit);
       } else {
-        observations = [];
+        observations = []; stitched = null;
         adjSeries = await api.listAdjusted(instrumentId, fieldId, seriesMode, limit);
       }
     } catch (e) { error = String(e); }
@@ -82,9 +108,11 @@
     if (instrumentId === null || fieldId === null) return;
     notice = ""; error = "";
     try {
-      const n = seriesMode === "raw"
-        ? await api.exportObservationsCsv(instrumentId, fieldId, obsPath)
-        : await api.exportAdjustedCsv(instrumentId, fieldId, seriesMode, obsPath);
+      const n = stitchOn
+        ? await api.exportStitchedCsv(instrumentId, fieldId, seriesMode, obsPath)
+        : seriesMode === "raw"
+          ? await api.exportObservationsCsv(instrumentId, fieldId, obsPath)
+          : await api.exportAdjustedCsv(instrumentId, fieldId, seriesMode, obsPath);
       notice = `${n} row(s) written to ${obsPath}`;
     } catch (e) { error = String(e); }
   }
@@ -136,9 +164,15 @@
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={includeSuperseded}
-               disabled={seriesMode !== "raw"} />
+               disabled={seriesMode !== "raw" || stitchOn} />
         show superseded (corrections history)
       </label>
+      {#if canStitch}
+        <label class="check">
+          <input type="checkbox" bind:checked={stitchOn} />
+          extend through confirmed mergers
+        </label>
+      {/if}
     </div>
 
     {#if notice}<p class="thin">{notice}</p>{/if}
@@ -147,6 +181,35 @@
     {#if !classFields.length}
       <p class="hint">No field is defined for this instrument's asset class yet
          (Views tab → Fields).</p>
+    {:else if stitchOn}
+      {#if stitched === null || !stitched.rows.length}
+        <p class="thin">Nothing stored for this instrument &amp; field.</p>
+      {:else}
+        <p class="thin">Spliced across confirmed links, in this instrument's
+           units — derived on read, nothing is stored.<br />
+           Segments: {segReport(stitched)}</p>
+        {#if stitched.stopped}
+          <p class="hint">⚠ extension stopped: {stitched.stopped}</p>
+        {/if}
+        <table>
+          <thead><tr><th>Date</th><th>Value</th><th>Source</th></tr></thead>
+          <tbody>
+            {#each stitched.rows as r}
+              <tr>
+                <td>{r.obs_date}</td>
+                <td class="num">{r.source_instrument_id === instrumentId
+                                 ? r.value : r.value.toFixed(6)}</td>
+                <td class="thin">{r.source_instrument_id === instrumentId
+                                  ? "" : segLabel(r.source_instrument_id)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <div class="exportrow">
+          <input bind:value={obsPath} />
+          <button onclick={exportObs}>Export CSV</button>
+        </div>
+      {/if}
     {:else if seriesMode !== "raw"}
       {#if adjSeries === null || !adjSeries.rows.length}
         <p class="thin">Nothing stored for this instrument &amp; field.</p>

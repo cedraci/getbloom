@@ -184,6 +184,17 @@ export interface ViewRefreshCorpActionsSummary {
   withdrawn: number; unchanged: number; unparsed: number;
 }
 export type AdjustModeStr = "raw" | "splits" | "all";
+export interface StitchRow {
+  obs_date: string; value: number; source_instrument_id: number;
+}
+export interface SegmentInfo {
+  instrument_id: number; label: string | null; from: string | null;
+  to: string | null; link_type: string | null; ratio: number | null;
+  note: string | null;
+}
+export interface StitchedSeries {
+  rows: StitchRow[]; segments: SegmentInfo[]; stopped: string | null;
+}
 export interface AdjRow { obs_date: string; raw: number; adjusted: number; }
 export interface AdjSeries {
   rows: AdjRow[]; factors_used: number; unusable_factors: number;
@@ -278,6 +289,14 @@ export const api = {
   exportAdjustedCsv: (instrumentId: number, fieldId: number, mode: AdjustModeStr,
                       path: string) =>
     invoke<number>("export_adjusted_csv", { instrumentId, fieldId, mode, path }),
+  listStitched: (instrumentId: number, fieldId: number, mode: AdjustModeStr,
+                 limit: number) =>
+    invoke<StitchedSeries>("list_stitched", { instrumentId, fieldId, mode, limit }),
+  hasConfirmedPredecessors: (instrumentId: number) =>
+    invoke<boolean>("has_confirmed_predecessors", { instrumentId }),
+  exportStitchedCsv: (instrumentId: number, fieldId: number, mode: AdjustModeStr,
+                      path: string) =>
+    invoke<number>("export_stitched_csv", { instrumentId, fieldId, mode, path }),
   listCorpActions: (instrumentId: number) =>
     invoke<CorpActionRow[]>("list_corp_actions", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),
