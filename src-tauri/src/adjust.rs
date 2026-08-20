@@ -77,6 +77,83 @@ pub fn apply_chain(kind: SeriesKind, mode: AdjustMode,
     v
 }
 
+// ---------------------------------------------------------------- DB loader
+
+#[derive(Debug, serde::Serialize)]
+pub struct AdjRow {
+    pub obs_date: NaiveDate,
+    pub raw: f64,
+    pub adjusted: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AdjSeries {
+    /// obs_date DESC, current rows only -- a derived series has no
+    /// supersession history of its own.
+    pub rows: Vec<AdjRow>,
+    /// Events admitted by mode and kind (i.e. applied to at least the
+    /// oldest observation).
+    pub factors_used: usize,
+    /// Stored factor rows whose typed columns are incomplete (unparsed
+    /// payload): excluded, and the reader deserves to know.
+    pub unusable_factors: usize,
+}
+
+/// Load the current RAW observations and the current factor chain, and
+/// derive. Read-only; never calls Bloomberg.
+pub async fn adjusted_series(pool: &sqlx::PgPool, instrument_id: i64,
+                             field_id: i64, mode: AdjustMode, limit: i64)
+    -> crate::error::AppResult<AdjSeries>
+{
+    let mnemonic: String = sqlx::query_scalar(
+        "SELECT mnemonic FROM field_def WHERE id = $1")
+        .bind(field_id).fetch_one(pool).await?;
+    let kind = series_kind(&mnemonic);
+
+    let obs: Vec<(NaiveDate, f64)> = sqlx::query_as(
+        "SELECT obs_date, value_num FROM observation
+          WHERE instrument_id = $1 AND field_id = $2
+            AND layer = 'raw' AND system_to = 'infinity'
+            AND value_num IS NOT NULL
+          ORDER BY obs_date DESC
+          LIMIT $3")
+        .bind(instrument_id).bind(field_id).bind(limit.clamp(1, 5000))
+        .fetch_all(pool).await?;
+
+    let factor_rows: Vec<(Option<NaiveDate>, Option<f64>, Option<i16>, Option<i16>)> =
+        sqlx::query_as(
+            "SELECT event_date, amount, operator, flag FROM corp_action
+              WHERE instrument_id = $1 AND source_field = $2
+                AND system_to = 'infinity'
+              ORDER BY event_date ASC NULLS LAST")
+            .bind(instrument_id).bind(crate::corp_actions::FACTOR_FIELD)
+            .fetch_all(pool).await?;
+    let mut events = Vec::with_capacity(factor_rows.len());
+    let mut unusable = 0usize;
+    for row in factor_rows {
+        match row {
+            (Some(event_date), Some(amount), Some(operator), Some(flag)) =>
+                events.push(FactorEvent { event_date, amount, operator, flag }),
+            _ => unusable += 1,
+        }
+    }
+
+    let factors_used = if mode == AdjustMode::Raw { 0 } else {
+        events.iter().filter(|e| match kind {
+            SeriesKind::Volume => e.flag == 3,
+            SeriesKind::Price => mode == AdjustMode::All || e.flag == 3,
+        }).count()
+    };
+
+    let rows = obs.into_iter()
+        .map(|(obs_date, raw)| AdjRow {
+            obs_date, raw,
+            adjusted: apply_chain(kind, mode, obs_date, raw, &events),
+        })
+        .collect();
+    Ok(AdjSeries { rows, factors_used, unusable_factors: unusable })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
