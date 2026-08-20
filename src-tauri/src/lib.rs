@@ -100,6 +100,7 @@ pub fn run() {
             commands::refresh_view_corp_actions,
             commands::list_observations, commands::list_corp_actions_full,
             commands::export_observations_csv, commands::export_corp_actions_csv,
+            commands::list_adjusted, commands::export_adjusted_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

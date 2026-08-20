@@ -84,7 +84,7 @@ pub async fn corp_actions_full(pool: &PgPool, instrument_id: i64,
 
 /// RFC-4180 quoting: wrap when the field carries a comma, quote or newline;
 /// double the inner quotes. No dependency for six lines of logic.
-fn csv_field(s: &str) -> String {
+pub(crate) fn csv_field(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
@@ -92,7 +92,7 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-fn csv_line(fields: &[String]) -> String {
+pub(crate) fn csv_line(fields: &[String]) -> String {
     fields.iter().map(|f| csv_field(f)).collect::<Vec<_>>().join(",")
 }
 

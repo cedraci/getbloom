@@ -154,6 +154,37 @@ pub async fn adjusted_series(pool: &sqlx::PgPool, instrument_id: i64,
     Ok(AdjSeries { rows, factors_used, unusable_factors: unusable })
 }
 
+/// "raw" | "splits" | "all" -- the UI's mode strings.
+pub fn parse_mode(s: &str) -> crate::error::AppResult<AdjustMode> {
+    match s {
+        "raw" => Ok(AdjustMode::Raw),
+        "splits" => Ok(AdjustMode::Splits),
+        "all" => Ok(AdjustMode::All),
+        other => Err(crate::error::AppError::Validation(format!(
+            "unknown adjustment mode '{other}'"))),
+    }
+}
+
+/// Full-depth (5000) current series to CSV; returns rows written.
+pub async fn export_adjusted_csv(pool: &sqlx::PgPool, instrument_id: i64,
+                                 field_id: i64, mode: AdjustMode,
+                                 path: &std::path::Path)
+    -> crate::error::AppResult<u64>
+{
+    let s = adjusted_series(pool, instrument_id, field_id, mode, 5000).await?;
+    let mut out = String::from("obs_date,raw,adjusted\n");
+    for r in &s.rows {
+        out.push_str(&crate::dataview::csv_line(&[
+            r.obs_date.to_string(),
+            r.raw.to_string(),
+            r.adjusted.to_string(),
+        ]));
+        out.push('\n');
+    }
+    std::fs::write(path, out)?;
+    Ok(s.rows.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

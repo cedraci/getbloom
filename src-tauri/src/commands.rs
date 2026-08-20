@@ -578,6 +578,25 @@ pub async fn list_corp_actions(state: State<'_, AppState>, instrument_id: i64)
 // Data tab (read-only; never calls Bloomberg)
 // ---------------------------------------------------------------------------
 
+/// P4: derived on read from RAW observations + the factor chain. Never
+/// stored, never a Bloomberg call.
+#[tauri::command]
+pub async fn list_adjusted(state: State<'_, AppState>, instrument_id: i64,
+                           field_id: i64, mode: String, limit: i64)
+    -> Result<crate::adjust::AdjSeries, AppError> {
+    let m = crate::adjust::parse_mode(&mode)?;
+    crate::adjust::adjusted_series(&state.pool, instrument_id, field_id, m, limit).await
+}
+
+#[tauri::command]
+pub async fn export_adjusted_csv(state: State<'_, AppState>, instrument_id: i64,
+                                 field_id: i64, mode: String, path: String)
+    -> Result<u64, AppError> {
+    let m = crate::adjust::parse_mode(&mode)?;
+    crate::adjust::export_adjusted_csv(&state.pool, instrument_id, field_id, m,
+                                       &PathBuf::from(path)).await
+}
+
 #[tauri::command]
 pub async fn list_observations(state: State<'_, AppState>, instrument_id: i64,
                                field_id: i64, include_superseded: bool, limit: i64)

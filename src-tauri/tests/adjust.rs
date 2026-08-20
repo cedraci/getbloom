@@ -87,6 +87,25 @@ async fn the_series_adjusts_only_observations_before_the_event() {
 
 #[tokio::test]
 #[ignore = "requires postgres"]
+async fn the_csv_export_matches_the_derived_series() {
+    let pool = common::pool().await;
+    let (iid, fid) = scaffold(&pool, "ADJCSV").await;
+    insert_factor(&pool, iid, "2020-08-31", 4.0, 1, 3).await;
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("{}.csv", uniq("adj")));
+    let n = adjust::export_adjusted_csv(&pool, iid, fid, AdjustMode::All, &path)
+        .await.unwrap();
+    assert_eq!(n, 2);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "header + 2 rows");
+    assert_eq!(lines[0], "obs_date,raw,adjusted");
+    assert_eq!(lines[2], "2020-08-28,400,100");
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
 async fn raw_mode_returns_the_stored_values_untouched() {
     let pool = common::pool().await;
     let (iid, fid) = scaffold(&pool, "ADJTWO").await;
