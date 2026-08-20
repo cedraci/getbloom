@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { api, type AliasRow, type AttrRow } from "./api";
+  import { api, type AliasRow, type AttrRow, type CorpActionRow } from "./api";
 
   let { instrumentId, onclose }: { instrumentId: number; onclose: () => void } = $props();
 
   let aliases = $state<AliasRow[]>([]);
   let attrs = $state<AttrRow[]>([]);
+  let corpActions = $state<CorpActionRow[]>([]);
   let error = $state("");
 
   // The database's open-ended sentinel (see store::forever()) is a real,
@@ -25,9 +26,25 @@
     try {
       aliases = await api.instrumentAliases(instrumentId);
       attrs = await api.instrumentAttrs(instrumentId);
+      corpActions = await api.listCorpActions(instrumentId);
     } catch (e) { error = String(e); }
   }
   $effect(() => { load(); });
+
+  let caBusy = $state(false);
+  let caNotice = $state("");
+
+  async function refreshCorpActions() {
+    error = ""; caNotice = "";
+    caBusy = true;
+    try {
+      const s = await api.refreshCorpActions(instrumentId);
+      caNotice = `${s.inserted} new, ${s.amended} amended, ${s.withdrawn} withdrawn, `
+        + `${s.unchanged} unchanged` + (s.unparsed ? `, ${s.unparsed} unparsed` : "") + ".";
+      corpActions = await api.listCorpActions(instrumentId);
+    } catch (e) { error = String(e); }
+    finally { caBusy = false; }
+  }
 
   async function fetchHistory() {
     error = ""; histNotice = "";
@@ -86,6 +103,36 @@
         {histBusy ? "Asking Bloomberg…" : "Fetch identifier history"}</button>
     </div>
     {#if histNotice}<p class="thin">{histNotice}</p>{/if}
+
+    <h4>Corporate actions</h4>
+    <p class="thin">The factor chain (splits and cash dividends as adjustment
+       factors) and dividend history, stored raw so adjusted series can be
+       derived and re-derived later. Refresh is explicit and costs 2 hits.</p>
+    <button onclick={refreshCorpActions} disabled={caBusy}>
+      {caBusy ? "Asking Bloomberg…" : "Refresh from Bloomberg (2 hits)"}</button>
+    {#if caNotice}<p class="thin">{caNotice}</p>{/if}
+    {#if corpActions.length}
+      <table>
+        <thead><tr><th>Field</th><th>Event date</th><th>Amount</th>
+                   <th>Op/Flag</th><th>Type</th><th>Status</th>
+                   <th>Pay date</th></tr></thead>
+        <tbody>
+          {#each corpActions as c}
+            <tr>
+              <td class="thin">{c.source_field === "EQY_DVD_ADJUST_FACT" ? "factor" : "dividend"}</td>
+              <td>{c.event_date ?? "—"}{#if !c.fully_parsed_key} <span title="row stored verbatim; columns not recognised">⚠ unparsed</span>{/if}</td>
+              <td>{c.amount ?? "—"}</td>
+              <td>{c.operator != null || c.flag != null ? `${c.operator ?? "—"}/${c.flag ?? "—"}` : "—"}</td>
+              <td>{c.dvd_type ?? "—"}</td>
+              <td>{c.amount_status ?? "—"}</td>
+              <td>{c.pay_date ?? "—"}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {:else}
+      <p class="thin">Nothing stored yet.</p>
+    {/if}
 
     <h4>Attributes</h4>
     <table>

@@ -159,6 +159,16 @@ export interface AttrRow {
   id: number; instrument_id: number; attr: string; value: string;
   valid_from: string; valid_to: string; source: string;
 }
+export interface RefreshCorpActionsSummary {
+  inserted: number; amended: number; withdrawn: number;
+  unchanged: number; unparsed: number;
+}
+export interface CorpActionRow {
+  id: number; source_field: string; event_date: string | null;
+  amount: number | null; operator: number | null; flag: number | null;
+  dvd_type: string | null; amount_status: string | null;
+  pay_date: string | null; fully_parsed_key: boolean;
+}
 
 export interface AssetRef { id: number; label: string; security: string; }
 export interface AddRow {
@@ -222,6 +232,10 @@ export const api = {
     invoke<AliasRow[]>("instrument_aliases", { instrumentId }),
   instrumentAttrs: (instrumentId: number) =>
     invoke<AttrRow[]>("instrument_attrs", { instrumentId }),
+  refreshCorpActions: (instrumentId: number) =>
+    invoke<RefreshCorpActionsSummary>("refresh_corp_actions", { instrumentId }),
+  listCorpActions: (instrumentId: number) =>
+    invoke<CorpActionRow[]>("list_corp_actions", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),
   createField: (assetClassId: number, mnemonic: string, label: string, valueKind: string,
                 bbgFtype: string | null = null, bbgDatatype: string | null = null,

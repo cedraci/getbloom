@@ -147,19 +147,29 @@ async fn load_view(pool: &PgPool, view_id: i64, only: Option<&[i64]>) -> AppResu
             bdp_security: security,
         });
     }
-    Ok(Loaded {
-        view_name: view.name,
-        assets,
-        fields: fields_db
-            .iter()
-            .map(|f| FetchField {
-                field_id: f.id,
-                asset_class_id: f.asset_class_id,
-                mnemonic: f.mnemonic.clone(),
-                value_kind: f.value_kind.clone(),
-            })
-            .collect(),
-    })
+    let mut fields = Vec::with_capacity(fields_db.len());
+    for f in &fields_db {
+        if f.bbg_ftype.as_deref() == Some("BulkFormat") {
+            // plan_requests would coerce a table into one meaningless string
+            // (the sidecar docstring's exact warning). Skipped and said out
+            // loud; the data has its own path: the corporate-actions refresh.
+            sqlx::query(
+                "INSERT INTO ingest_issue (run_id, field_id, severity, code, detail)
+                 VALUES (NULL, $1, 'warn', 'bulk_field_skipped', $2)")
+                .bind(f.id)
+                .bind(format!("bulk field {} skipped by the run pipeline; use \
+                               the corporate-actions refresh instead", f.mnemonic))
+                .execute(pool).await?;
+            continue;
+        }
+        fields.push(FetchField {
+            field_id: f.id,
+            asset_class_id: f.asset_class_id,
+            mnemonic: f.mnemonic.clone(),
+            value_kind: f.value_kind.clone(),
+        });
+    }
+    Ok(Loaded { view_name: view.name, assets, fields })
 }
 
 async fn set_status(pool: &PgPool, run_id: i64, status: &str) -> AppResult<()> {

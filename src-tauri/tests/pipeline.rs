@@ -509,3 +509,43 @@ async fn a_silent_weekday_inside_a_range_with_neighbours_is_non_trading() {
         .bind(iid).bind(tue).fetch_one(&pool).await.unwrap();
     assert_eq!(src, "range_inference");
 }
+
+/// A BulkFormat field configured on a view must be SKIPPED by the EOD
+/// pipeline (with an ingest_issue naming it), not stringified -- the exact
+/// failure the sidecar's parse_bulk_message docstring warns about.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_bulk_field_on_a_view_is_skipped_with_an_issue_not_stringified() {
+    let pool = common::pool().await;
+    let (iid, _fid, vid, _rid) = scaffold(&pool, "BULKG").await;
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM book_entry WHERE instrument_id = $1")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    let bulk_fid: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind, bbg_ftype)
+         VALUES ($1,'DVD_HIST_ALL_WITH_AMT_STATUS','Dividends','text','BulkFormat')
+         RETURNING id").bind(class).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
+        .bind(vid).bind(bulk_fid).execute(&pool).await.unwrap();
+
+    struct Silent;
+    impl DataFetcher for Silent {
+        async fn fetch(&self, req: &FetchRequest, _a: Option<&Path>)
+            -> AppResult<FetchOutcome> {
+            assert!(req.fields.iter().all(|f| f.mnemonic != "DVD_HIST_ALL_WITH_AMT_STATUS"),
+                    "a bulk field must never reach the fetcher");
+            Ok(FetchOutcome::default())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = PipelineConfig { data_dir: dir.path().to_path_buf(),
+        python_path: "python".into(), script_path: "scripts/blp_fetch.py".into(),
+        request_timeout_s: 5, soft_limit: 100_000 };
+    orchestrator::run_eod_with(&pool, &cfg, &Silent, vid, "manual",
+                               d("2026-08-18"), true).await.unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE code = 'bulk_field_skipped' AND detail LIKE '%DVD_HIST_ALL%'")
+        .fetch_one(&pool).await.unwrap();
+    assert!(n >= 1, "the skip must be visible, not silent");
+}

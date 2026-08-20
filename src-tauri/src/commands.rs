@@ -551,3 +551,25 @@ pub async fn instrument_attrs(state: State<'_, AppState>, instrument_id: i64)
     -> Result<Vec<crate::instrument::store::Attr>, AppError> {
     crate::instrument::store::attrs_history(&state.pool, instrument_id).await
 }
+
+// ---------------------------------------------------------------------------
+// Corporate actions (P3)
+// ---------------------------------------------------------------------------
+
+/// Explicit, costed user action (2 hits, charged at the wire seam under
+/// purpose 'corp_actions'), same pattern as identifier history: never
+/// automatic, never scheduled in P3.
+#[tauri::command]
+pub async fn refresh_corp_actions(state: State<'_, AppState>, instrument_id: i64)
+    -> Result<crate::corp_actions::RefreshSummary, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
+    let as_of = chrono::Local::now().date_naive();
+    crate::corp_actions::refresh(&state.pool, &fetcher, instrument_id, as_of).await
+}
+
+#[tauri::command]
+pub async fn list_corp_actions(state: State<'_, AppState>, instrument_id: i64)
+    -> Result<Vec<crate::corp_actions::ActionRow>, AppError> {
+    crate::corp_actions::list_current(&state.pool, instrument_id).await
+}
