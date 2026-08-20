@@ -133,6 +133,16 @@ pub struct SidecarProblem {
     pub detail: String,
 }
 
+/// One security × one bulk (table-valued) field, rows verbatim from the
+/// sidecar's `parse_bulk_message`. Column names are Bloomberg's own, spaces
+/// and all; nothing here interprets them (P3's corp-action ingester does).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidecarBulkRows {
+    pub security: String,
+    pub field: String,
+    pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SidecarResponse {
     pub status: String,
@@ -144,6 +154,8 @@ pub struct SidecarResponse {
     pub observations: Vec<SidecarObservation>,
     #[serde(default)]
     pub problems: Vec<SidecarProblem>,
+    #[serde(default)]
+    pub bulk_rows: Vec<SidecarBulkRows>,
 }
 
 // ------------------------------------------------------------ planning
@@ -560,6 +572,25 @@ mod tests {
         assert_eq!(out.problems[0].code, "type_mismatch");
         assert_eq!(out.problems[0].instrument_id, Some(1));
         assert_eq!(out.problems[0].field_id, Some(100));
+    }
+
+    /// The sidecar has emitted `bulk_rows` since Task 5 of P1; the Rust side
+    /// dropped it on the floor because SidecarResponse had no field for it.
+    /// P3's corporate-action ingestion reads it, so the wire must carry it.
+    #[test]
+    fn sidecar_bulk_rows_are_carried_not_dropped() {
+        let r = resp(r#"{"status":"ok","observations":[],"problems":[],
+            "bulk_rows":[{"security":"AAPL US Equity","field":"EQY_DVD_ADJUST_FACT",
+              "rows":[{"Adjustment Date":"2020-08-31","Adjustment Factor":4.0,
+                       "Adjustment Factor Operator Type":1.0,
+                       "Adjustment Factor Flag":3.0}]}]}"#);
+        assert_eq!(r.bulk_rows.len(), 1);
+        assert_eq!(r.bulk_rows[0].field, "EQY_DVD_ADJUST_FACT");
+        assert_eq!(r.bulk_rows[0].rows[0]["Adjustment Factor"], 4.0);
+
+        // A response without the key (old fixture, EOD run) still parses.
+        let legacy = resp(r#"{"status":"ok","observations":[],"problems":[]}"#);
+        assert!(legacy.bulk_rows.is_empty());
     }
 
     #[test]
