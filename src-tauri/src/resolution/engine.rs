@@ -697,3 +697,101 @@ pub async fn reject_review(pool: &PgPool, review_id: i64, note: &str) -> AppResu
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Post-run recovery of dead securities
+// ---------------------------------------------------------------------------
+
+/// One probe per instrument per this many days: a permanently dead
+/// instrument (delisted, no successor) would otherwise cost 12 hits every
+/// single day forever.
+const AUTO_RERESOLVE_COOLDOWN_DAYS: i32 = 7;
+
+async fn note_auto_issue(pool: &PgPool, run_id: i64, iid: i64, code: &str,
+                         detail: &str) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
+         VALUES ($1,$2,'warn',$3,$4)")
+        .bind(run_id).bind(iid).bind(code).bind(detail)
+        .execute(pool).await?;
+    Ok(())
+}
+
+/// After a run, re-point instruments whose security Bloomberg rejected.
+///
+/// The dead string cannot be resolved -- it is dead. The FIGI can: it is the
+/// one identifier a rename never touches. `/bbgid/<figi>` is the
+/// parsekeyable form and needs no yellow key. The answer lands through
+/// `reconcile_identity`, i.e. exactly the close-and-insert a manual
+/// re-resolution performs; nothing here can mint a second instrument.
+///
+/// Called only from the LIVE wrappers (`orchestrator::run_eod`,
+/// `run_backfill`); every outcome, including the skips, is written to
+/// `ingest_issue` so the run screen shows what happened and the cooldown has
+/// a record to key on. Returns how many instruments were re-pointed.
+pub async fn auto_reresolve_invalid<F: MasterFetcher>(
+    pool: &PgPool, fetcher: &F, run_id: i64, as_of: NaiveDate) -> AppResult<u32>
+{
+    let dead: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT instrument_id FROM ingest_issue
+          WHERE run_id = $1 AND code = 'invalid_security'
+            AND instrument_id IS NOT NULL")
+        .bind(run_id).fetch_all(pool).await?;
+
+    let mut repointed = 0u32;
+    for iid in dead {
+        let probed_recently: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ingest_issue
+              WHERE instrument_id = $1 AND code LIKE 'auto_reresolve%'
+                AND created_at > now() - make_interval(days => $2)")
+            .bind(iid).bind(AUTO_RERESOLVE_COOLDOWN_DAYS).fetch_one(pool).await?;
+        if probed_recently > 0 {
+            continue;
+        }
+
+        let figi: Option<String> = sqlx::query_scalar(
+            "SELECT id_bb_global FROM instrument WHERE instrument_id = $1")
+            .bind(iid).fetch_one(pool).await?;
+        let Some(figi) = figi else {
+            note_auto_issue(pool, run_id, iid, "auto_reresolve_skipped",
+                            "no FIGI on record").await?;
+            continue;
+        };
+
+        let probe = format!("/bbgid/{figi}");
+        let answered = match fetcher.identity(&[probe.clone()]).await {
+            Ok(a) => a,
+            Err(e) => {
+                note_auto_issue(pool, run_id, iid, "auto_reresolve_failed",
+                                &format!("identity probe failed: {e}")).await?;
+                continue;
+            }
+        };
+        let Some(block) = answered.parsed.first() else {
+            note_auto_issue(pool, run_id, iid, "auto_reresolve_no_answer",
+                            &format!("Bloomberg returned nothing for {probe}")).await?;
+            continue;
+        };
+        // The probe asked about OUR figi; an answer wearing another one (or
+        // none) must not be reconciled onto this instrument.
+        if block.figi.as_deref() != Some(figi.as_str()) {
+            note_auto_issue(pool, run_id, iid, "auto_reresolve_mismatch",
+                            &format!("probe {probe} answered with figi {:?}",
+                                     block.figi)).await?;
+            continue;
+        }
+
+        let input = ResolveInput {
+            raw: probe.clone(), yellow_key: String::new(),
+            hints: Hints::default(), as_of, decided_by: "auto".into(),
+        };
+        let decision_id = record_decision(pool, &input, &probe, "auto_reresolve",
+                                          Some(iid), &serde_json::json!([]),
+                                          Some(&answered.raw)).await?;
+        reconcile_identity(pool, iid, block, decision_id, as_of).await?;
+        note_auto_issue(pool, run_id, iid, "auto_reresolve",
+                        &format!("re-pointed to {}", block.security)).await?;
+        repointed += 1;
+    }
+    Ok(repointed)
+}

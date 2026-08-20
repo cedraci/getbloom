@@ -912,3 +912,119 @@ async fn reject_review_refuses_a_review_that_is_already_rejected() {
         .bind(review_id).fetch_one(&pool).await.unwrap();
     assert_eq!(note, "first rejection", "the original note is not overwritten");
 }
+
+// ---------------------------------------------------------------------------
+// auto_reresolve_invalid (post-run dead-security recovery)
+// ---------------------------------------------------------------------------
+
+/// Instrument wearing `figi` (write-once id + alias) and a live but
+/// soon-dead bdp_security; a run row + an invalid_security issue against it.
+async fn scaffold_dead_run(pool: &sqlx::PgPool, figi: Option<&str>, old_sec: &str)
+    -> (i64, i64) {
+    let inst = store::create(pool).await.unwrap();
+    let iid = inst.instrument_id;
+    if let Some(f) = figi {
+        store::set_bloomberg_ids(pool, iid, Some(f), None).await.unwrap();
+    }
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, iid, &NewAlias {
+        id_type: "bdp_security".into(), value: old_sec.into(),
+        exch_code: Some("US".into()), valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    if let Some(f) = figi {
+        store::insert_alias(&mut tx, iid, &NewAlias {
+            id_type: "figi".into(), value: f.into(),
+            exch_code: None, valid_from: d("2000-01-03"), valid_to: None,
+            source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+        }).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    let run_id = insert_invalid_security_run(pool, iid).await;
+    (iid, run_id)
+}
+
+async fn insert_invalid_security_run(pool: &sqlx::PgPool, iid: i64) -> i64 {
+    let vname = uniq("autoreres");
+    let vid: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(&vname).fetch_one(pool).await.unwrap();
+    let run_id: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'eod','scheduled','partial') RETURNING id")
+        .bind(vid).fetch_one(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
+         VALUES ($1,$2,'warn','invalid_security','Unknown/Invalid Security')")
+        .bind(run_id).bind(iid).execute(pool).await.unwrap();
+    run_id
+}
+
+/// A run that saw invalid_security for an instrument probes Bloomberg by the
+/// instrument's FIGI and lands the rename through reconcile_identity: the
+/// dead period closes at as_of, the new one opens, series stay on the same
+/// instrument_id.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_invalid_security_run_triggers_a_figi_probe_that_lands_the_rename() {
+    let pool = common::pool().await;
+    let figi = uniq("BBGAUTO");
+    let old_sec = format!("{} US Equity", uniq("DEADT"));
+    let new_sec = format!("{} US Equity", uniq("NEWT"));
+    let (iid, run_id) = scaffold_dead_run(&pool, Some(&figi), &old_sec).await;
+
+    let mock = MockMasterFetcher {
+        identity_raw: serde_json::json!([{"securityData": [{
+            "security": new_sec, "fieldExceptions": [], "sequenceNumber": 0,
+            "fieldData": {"ID_BB_GLOBAL": figi, "NAME": "RENAMED CO",
+                          "EXCH_CODE": "US", "CRNCY": "USD",
+                          "MARKET_SECTOR_DES": "Equity"}}]}]),
+        ..Default::default()
+    };
+    let as_of = chrono::Local::now().date_naive();
+    let n = engine::auto_reresolve_invalid(&pool, &mock, run_id, as_of).await.unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(mock.call_count(), 1, "exactly one identity probe");
+
+    let secs: Vec<(String, NaiveDate)> = sqlx::query_as(
+        "SELECT value, valid_to FROM instrument_alias
+          WHERE instrument_id = $1 AND id_type = 'bdp_security'
+            AND system_to = 'infinity' ORDER BY valid_from")
+        .bind(iid).fetch_all(&pool).await.unwrap();
+    assert_eq!(secs.len(), 2, "rename = two periods: {secs:?}");
+    assert_eq!(secs[0].0, old_sec);
+    assert_eq!(secs[0].1, as_of, "old period closes at discovery");
+    assert_eq!(secs[1].0, new_sec);
+}
+
+/// The cooldown: a second run the same week must not spend another 12 hits
+/// on the same instrument.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_probed_instrument_is_not_probed_again_within_the_cooldown() {
+    let pool = common::pool().await;
+    let figi = uniq("BBGCOOL");
+    let old_sec = format!("{} US Equity", uniq("DEADC"));
+    let (iid, run_id) = scaffold_dead_run(&pool, Some(&figi), &old_sec).await;
+    let mock = MockMasterFetcher::default(); // empty identity answer
+    let as_of = chrono::Local::now().date_naive();
+    engine::auto_reresolve_invalid(&pool, &mock, run_id, as_of).await.unwrap();
+    assert_eq!(mock.call_count(), 1);
+    // Same instrument, a later run, same week:
+    let run2 = insert_invalid_security_run(&pool, iid).await;
+    engine::auto_reresolve_invalid(&pool, &mock, run2, as_of).await.unwrap();
+    assert_eq!(mock.call_count(), 1, "cooldown must swallow the second probe");
+}
+
+/// No FIGI, no probe -- there is nothing stable to ask Bloomberg about.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_instrument_without_a_figi_is_skipped_not_probed() {
+    let pool = common::pool().await;
+    let old_sec = format!("{} US Equity", uniq("NOFIG"));
+    let (_iid, run_id) = scaffold_dead_run(&pool, None, &old_sec).await;
+    let mock = MockMasterFetcher::default();
+    let n = engine::auto_reresolve_invalid(
+        &pool, &mock, run_id, chrono::Local::now().date_naive()).await.unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(mock.call_count(), 0, "no FIGI means no Bloomberg call at all");
+}

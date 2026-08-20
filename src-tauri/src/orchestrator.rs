@@ -272,7 +272,26 @@ pub async fn run_eod(
     obs_date: NaiveDate,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
-    run_eod_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, trigger, obs_date, confirmed).await
+    let result = run_eod_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, trigger,
+                              obs_date, confirmed).await;
+    auto_reresolve_after(pool, cfg, &result).await;
+    result
+}
+
+/// Live wrappers only: after a completed run, try to re-point instruments
+/// whose security came back invalid_security (a rename discovered the hard
+/// way). Advisory -- a recovery failure must not fail a run that already
+/// ingested its data. The `_with` variants never call this, so every
+/// mock-fetcher test is untouched.
+async fn auto_reresolve_after(pool: &PgPool, cfg: &PipelineConfig,
+                              result: &AppResult<RunOutcome>) {
+    if let Ok(RunOutcome::Completed { run_id, .. }) = result {
+        let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+        if let Err(e) = crate::resolution::engine::auto_reresolve_invalid(
+            pool, &mf, *run_id, chrono::Local::now().date_naive()).await {
+            eprintln!("auto re-resolve after run {run_id} failed: {e}");
+        }
+    }
 }
 
 pub async fn run_eod_with<F: DataFetcher>(
@@ -306,8 +325,10 @@ pub async fn run_backfill(
     instrument_ids: Option<&[i64]>,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
-    run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end,
-                      instrument_ids, confirmed).await
+    let result = run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end,
+                                   instrument_ids, confirmed).await;
+    auto_reresolve_after(pool, cfg, &result).await;
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
