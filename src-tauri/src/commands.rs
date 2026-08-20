@@ -573,3 +573,14 @@ pub async fn list_corp_actions(state: State<'_, AppState>, instrument_id: i64)
     -> Result<Vec<crate::corp_actions::ActionRow>, AppError> {
     crate::corp_actions::list_current(&state.pool, instrument_id).await
 }
+
+/// Whole-view refresh: batched Bloomberg calls (100 securities each), 2 hits
+/// per instrument, charged at the wire seam. Still an explicit user action.
+#[tauri::command]
+pub async fn refresh_view_corp_actions(state: State<'_, AppState>, view_id: i64)
+    -> Result<crate::corp_actions::ViewRefreshSummary, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
+    let as_of = chrono::Local::now().date_naive();
+    crate::corp_actions::refresh_view(&state.pool, &fetcher, view_id, as_of).await
+}

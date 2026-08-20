@@ -163,6 +163,10 @@ export interface RefreshCorpActionsSummary {
   inserted: number; amended: number; withdrawn: number;
   unchanged: number; unparsed: number;
 }
+export interface ViewRefreshCorpActionsSummary {
+  instruments: number; skipped: number; inserted: number; amended: number;
+  withdrawn: number; unchanged: number; unparsed: number;
+}
 export interface CorpActionRow {
   id: number; source_field: string; event_date: string | null;
   amount: number | null; operator: number | null; flag: number | null;
@@ -234,6 +238,8 @@ export const api = {
     invoke<AttrRow[]>("instrument_attrs", { instrumentId }),
   refreshCorpActions: (instrumentId: number) =>
     invoke<RefreshCorpActionsSummary>("refresh_corp_actions", { instrumentId }),
+  refreshViewCorpActions: (viewId: number) =>
+    invoke<ViewRefreshCorpActionsSummary>("refresh_view_corp_actions", { viewId }),
   listCorpActions: (instrumentId: number) =>
     invoke<CorpActionRow[]>("list_corp_actions", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),

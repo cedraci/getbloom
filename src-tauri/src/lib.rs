@@ -95,6 +95,7 @@ pub fn run() {
             commands::search_local, commands::search_bloomberg,
             commands::instrument_aliases, commands::instrument_attrs,
             commands::refresh_corp_actions, commands::list_corp_actions,
+            commands::refresh_view_corp_actions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

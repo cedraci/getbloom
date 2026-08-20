@@ -87,6 +87,26 @@
       : [...selectedFieldIds, id];
   }
 
+  // Whole-view corporate-actions refresh: batched (100 securities per
+  // Bloomberg call), 2 hits per instrument, still an explicit user action.
+  let caBusyViewId = $state<number | null>(null);
+  let caNotice = $state("");
+
+  async function refreshViewCorpActions(viewId: number) {
+    error = ""; caNotice = "";
+    caBusyViewId = viewId;
+    try {
+      const s = await api.refreshViewCorpActions(viewId);
+      const name = views.find((v) => v.id === viewId)?.name ?? viewId;
+      caNotice = `Corporate actions for "${name}": ${s.instruments} instrument(s) — `
+        + `${s.inserted} new, ${s.amended} amended, ${s.withdrawn} withdrawn, `
+        + `${s.unchanged} unchanged`
+        + (s.unparsed ? `, ${s.unparsed} unparsed` : "")
+        + (s.skipped ? `, ${s.skipped} skipped (no current security)` : "") + ".";
+    } catch (e) { error = String(e); }
+    finally { caBusyViewId = null; }
+  }
+
   async function saveAssignments() {
     if (selectedViewId === null) return;
     try {
@@ -120,13 +140,14 @@
 {#if error}<p class="error">{error}</p>{/if}
 <section>
   <h2>Views</h2>
+  {#if caNotice}<p class="note">{caNotice}</p>{/if}
   <form onsubmit={(e) => { e.preventDefault(); addView(); }}>
     <input bind:value={newViewName} placeholder="View name" required />
     <input bind:value={newViewDescription} placeholder="Description" />
     <button type="submit">Add view</button>
   </form>
   <table>
-    <thead><tr><th>Name</th><th>Description</th><th>Estimate</th><th></th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Description</th><th>Estimate</th><th></th><th></th><th></th></tr></thead>
     <tbody>
       {#each views as v}
         <tr class:selected={selectedViewId === v.id}>
@@ -138,6 +159,10 @@
             {/if}
           </td>
           <td><button onclick={() => selectView(v.id)}>Select</button></td>
+          <td><button onclick={() => refreshViewCorpActions(v.id)}
+                      disabled={caBusyViewId !== null}
+                      title="Fetch splits & dividend history for every member (2 Bloomberg hits per instrument)">
+                {caBusyViewId === v.id ? "Asking Bloomberg…" : "Corp actions"}</button></td>
           <td><button class="x" title="Remove view"
                       onclick={() => (pending = { kind: "view", id: v.id })}>&times;</button></td>
         </tr>
