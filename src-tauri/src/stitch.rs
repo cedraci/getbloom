@@ -233,6 +233,26 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
     Ok(StitchedSeries { rows, segments, stopped })
 }
 
+/// Full-depth stitched series to CSV; returns rows written.
+pub async fn export_stitched_csv(pool: &sqlx::PgPool, instrument_id: i64,
+                                 field_id: i64, mode: crate::adjust::AdjustMode,
+                                 path: &std::path::Path)
+    -> crate::error::AppResult<u64>
+{
+    let s = stitched_series(pool, instrument_id, field_id, mode, 5000).await?;
+    let mut out = String::from("obs_date,value,source_instrument_id\n");
+    for r in &s.rows {
+        out.push_str(&crate::dataview::csv_line(&[
+            r.obs_date.to_string(),
+            r.value.to_string(),
+            r.source_instrument_id.to_string(),
+        ]));
+        out.push('\n');
+    }
+    std::fs::write(path, out)?;
+    Ok(s.rows.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

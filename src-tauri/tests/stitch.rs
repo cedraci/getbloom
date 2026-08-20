@@ -93,6 +93,23 @@ async fn a_confirmed_merger_extends_the_survivor_backward() {
 
 #[tokio::test]
 #[ignore = "requires postgres"]
+async fn the_stitched_csv_carries_the_spliced_values() {
+    let pool = common::pool().await;
+    let (a, b, fid) = scaffold(&pool, "STCSV").await;
+    link(&pool, a, b, "merger", "2026-01-12", true).await;
+    let path = std::env::temp_dir().join(format!("{}.csv", uniq("stitch")));
+    let n = stitch::export_stitched_csv(&pool, b, fid, AdjustMode::Raw, &path)
+        .await.unwrap();
+    assert_eq!(n, 4);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "obs_date,value,source_instrument_id");
+    assert_eq!(lines[3], format!("2026-01-05,25,{a}"));
+    std::fs::remove_file(&path).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
 async fn an_unconfirmed_link_is_never_followed() {
     let pool = common::pool().await;
     let (a, b, fid) = scaffold(&pool, "STTWO").await;
