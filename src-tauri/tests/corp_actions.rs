@@ -133,3 +133,103 @@ async fn unparsed_rows_are_stored_flagged_and_counted() {
         .bind(iid).fetch_one(&pool).await.unwrap();
     assert_eq!(issues, 1);
 }
+
+// ---------------------------------------------------------------------------
+// refresh_view: a whole set of stocks, batched
+// ---------------------------------------------------------------------------
+
+async fn view_with(pool: &sqlx::PgPool, instrument_ids: &[i64]) -> i64 {
+    let vname = uniq("caview");
+    let vid: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(&vname).fetch_one(pool).await.unwrap();
+    let class_name = uniq("CAClass");
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name) VALUES ($1) RETURNING id")
+        .bind(&class_name).fetch_one(pool).await.unwrap();
+    for iid in instrument_ids {
+        sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                     VALUES ($1,$2,$3)")
+            .bind(iid).bind(class).bind(format!("inst{iid}"))
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+            .bind(vid).bind(iid).execute(pool).await.unwrap();
+    }
+    vid
+}
+
+fn factor_table(sec: &str, date: &str, factor: f64) -> serde_json::Value {
+    serde_json::json!({"security": sec, "field": "EQY_DVD_ADJUST_FACT",
+        "rows": [{"Adjustment Date": date, "Adjustment Factor": factor,
+                  "Adjustment Factor Operator Type": 1.0,
+                  "Adjustment Factor Flag": 3.0}]})
+}
+
+/// Two members, ONE batched Bloomberg call, each instrument diffs its own
+/// tables out of the shared response.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_view_refresh_covers_every_member_in_one_batched_call() {
+    let pool = common::pool().await;
+    let (a, sec_a) = instrument_with_security(&pool, "CAVA").await;
+    let (b, sec_b) = instrument_with_security(&pool, "CAVB").await;
+    let vid = view_with(&pool, &[a, b]).await;
+
+    let mock = mock_with(serde_json::json!([
+        factor_table(&sec_a, "2020-08-31", 4.0),
+        factor_table(&sec_b, "2014-06-09", 7.0)]));
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    assert_eq!(s.instruments, 2);
+    assert_eq!(s.inserted, 2);
+    assert_eq!(s.skipped, 0);
+    assert_eq!(mock.call_count(), 1, "two members, ONE batched call");
+    for iid in [a, b] {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM corp_action WHERE instrument_id = $1")
+            .bind(iid).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "instrument {iid} got its own row");
+    }
+}
+
+/// A member with no current security is skipped and reported -- and its dead
+/// string never reaches the Bloomberg request.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_member_without_a_security_is_skipped_and_reported() {
+    let pool = common::pool().await;
+    let (a, sec_a) = instrument_with_security(&pool, "CAVC").await;
+    let (b, _sec_b) = instrument_with_security(&pool, "CAVD").await;
+    // Close b's only security in the past: nothing is valid today.
+    sqlx::query("UPDATE instrument_alias SET valid_to = '2001-01-01'
+                  WHERE instrument_id = $1 AND id_type = 'bdp_security'")
+        .bind(b).execute(&pool).await.unwrap();
+    let vid = view_with(&pool, &[a, b]).await;
+
+    let mock = mock_with(serde_json::json!([factor_table(&sec_a, "2020-08-31", 4.0)]));
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    assert_eq!((s.instruments, s.skipped), (1, 1));
+    let calls = mock.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].contains(&sec_a) && !calls[0].contains("CAVD"),
+            "the dead member must not be requested: {calls:?}");
+    let issues: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'corp_actions_skipped'")
+        .bind(b).fetch_one(&pool).await.unwrap();
+    assert_eq!(issues, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_view_refresh_is_idempotent() {
+    let pool = common::pool().await;
+    let (a, sec_a) = instrument_with_security(&pool, "CAVE").await;
+    let vid = view_with(&pool, &[a]).await;
+    let mock = mock_with(serde_json::json!([factor_table(&sec_a, "2020-08-31", 4.0)]));
+    corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    let s2 = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    assert_eq!((s2.inserted, s2.unchanged), (0, 1), "second pass changes nothing");
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM corp_action WHERE instrument_id = $1")
+        .bind(a).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1);
+}

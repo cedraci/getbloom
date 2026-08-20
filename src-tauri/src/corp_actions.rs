@@ -123,10 +123,19 @@ pub async fn refresh<F: crate::master_fetch::MasterFetcher>(
         .ok_or_else(|| crate::error::AppError::Validation(format!(
             "instrument {instrument_id} has no security valid as of {as_of}")))?;
     let answered = fetcher.corp_actions(std::slice::from_ref(&security)).await?;
+    let tables: Vec<&SidecarBulkRows> = answered.parsed.iter().collect();
+    apply_tables(pool, instrument_id, &tables).await
+}
 
+/// Diff one instrument's fresh tables against its current rows, in ONE
+/// transaction scoped to that instrument -- in a view refresh, one name's
+/// failure must not roll back its neighbours.
+async fn apply_tables(pool: &PgPool, instrument_id: i64,
+                      tables: &[&SidecarBulkRows]) -> AppResult<RefreshSummary>
+{
     let mut summary = RefreshSummary::default();
     let mut tx = pool.begin().await?;
-    for table in &answered.parsed {
+    for table in tables {
         let actions = parse_table(table);
         if actions.is_empty() {
             continue; // empty = failed/absent field, never a mass cancellation
@@ -206,6 +215,69 @@ async fn insert_action(tx: &mut crate::instrument::store::Tx<'_>,
         .bind(&a.payload)
         .execute(&mut **tx).await?;
     Ok(())
+}
+
+/// A whole view's refresh, batched.
+#[derive(Debug, Default, Serialize)]
+pub struct ViewRefreshSummary {
+    pub instruments: u64,
+    pub skipped: u64,
+    pub inserted: u64,
+    pub amended: u64,
+    pub withdrawn: u64,
+    pub unchanged: u64,
+    pub unparsed: u64,
+}
+
+/// Refresh corporate actions for every active, resolved member of a view --
+/// batched at `fetch::MAX_SECURITIES_PER_REQUEST` securities per Bloomberg
+/// call (cost: 2 hits per security, charged at the seam per request), then
+/// diffed per instrument. Members without a security valid today are skipped
+/// and reported (`corp_actions_skipped`), mirroring the run pipeline's
+/// `no_security_today`.
+pub async fn refresh_view<F: crate::master_fetch::MasterFetcher>(
+    pool: &PgPool, fetcher: &F, view_id: i64, as_of: NaiveDate)
+    -> AppResult<ViewRefreshSummary>
+{
+    let members = crate::views::view_instruments(pool, view_id).await?;
+    let mut sum = ViewRefreshSummary::default();
+    let mut targets: Vec<(String, i64)> = Vec::with_capacity(members.len());
+    for m in &members {
+        match &m.security {
+            Some(s) => targets.push((s.clone(), m.instrument_id)),
+            None => {
+                sum.skipped += 1;
+                sqlx::query(
+                    "INSERT INTO ingest_issue (instrument_id, severity, code, detail)
+                     VALUES ($1,'warn','corp_actions_skipped',$2)")
+                    .bind(m.instrument_id)
+                    .bind(format!("no security valid as of {as_of}; \
+                                   corporate actions not refreshed"))
+                    .execute(pool).await?;
+            }
+        }
+    }
+
+    for chunk in targets.chunks(crate::fetch::MAX_SECURITIES_PER_REQUEST) {
+        let secs: Vec<String> = chunk.iter().map(|(s, _)| s.clone()).collect();
+        let answered = fetcher.corp_actions(&secs).await?;
+        for (sec, iid) in chunk {
+            let tables: Vec<&SidecarBulkRows> = answered.parsed.iter()
+                .filter(|t| t.security == *sec)
+                .collect();
+            // No tables for this security (rejected, or both fields empty)
+            // touches nothing: the per-field empty guard in apply_tables is
+            // what protects the local history either way.
+            let s = apply_tables(pool, *iid, &tables).await?;
+            sum.instruments += 1;
+            sum.inserted += s.inserted;
+            sum.amended += s.amended;
+            sum.withdrawn += s.withdrawn;
+            sum.unchanged += s.unchanged;
+            sum.unparsed += s.unparsed;
+        }
+    }
+    Ok(sum)
 }
 
 /// Current rows for the instrument-detail panel, newest event first. A
