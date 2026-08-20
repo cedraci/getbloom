@@ -163,6 +163,20 @@ export interface RefreshCorpActionsSummary {
   inserted: number; amended: number; withdrawn: number;
   unchanged: number; unparsed: number;
 }
+export interface ObsRow {
+  id: number; obs_date: string; value_num: number | null;
+  value_text: string | null; basis_note: string | null; layer: string;
+  run_id: number; system_from: string; current: boolean;
+}
+export interface CorpActionFull {
+  id: number; source_field: string; natural_key: string;
+  event_date: string | null; amount: number | null;
+  operator: number | null; flag: number | null;
+  dvd_type: string | null; frequency: string | null;
+  declared_date: string | null; record_date: string | null;
+  pay_date: string | null; amount_status: string | null;
+  payload: Record<string, unknown>; system_from: string; current: boolean;
+}
 export interface ViewRefreshCorpActionsSummary {
   instruments: number; skipped: number; inserted: number; amended: number;
   withdrawn: number; unchanged: number; unparsed: number;
@@ -240,6 +254,17 @@ export const api = {
     invoke<RefreshCorpActionsSummary>("refresh_corp_actions", { instrumentId }),
   refreshViewCorpActions: (viewId: number) =>
     invoke<ViewRefreshCorpActionsSummary>("refresh_view_corp_actions", { viewId }),
+  listObservations: (instrumentId: number, fieldId: number,
+                     includeSuperseded: boolean, limit: number) =>
+    invoke<ObsRow[]>("list_observations",
+                     { instrumentId, fieldId, includeSuperseded, limit }),
+  listCorpActionsFull: (instrumentId: number, includeSuperseded: boolean) =>
+    invoke<CorpActionFull[]>("list_corp_actions_full",
+                             { instrumentId, includeSuperseded }),
+  exportObservationsCsv: (instrumentId: number, fieldId: number, path: string) =>
+    invoke<number>("export_observations_csv", { instrumentId, fieldId, path }),
+  exportCorpActionsCsv: (instrumentId: number, path: string) =>
+    invoke<number>("export_corp_actions_csv", { instrumentId, path }),
   listCorpActions: (instrumentId: number) =>
     invoke<CorpActionRow[]>("list_corp_actions", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),
