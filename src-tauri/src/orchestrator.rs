@@ -29,7 +29,14 @@ pub struct PipelineConfig {
 
 #[derive(Debug, Serialize)]
 pub enum RunOutcome {
-    Completed { run_id: i64, summary: IngestSummary },
+    Completed {
+        run_id: i64,
+        summary: IngestSummary,
+        /// Filled by the live wrappers: corporate actions ride with every
+        /// run (user decision 2026-08-21). None when the refresh errored
+        /// (reported, never fatal) or on paths that skip it.
+        corp_actions: Option<crate::corp_actions::ViewRefreshSummary>,
+    },
     NeedsConfirmation { estimated: i64, today_total: i64 },
 }
 
@@ -269,7 +276,7 @@ async fn execute<F: DataFetcher>(
         .execute(pool)
         .await?;
 
-    Ok(RunOutcome::Completed { run_id, summary })
+    Ok(RunOutcome::Completed { run_id, summary, corp_actions: None })
 }
 
 // ---------------------------------------------------------------- entry points
@@ -282,9 +289,10 @@ pub async fn run_eod(
     obs_date: NaiveDate,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
-    let result = run_eod_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, trigger,
-                              obs_date, confirmed).await;
+    let mut result = run_eod_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, trigger,
+                                  obs_date, confirmed).await;
     auto_reresolve_after(pool, cfg, &result).await;
+    corp_actions_after(pool, cfg, view_id, &mut result).await;
     result
 }
 
@@ -304,6 +312,38 @@ async fn auto_reresolve_after(pool: &PgPool, cfg: &PipelineConfig,
     }
 }
 
+/// Corporate actions ride with every completed run and backfill (user
+/// decision 2026-08-21): factors and dividends must always sit beside the
+/// prices they explain. skip_na = true -- instruments Bloomberg declared
+/// not-applicable are not re-charged; the manual button is the retry. A
+/// failure here is reported on stderr and the run stays Completed.
+async fn corp_actions_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
+                            result: &mut AppResult<RunOutcome>) {
+    if let Ok(RunOutcome::Completed { run_id, corp_actions, .. }) = result {
+        let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+        match crate::corp_actions::refresh_view(
+            pool, &mf, view_id, chrono::Local::now().date_naive(), true).await {
+            Ok(sum) => *corp_actions = Some(sum),
+            Err(e) => eprintln!("corp-actions refresh after run {run_id} failed: {e}"),
+        }
+    }
+}
+
+/// What the run's corp-action leg will cost: 2 hits per member that will
+/// actually be requested (not flagged not-applicable). Advisory, for the
+/// pre-run gate; the wire seam still charges exactly what is sent. Members
+/// without a security today are still priced -- over-count-is-safe, the
+/// standing estimate policy.
+async fn corp_actions_estimate(pool: &PgPool, view_id: i64) -> AppResult<i64> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM view_instrument vi
+          WHERE vi.view_id = $1
+            AND NOT EXISTS (SELECT 1 FROM corp_actions_na na
+                             WHERE na.instrument_id = vi.instrument_id)")
+        .bind(view_id).fetch_one(pool).await?;
+    Ok(crate::master_fetch::corp_actions_hit_cost(n as usize))
+}
+
 pub async fn run_eod_with<F: DataFetcher>(
     pool: &PgPool,
     cfg: &PipelineConfig,
@@ -314,7 +354,9 @@ pub async fn run_eod_with<F: DataFetcher>(
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
     let loaded = load_view(pool, view_id, None).await?;
-    let estimated = budget::estimate_eod_hits(&loaded.assets, &loaded.fields);
+    // Prices + the corp-action leg that follows a completed run.
+    let estimated = budget::estimate_eod_hits(&loaded.assets, &loaded.fields)
+        + corp_actions_estimate(pool, view_id).await?;
     let today_total = budget::today_hits(pool).await?;
     if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm
         && !confirmed
@@ -335,9 +377,10 @@ pub async fn run_backfill(
     instrument_ids: Option<&[i64]>,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
-    let result = run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end,
-                                   instrument_ids, confirmed).await;
+    let mut result = run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end,
+                                       instrument_ids, confirmed).await;
     auto_reresolve_after(pool, cfg, &result).await;
+    corp_actions_after(pool, cfg, view_id, &mut result).await;
     result
 }
 
@@ -361,7 +404,10 @@ pub async fn run_backfill_with<F: DataFetcher>(
         )));
     }
     let loaded = load_view(pool, view_id, instrument_ids).await?;
-    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end);
+    // Prices per weekday + ONE corp-action leg at the end (Bloomberg returns
+    // the full history on every call; a backfill needs no per-day refresh).
+    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
+        + corp_actions_estimate(pool, view_id).await?;
     let today_total = budget::today_hits(pool).await?;
     // Spec §5.3: every backfill shows its cost and requires explicit confirmation.
     if !confirmed {

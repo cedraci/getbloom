@@ -305,7 +305,7 @@ async fn eod_pipeline_ingests_and_ends_ok() {
         .await.unwrap();
 
     match out {
-        orchestrator::RunOutcome::Completed { run_id, summary } => {
+        orchestrator::RunOutcome::Completed { run_id, summary, .. } => {
             assert_eq!(summary.inserted, 1);
             assert_eq!(summary.issues, 0);
             let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id=$1")
@@ -351,7 +351,7 @@ async fn eod_pipeline_with_problems_ends_partial() {
     let out = orchestrator::run_eod_with(&pool, &mock_cfg(dir.path()), &fetcher,
                                          view_id, "scheduled", d, false).await.unwrap();
     match out {
-        orchestrator::RunOutcome::Completed { run_id, summary } => {
+        orchestrator::RunOutcome::Completed { run_id, summary, .. } => {
             assert_eq!(summary.inserted, 0);
             assert_eq!(summary.issues, 1);
             let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id=$1")
@@ -487,7 +487,7 @@ async fn smoke_real_bloomberg_end_to_end() {
     let out = orchestrator::run_eod(&pool, &cfg, view_id, "manual", obs_date, true)
         .await.expect("live BLPAPI run failed");
 
-    let orchestrator::RunOutcome::Completed { run_id, summary } = out else {
+    let orchestrator::RunOutcome::Completed { run_id, summary, .. } = out else {
         panic!("expected Completed, got {out:?}");
     };
     eprintln!("smoke: run {run_id} obs_date={obs_date} \

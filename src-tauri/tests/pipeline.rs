@@ -245,6 +245,45 @@ async fn a_member_with_no_security_today_is_skipped_and_recorded_as_an_issue() {
     assert!(detail.contains(&inst.instrument_id.to_string()), "detail: {detail}");
 }
 
+/// Corporate actions ride with every run (user decision 2026-08-21), so the
+/// pre-run gate must price them in: +2 hits per member that will actually be
+/// requested. A member flagged not-applicable is excluded from the estimate,
+/// because it will not be requested.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn the_pre_run_gate_prices_in_corporate_actions() {
+    let pool = common::pool().await;
+    let (iid, _fid, vid, _rid) = scaffold(&pool, "CAGATE").await;
+    let cfg = PipelineConfig {
+        data_dir: std::env::temp_dir(),
+        python_path: "python".into(),
+        script_path: "unused".into(),
+        request_timeout_s: 5,
+        soft_limit: 0, // anything estimated > 0 forces the confirm gate
+    };
+    let out = orchestrator::run_eod_with(
+        &pool, &cfg, &EmptyFetcher, vid, "manual", d("2026-08-18"), false)
+        .await.unwrap();
+    match out {
+        RunOutcome::NeedsConfirmation { estimated, .. } =>
+            assert_eq!(estimated, 1 + 2, "one price field + 2 corp-action hits"),
+        other => panic!("expected NeedsConfirmation, got {other:?}"),
+    }
+
+    // A not-applicable member will not be requested, so it is not priced.
+    sqlx::query("INSERT INTO corp_actions_na (instrument_id, detail)
+                 VALUES ($1,'Field not applicable to security')")
+        .bind(iid).execute(&pool).await.unwrap();
+    let out = orchestrator::run_eod_with(
+        &pool, &cfg, &EmptyFetcher, vid, "manual", d("2026-08-18"), false)
+        .await.unwrap();
+    match out {
+        RunOutcome::NeedsConfirmation { estimated, .. } =>
+            assert_eq!(estimated, 1, "the flagged member's corp actions cost nothing"),
+        other => panic!("expected NeedsConfirmation, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // I2: gaps are per instrument, not per view.
 // ---------------------------------------------------------------------------
