@@ -43,6 +43,8 @@
     // Spec §4.9's configurable field-mapping layer. bbg_ftype records P0 §5's
     // BulkFormat marker (table-valued vs. scalar); all three are optional.
     bbg_ftype: "", bbg_datatype: "", entitlement_note: "",
+    // P7 quality gate: opt-in, numeric-fields-only thresholds (validate_qc).
+    qc_nonpositive: false, qc_outlier_pct: "", qc_stale_days: "",
   });
 
   async function reload() {
@@ -131,9 +133,13 @@
       await api.createField(newField.asset_class_id, newField.mnemonic, newField.label,
         newField.value_kind,
         newField.bbg_ftype || null, newField.bbg_datatype || null,
-        newField.entitlement_note || null);
+        newField.entitlement_note || null,
+        newField.qc_nonpositive,
+        newField.qc_outlier_pct === "" ? null : Number(newField.qc_outlier_pct),
+        newField.qc_stale_days === "" ? null : Number(newField.qc_stale_days));
       newField.mnemonic = ""; newField.label = "";
       newField.bbg_ftype = ""; newField.bbg_datatype = ""; newField.entitlement_note = "";
+      newField.qc_nonpositive = false; newField.qc_outlier_pct = ""; newField.qc_stale_days = "";
       await reload();
     } catch (e) { error = String(e); }
   }
@@ -264,6 +270,13 @@
     <input bind:value={newField.bbg_ftype} placeholder="BulkFormat marker (optional)" />
     <input bind:value={newField.bbg_datatype} placeholder="Bloomberg datatype (optional)" />
     <input bind:value={newField.entitlement_note} placeholder="Entitlement note (optional)" />
+    <label class="check" title="Quality gate: flag values ≤ 0 (numeric fields only)">
+      <input type="checkbox" bind:checked={newField.qc_nonpositive} /> flag ≤ 0
+    </label>
+    <input type="number" bind:value={newField.qc_outlier_pct} min="0" step="any"
+           placeholder="outlier % (optional)" title="Quality gate: flag day-over-day moves above this %" />
+    <input type="number" bind:value={newField.qc_stale_days} min="2"
+           placeholder="stale after N (optional)" title="Quality gate: flag a value repeated N consecutive observations" />
     <button type="submit" disabled={!classes.length}>Add field</button>
   </form>
 </section>
@@ -291,4 +304,5 @@
   .columns { display: flex; gap: 2rem; }
   .columns ul { list-style: none; padding: 0; margin: 0; max-height: 16rem; overflow-y: auto; }
   .retired { color: #888; font-style: italic; }
+  .check { display: inline-flex; flex-direction: row; gap: 0.3rem; align-items: center; }
 </style>

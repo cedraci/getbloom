@@ -225,11 +225,14 @@ pub async fn list_fields(state: State<'_, AppState>) -> Result<Vec<fields::Field
 pub async fn create_field(state: State<'_, AppState>, asset_class_id: i64,
                           mnemonic: String, label: String, value_kind: String,
                           bbg_ftype: Option<String>, bbg_datatype: Option<String>,
-                          entitlement_note: Option<String>)
+                          entitlement_note: Option<String>,
+                          qc_nonpositive: Option<bool>, qc_outlier_pct: Option<f64>,
+                          qc_stale_days: Option<i32>)
     -> Result<fields::FieldDef, AppError> {
     fields::create_field(&state.pool, asset_class_id, &mnemonic, &label, &value_kind,
                          bbg_ftype.as_deref(), bbg_datatype.as_deref(),
-                         entitlement_note.as_deref().unwrap_or("")).await
+                         entitlement_note.as_deref().unwrap_or(""),
+                         qc_nonpositive.unwrap_or(false), qc_outlier_pct, qc_stale_days).await
 }
 
 // ---------------------------------------------------------------------------

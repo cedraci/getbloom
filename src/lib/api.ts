@@ -6,6 +6,7 @@ export interface FieldDef {
   label: string; value_kind: string;
   bbg_ftype: string | null; bbg_datatype: string | null; entitlement_note: string;
   active: boolean;
+  qc_nonpositive: boolean; qc_outlier_pct: number | null; qc_stale_days: number | null;
 }
 export interface View { id: number; name: string; description: string; active: boolean; }
 export interface EstimateOut {
@@ -314,9 +315,12 @@ export const api = {
   listFields: () => invoke<FieldDef[]>("list_fields"),
   createField: (assetClassId: number, mnemonic: string, label: string, valueKind: string,
                 bbgFtype: string | null = null, bbgDatatype: string | null = null,
-                entitlementNote: string | null = null) =>
+                entitlementNote: string | null = null,
+                qcNonpositive: boolean = false, qcOutlierPct: number | null = null,
+                qcStaleDays: number | null = null) =>
     invoke<FieldDef>("create_field",
-      { assetClassId, mnemonic, label, valueKind, bbgFtype, bbgDatatype, entitlementNote }),
+      { assetClassId, mnemonic, label, valueKind, bbgFtype, bbgDatatype, entitlementNote,
+        qcNonpositive, qcOutlierPct, qcStaleDays }),
   listViews: () => invoke<View[]>("list_views"),
   createView: (name: string, description: string) =>
     invoke<View>("create_view", { name, description }),

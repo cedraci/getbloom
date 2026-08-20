@@ -52,3 +52,22 @@ async fn schedule_verify_dow_defaults_to_friday() {
         .bind(vid).execute(&pool).await;
     assert!(bad.is_err(), "verify_dow is an ISO weekday, 1-7 or NULL");
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn create_field_persists_qc_config() {
+    let pool = common::pool().await;
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name) VALUES ($1) RETURNING id")
+        .bind(uniq("QCP")).fetch_one(&pool).await.unwrap();
+    let f = getbloomdata_lib::fields::create_field(
+        &pool, class, &uniq("px"), "Last", "numeric",
+        None, None, "", true, Some(30.0), Some(5)).await.unwrap();
+    assert!(f.qc_nonpositive);
+    assert_eq!(f.qc_outlier_pct, Some(30.0));
+    assert_eq!(f.qc_stale_days, Some(5));
+    let err = getbloomdata_lib::fields::create_field(
+        &pool, class, &uniq("nm"), "Name", "text",
+        None, None, "", true, None, None).await;
+    assert!(err.is_err(), "QC on a text field is a config mistake, said early");
+}

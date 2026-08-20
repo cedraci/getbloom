@@ -153,7 +153,7 @@ async fn view_fields_falls_back_to_class_fields() {
     let url = test_url().expect("set BLOOM_TEST_DATABASE_URL");
     let pool = getbloomdata_lib::db::connect(&url).await.unwrap();
     let class = registry::create_asset_class(&pool, &uniq("EquityT4"), "t").await.unwrap();
-    let f = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+    let f = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "", false, None, None)
         .await
         .unwrap();
     let entry = add_book_entry(&pool, class.id, "MC", &format!("{} FP", uniq("MC"))).await;
@@ -183,7 +183,7 @@ async fn ingest_twice_converges_no_duplicates() {
     let class = getbloomdata_lib::registry::create_asset_class(&pool, &uniq("EquityT9"), "t")
         .await
         .unwrap();
-    let f = fields::create_field(&pool, class.id, "PX_LAST_T9", "px", "numeric", None, None, "")
+    let f = fields::create_field(&pool, class.id, "PX_LAST_T9", "px", "numeric", None, None, "", false, None, None)
         .await
         .unwrap();
     let entry = add_book_entry(&pool, class.id, "T9", &format!("{} US", uniq("T9"))).await;
@@ -265,7 +265,7 @@ async fn seed_view(pool: &sqlx::PgPool) -> (i64, i64, i64) {
     let class = getbloomdata_lib::registry::create_asset_class(pool, &uniq("EquityE2E"), "t")
         .await
         .unwrap();
-    let f = fields::create_field(pool, class.id, "PX_LAST", "px", "numeric", None, None, "")
+    let f = fields::create_field(pool, class.id, "PX_LAST", "px", "numeric", None, None, "", false, None, None)
         .await
         .unwrap();
     let entry = add_book_entry(pool, class.id, "E2E", &format!("{} US", uniq("E2E"))).await;
@@ -443,7 +443,7 @@ async fn smoke_real_bloomberg_end_to_end() {
             "SELECT id FROM field_def WHERE asset_class_id=$1 AND mnemonic=$2")
             .bind(class_id).bind(mnemonic).fetch_optional(&pool).await.unwrap();
         if exists.is_none() {
-            fields::create_field(&pool, class_id, mnemonic, mnemonic, kind, None, None, "")
+            fields::create_field(&pool, class_id, mnemonic, mnemonic, kind, None, None, "", false, None, None)
                 .await.unwrap();
         }
     }
@@ -528,7 +528,7 @@ async fn describe_deletion_counts_what_hangs_off_an_asset() {
 
     let class = registry::create_asset_class(&pool, &uniq("DescribeCls"), "test").await.unwrap();
     let entry = add_book_entry(&pool, class.id, "Describe Me", &format!("{} US", uniq("DSC"))).await;
-    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "", false, None, None)
         .await.unwrap();
     let view = views::create_view(&pool, &uniq("DescribeView"), "").await.unwrap();
     views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
@@ -632,7 +632,7 @@ async fn retiring_an_asset_hides_it_from_views_but_keeps_its_observations() {
 
     let class = registry::create_asset_class(&pool, &uniq("RetireCls"), "test").await.unwrap();
     let entry = add_book_entry(&pool, class.id, "Retiree", &format!("{} US", uniq("RET"))).await;
-    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "", false, None, None)
         .await.unwrap();
     let view = views::create_view(&pool, &uniq("RetireView"), "").await.unwrap();
     views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
@@ -682,7 +682,7 @@ async fn purging_a_book_entry_removes_only_the_book_entry_and_its_memberships() 
 
     let class = registry::create_asset_class(&pool, &uniq("PurgeCls"), "test").await.unwrap();
     let entry = add_book_entry(&pool, class.id, "Doomed", &format!("{} US", uniq("DOOM"))).await;
-    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "")
+    let field = fields::create_field(&pool, class.id, "PX_LAST", "Last price", "numeric", None, None, "", false, None, None)
         .await.unwrap();
     let view = views::create_view(&pool, &uniq("PurgeView"), "").await.unwrap();
     views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
@@ -749,7 +749,7 @@ async fn purging_a_field_clears_its_observations_and_memberships() {
 
     let class = registry::create_asset_class(&pool, &uniq("FldPurgeCls"), "test").await.unwrap();
     let entry = add_book_entry(&pool, class.id, "Holder", &format!("{} US", uniq("HLD"))).await;
-    let field = fields::create_field(&pool, class.id, "PX_VOLUME", "Volume", "numeric", None, None, "")
+    let field = fields::create_field(&pool, class.id, "PX_VOLUME", "Volume", "numeric", None, None, "", false, None, None)
         .await.unwrap();
     let view = views::create_view(&pool, &uniq("FldPurgeView"), "").await.unwrap();
     views::set_view_fields(&pool, view.id, &[field.id]).await.unwrap();
