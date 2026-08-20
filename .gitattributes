@@ -1,0 +1,5 @@
+# sqlx embeds migration files and compares their checksums against
+# _sqlx_migrations at every boot. core.autocrlf rewriting them to CRLF on
+# checkout changes the checksum and bricks the boot (VersionMismatch), so
+# they are pinned to LF forever.
+src-tauri/migrations/*.sql text eol=lf
