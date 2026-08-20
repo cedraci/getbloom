@@ -199,17 +199,22 @@
      inferred. None of them is followed by any query until confirmed — the
      evidence below is what the user is being asked to agree is a corporate
      history, not merely a checkbox.</p>
-  <p class="thin"><strong>Confirming records the link for a later phase; it
-     does not yet re-point any data.</strong> Nothing in this build reads a
-     confirmed link — no series is joined, moved or merged by it. It is stored
-     so that P3/P5 can act on a decision a human has already made, and so the
-     proposal stops resurfacing here.</p>
+  <p class="thin"><strong>Confirming a link extends the successor's stitched
+     series backward through it</strong> (Data tab). Mergers Bloomberg itself
+     asserts — an Action ID with parsed stock terms — are confirmed
+     automatically and never appear here; what does appear is inferred, and
+     needs your judgement. For a fund junction with no asserted ratio, the
+     splice is derived from NAV continuity at the effective date — which is
+     how fund merger ratios are officially set.</p>
   {#if !links.length}<p class="thin">No proposals.</p>{/if}
   {#each links as l}
     <article>
       <p>{l.predecessor_label ?? `instrument ${l.predecessor_id}`}
          → {l.successor_label ?? `instrument ${l.successor_id}`}
-         ({l.link_type}, effective {l.effective_date})</p>
+         ({l.link_type}, effective {l.effective_date})
+         {#if l.exchange_ratio != null}
+           — Bloomberg terms: {l.exchange_ratio} acquirer sh. per target sh.
+         {/if}</p>
       <pre>{JSON.stringify(l.evidence, null, 2)}</pre>
       <button onclick={() => confirm(l.id)}>Confirm</button>
     </article>

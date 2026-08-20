@@ -23,8 +23,10 @@ export interface RunRow {
   estimated_hits: number; error_summary: string | null;
 }
 export interface IssueRow {
-  id: number; run_id: number; instrument_id: number | null; field_id: number | null;
+  id: number; run_id: number | null; instrument_id: number | null;
+  field_id: number | null;
   obs_date: string | null; severity: string; code: string; detail: string;
+  label: string | null;
 }
 export interface ScheduleRow {
   id: number; view_id: number; active: boolean; window_start: string;
@@ -150,6 +152,14 @@ export interface LinkProposal {
   id: number; predecessor_id: number; successor_id: number;
   predecessor_label: string | null; successor_label: string | null;
   link_type: string; effective_date: string; evidence: unknown;
+  /// P6: Bloomberg's asserted ratio (acquirer sh. per target sh.), if any.
+  exchange_ratio: number | null;
+}
+/// P6: what one on-demand lifecycle check did (the same flow runs
+/// automatically after every completed run).
+export interface LifecycleSummary {
+  checked: number; dead: number;
+  links_proposed: number; links_confirmed: number; issues: number;
 }
 export interface AliasRow {
   id: number; instrument_id: number; id_type: string; value: string;
@@ -264,6 +274,8 @@ export const api = {
                            { instrumentId, anchor, rangeStart }),
   listLinkProposals: () => invoke<LinkProposal[]>("list_link_proposals"),
   confirmLink: (linkId: number) => invoke<void>("confirm_link", { linkId }),
+  runLifecycleCheck: () => invoke<LifecycleSummary>("run_lifecycle_check"),
+  listStandaloneIssues: () => invoke<IssueRow[]>("list_standalone_issues"),
   instrumentAliases: (instrumentId: number) =>
     invoke<AliasRow[]>("instrument_aliases", { instrumentId }),
   instrumentAttrs: (instrumentId: number) =>

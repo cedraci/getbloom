@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, type EstimateOut, type GapRow, type IssueRow, type RunOutcome,
+  import { api, type EstimateOut, type GapRow, type IssueRow,
+           type LifecycleSummary, type RunOutcome,
            type RunRow, type View } from "./api";
 
   let views = $state<View[]>([]);
@@ -36,6 +37,36 @@
       : "";
   }
 
+  // P6: lifecycle findings live outside any run (run_id NULL), so they get
+  // their own list and their own on-demand check.
+  let standaloneIssues = $state<IssueRow[]>([]);
+  let lifecycleLine = $state("");
+
+  async function loadStandaloneIssues() {
+    try {
+      standaloneIssues = await api.listStandaloneIssues();
+    } catch (e) { error = String(e); }
+  }
+
+  async function lifecycleCheckNow() {
+    if (inFlight) return;
+    inFlight = true;
+    lifecycleLine = "Asking Bloomberg…";
+    try {
+      const s: LifecycleSummary = await api.runLifecycleCheck();
+      lifecycleLine = s.checked === 0
+        ? "Nothing to check: every book instrument observed recently or was "
+          + "checked within 30 days. 0 hits."
+        : `${s.checked} checked, ${s.dead} not active, `
+          + `${s.links_proposed} link(s) proposed, `
+          + `${s.links_confirmed} auto-confirmed, ${s.issues} new issue(s).`;
+      await loadStandaloneIssues();
+    } catch (e) {
+      lifecycleLine = "";
+      error = String(e);
+    } finally { inFlight = false; }
+  }
+
   async function loadViews() {
     try {
       views = await api.listViews();
@@ -56,7 +87,7 @@
     catch (e) { error = String(e); }
   }
 
-  $effect(() => { loadViews(); });
+  $effect(() => { loadViews(); loadStandaloneIssues(); });
   $effect(() => { selectedViewId; loadViewData(); pending = null; });
   $effect(() => {
     refreshRuns();
@@ -165,6 +196,32 @@
     </tbody>
   </table>
 
+  <h2>Lifecycle</h2>
+  <p class="thin">Runs automatically after every completed run: book
+     instruments with no data in 7 days get one MARKET_STATUS question
+     (1 hit each, 30-day cooldown). A dead equity with Bloomberg-asserted
+     merger terms links to its acquirer automatically; a dead fund is
+     reported below — its successor must be picked by hand (CACX&nbsp;&lt;GO&gt;),
+     then linked via Review.</p>
+  <button onclick={lifecycleCheckNow} disabled={inFlight}>Check now</button>
+  {#if lifecycleLine}<p class="notice">{lifecycleLine}</p>{/if}
+  {#if standaloneIssues.length}
+    <table class="static">
+      <thead><tr><th>Instrument</th><th>Code</th><th>Detail</th></tr></thead>
+      <tbody>
+        {#each standaloneIssues as i}
+          <tr>
+            <td>{i.label ?? (i.instrument_id != null ? `instrument ${i.instrument_id}` : "—")}</td>
+            <td>{i.code}</td>
+            <td class="wrap">{i.detail}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else}
+    <p class="thin">No standalone findings.</p>
+  {/if}
+
   <h2>Run history</h2>
   <table>
     <thead>
@@ -215,4 +272,7 @@
   .amber { color: #b8860b; font-weight: bold; }
   .red { color: #c00; font-weight: bold; }
   .confirm { border: 1px solid #c00; padding: 0.5rem; margin-top: 0.5rem; }
+  .notice { color: #060; }
+  .wrap { white-space: normal; max-width: 46rem; }
+  table.static tbody tr { cursor: default; }
 </style>
