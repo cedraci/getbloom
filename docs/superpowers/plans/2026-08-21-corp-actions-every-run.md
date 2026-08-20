@@ -27,7 +27,7 @@
 
 **Interfaces:** `parse_table` keeps its signature; duplicate keys within the returned Vec get suffixes `|2`, `|3`… after a deterministic sort of the duplicates by canonical payload string. First occurrence keeps the bare key.
 
-- [ ] **Step 1: failing unit test** in `corp_actions.rs::tests` — the real Hermès shape:
+- [x] **Step 1: failing unit test** in `corp_actions.rs::tests` — the real Hermès shape:
 
 ```rust
 #[test]
@@ -57,8 +57,8 @@ fn same_day_twin_dividend_factors_get_distinct_keys() {
 }
 ```
 
-- [ ] **Step 2:** run `cargo test same_day_twin` → FAIL (both keys `2025-05-05|2|1`).
-- [ ] **Step 3:** implement at the end of `parse_table`, before returning:
+- [x] **Step 2:** run `cargo test same_day_twin` → FAIL (both keys `2025-05-05|2|1`).
+- [x] **Step 3:** implement at the end of `parse_table`, before returning:
 
 ```rust
 fn disambiguate_keys(actions: &mut [ParsedAction]) {
@@ -81,9 +81,9 @@ fn disambiguate_keys(actions: &mut [ParsedAction]) {
 
 called as `let mut out: Vec<_> = …collect(); disambiguate_keys(&mut out); out`.
 
-- [ ] **Step 4:** unit test passes; existing corp_actions unit tests still green.
-- [ ] **Step 5: failing integration test** in `tests/corp_actions.rs` — mock with the twin rows, `refresh` → `inserted == 2`; refresh again → `unchanged == 2`, still 2 open rows.
-- [ ] **Step 6:** `cargo test --test corp_actions -- --ignored` green. Commit `fix: same-day duplicate corporate actions get occurrence-suffixed keys`.
+- [x] **Step 4:** unit test passes; existing corp_actions unit tests still green.
+- [x] **Step 5: failing integration test** in `tests/corp_actions.rs` — mock with the twin rows, `refresh` → `inserted == 2`; refresh again → `unchanged == 2`, still 2 open rows.
+- [x] **Step 6:** `cargo test --test corp_actions -- --ignored` green. Commit `fix: same-day duplicate corporate actions get occurrence-suffixed keys`.
 
 ### Task 2: One bad name must not abort the view refresh
 
@@ -104,8 +104,8 @@ match apply_tables(pool, *iid, &tables).await {
 }
 ```
 
-- [ ] **Step 1: failing integration test** — two members; mock returns for member 2 a table whose `field` is `"BOGUS_FIELD"` (violates the `source_field` CHECK on insert). Expect: member 1's rows committed, `failed == 1`, `instruments == 1`, issue `corp_actions_failed` present.
-- [ ] **Step 2:** implement; suite green. Commit `fix: contain a per-instrument failure inside the view corp-actions refresh`.
+- [x] **Step 1: failing integration test** — two members; mock returns for member 2 a table whose `field` is `"BOGUS_FIELD"` (violates the `source_field` CHECK on insert). Expect: member 1's rows committed, `failed == 1`, `instruments == 1`, issue `corp_actions_failed` present.
+- [x] **Step 2:** implement; suite green. Commit `fix: contain a per-instrument failure inside the view corp-actions refresh`.
 
 ### Task 3: Problems through the seam + not-applicable registry
 
@@ -141,17 +141,17 @@ Live impl: `parsed.tables` from `resp["bulk_rows"]`, `parsed.problems` from `res
 
 `refresh_view(pool, fetcher, view_id, as_of, skip_na: bool)`:
 - when `skip_na`, exclude members present in `corp_actions_na` before building targets (no issue spam, no hits);
-- after the fetch, per member: if it has **no tables** and every field in `CORP_ACTIONS_FIELDS` has a problem with `code == "field_error"` for its security → upsert `corp_actions_na` (`ON CONFLICT (instrument_id) DO UPDATE SET noted_at = now(), detail = EXCLUDED.detail`), insert `ingest_issue (severity 'info', code 'corp_actions_not_applicable', detail from the problem)`, count `sum.not_applicable += 1`, and do NOT call `apply_tables`;
+- after the fetch, per member: if it has **no tables** and every field in `CORP_ACTIONS_FIELDS` has a problem with `code == "field_error"` for its security → upsert `corp_actions_na` (`ON CONFLICT (instrument_id) DO UPDATE SET noted_at = now(), detail = EXCLUDED.detail`), insert `ingest_issue (severity 'warn' -- the CHECK has no 'info' level, code 'corp_actions_not_applicable', detail from the problem)`, count `sum.not_applicable += 1`, and do NOT call `apply_tables`;
 - if it HAS tables → `DELETE FROM corp_actions_na WHERE instrument_id = $1` (recovery), then apply as today.
 `ViewRefreshSummary` gains `pub not_applicable: u64`. Single-instrument `refresh` does the same NA bookkeeping (its fetch already returns problems).
 Command `refresh_view_corp_actions` passes `skip_na = false` (a click is an explicit retry).
 
-- [ ] **Step 1:** update the master_fetch mock unit test for the new type; run → FAIL (compile).
-- [ ] **Step 2:** implement seam change end-to-end (`cargo test` compiles, unit green).
-- [ ] **Step 3: failing integration tests** in `tests/corp_actions.rs`:
+- [x] **Step 1:** update the master_fetch mock unit test for the new type; run → FAIL (compile).
+- [x] **Step 2:** implement seam change end-to-end (`cargo test` compiles, unit green).
+- [x] **Step 3: failing integration tests** in `tests/corp_actions.rs`:
   1. `a_field_not_applicable_member_is_flagged_and_then_skipped` — member 2's mock problems = both fields `field_error`; `refresh_view(..., false)` → `not_applicable == 1`, `corp_actions_na` row exists, issue exists; then `refresh_view(..., true)` with a call-recording mock → the request string does NOT contain member 2's security.
   2. `a_recovered_security_clears_the_na_flag` — seed `corp_actions_na` by hand; mock now returns a factor table for it; `refresh_view(..., false)` → row inserted, `corp_actions_na` empty.
-- [ ] **Step 4:** implement; `touch tests/common/mod.rs`; both suites green. Commit `feat: surface field-not-applicable corporate-action answers and stop re-charging them`.
+- [x] **Step 4:** implement; `touch tests/common/mod.rs`; both suites green. Commit `feat: surface field-not-applicable corporate-action answers and stop re-charging them`.
 
 ### Task 4: Refresh with every EOD run and backfill
 
@@ -195,22 +195,22 @@ async fn corp_actions_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
 
 (the run stays Completed either way — a CA failure is reported, never fatal).
 
-- [ ] **Step 1: failing integration test** in `tests/pipeline.rs`: `the_pre_run_gate_prices_in_corporate_actions` — view with 2 members, soft limit set so that price estimate alone passes but price+4 crosses into HardConfirm → `run_eod_with` (mock DataFetcher, unconfirmed) returns `NeedsConfirmation` with `estimated == price_est + 4`. Second assertion: seed one member into `corp_actions_na` → estimated drops by 2.
-- [ ] **Step 2:** implement estimates + RunOutcome field + wrappers; fix any existing test asserting old `estimated` values.
-- [ ] **Step 3:** full pipeline + corp_actions suites green. Commit `feat: corporate actions refresh automatically with every run, priced into the gate`.
+- [x] **Step 1: failing integration test** in `tests/pipeline.rs`: `the_pre_run_gate_prices_in_corporate_actions` — view with 2 members, soft limit set so that price estimate alone passes but price+4 crosses into HardConfirm → `run_eod_with` (mock DataFetcher, unconfirmed) returns `NeedsConfirmation` with `estimated == price_est + 4`. Second assertion: seed one member into `corp_actions_na` → estimated drops by 2.
+- [x] **Step 2:** implement estimates + RunOutcome field + wrappers; fix any existing test asserting old `estimated` values.
+- [x] **Step 3:** full pipeline + corp_actions suites green. Commit `feat: corporate actions refresh automatically with every run, priced into the gate`.
 
 ### Task 5: UI — run summary line, view notice, api types
 
 **Files:** `src/lib/api.ts`, `src/lib/RunScreen.svelte`, `src/lib/ViewsScreen.svelte`.
 
-- [ ] `api.ts`: `ViewRefreshCorpActionsSummary` gains `failed: number; not_applicable: number;` `RunOutcome`'s Completed variant type gains `corp_actions?: ViewRefreshCorpActionsSummary | null`.
-- [ ] `RunScreen.svelte`: after a completed run, when `corp_actions` is present render a thin line: `Corporate actions: a new, b amended, c withdrawn, d unchanged[, e unparsed][, f failed][, g not applicable][, h skipped]`.
-- [ ] `ViewsScreen.svelte`: extend the existing `caNotice` line with `failed` and `not applicable` counts (same conditional style).
-- [ ] `svelte-check` 0 errors. Commit `feat(ui): corporate-action results on the run summary and view notice`.
+- [x] `api.ts`: `ViewRefreshCorpActionsSummary` gains `failed: number; not_applicable: number;` `RunOutcome`'s Completed variant type gains `corp_actions?: ViewRefreshCorpActionsSummary | null`.
+- [x] `RunScreen.svelte`: after a completed run, when `corp_actions` is present render a thin line: `Corporate actions: a new, b amended, c withdrawn, d unchanged[, e unparsed][, f failed][, g not applicable][, h skipped]`.
+- [x] `ViewsScreen.svelte`: extend the existing `caNotice` line with `failed` and `not applicable` counts (same conditional style).
+- [x] `svelte-check` 0 errors. Commit `feat(ui): corporate-action results on the run summary and view notice`.
 
 ### Task 6: Full verification + docs + memory
 
-- [ ] `cargo test` (unit) + every `--ignored` suite except `smoke_real` green; `svelte-check` clean.
-- [ ] P3 design doc: §2 gains a "Shipped 2026-08-21 — automatic with every run" paragraph; §5 non-goal "No automatic or scheduled corp-action fetches" struck and annotated (superseded by user decision 2026-08-21); §3 notes the occurrence-suffix rule for same-day twins.
-- [ ] Update memory `bloomberg-pipeline-status.md`.
-- [ ] Commit `docs: corporate actions are pipeline data, refreshed with every run`.
+- [x] `cargo test` (unit) + every `--ignored` suite except `smoke_real` green; `svelte-check` clean.
+- [x] P3 design doc: §2 gains a "Shipped 2026-08-21 — automatic with every run" paragraph; §5 non-goal "No automatic or scheduled corp-action fetches" struck and annotated (superseded by user decision 2026-08-21); §3 notes the occurrence-suffix rule for same-day twins.
+- [x] Update memory `bloomberg-pipeline-status.md`.
+- [x] Commit `docs: corporate actions are pipeline data, refreshed with every run`.

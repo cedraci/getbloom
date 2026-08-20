@@ -60,6 +60,16 @@ button. A read-only **Data** tab renders stored observations (with basis and
 supersession history) and corporate actions with their verbatim payload,
 plus CSV export — the accuracy-check surface.
 
+**Shipped 2026-08-21 — automatic with every run.** Corporate actions are
+pipeline data, not an optional extra (user decision 2026-08-21): after every
+completed EOD run and backfill, the live wrappers refresh the view's
+corporate actions (batched, 2 hits per requested member, priced into the
+pre-run estimate, never fatal to the run). A security whose both fields
+answer "Field not applicable" (live: YODA LN Equity, accumulating ETF) is
+recorded in `corp_actions_na` and skipped by the automatic path; the manual
+buttons remain and double as the retry that clears the flag. Failures are
+contained per instrument (`corp_actions_failed`), never aborting the batch.
+
 ## 3. Storage — `corp_action`
 
 One table, source-field discriminated, bitemporal on system time only (the
@@ -72,6 +82,11 @@ call, so there is no separate validity interval to track):
   - dividends: `{ex_date}|{dividend_type}` (fallback: the row's canonical
     JSON when either key is missing — such rows are stored, flagged, and
     still diffable)
+  - one snapshot can carry the same base key twice (live 2026-08-21, RMS FP:
+    ordinary + extraordinary dividend, one ex-date, both operator 2/flag 1);
+    duplicates get occurrence suffixes (`|2`, `|3`…) after a deterministic
+    sort by canonical payload, so the same snapshot always yields the same
+    keys and the refresh converges
 - refresh = full-snapshot diff against current rows:
   - new key → insert;
   - same key, changed payload → close `system_to`, insert (an amendment —
@@ -98,6 +113,7 @@ must not kill a 200-instrument run.
 ## 5. Non-goals, restated
 
 - No derived/adjusted observation layers (P4).
-- No automatic or scheduled corp-action fetches.
+- ~~No automatic or scheduled corp-action fetches.~~ Superseded 2026-08-21:
+  corporate actions refresh automatically with every run (§2, user decision).
 - No `CA_MA_*` merger evidence fetching (P5 — see P0 §10.3/§10.4).
 - No holdings transformation (P5).
