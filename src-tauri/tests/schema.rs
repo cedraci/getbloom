@@ -322,3 +322,38 @@ async fn non_trading_day_dedups_and_issues_are_timestamped() {
         .bind(inst.instrument_id).fetch_one(&pool).await.unwrap();
     assert!(ts <= chrono::Utc::now());
 }
+
+/// corp_action is snapshot-diffed: one current row per
+/// (instrument, source_field, natural_key); amendments close-and-insert;
+/// nothing may rewrite a payload in place.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn corp_action_is_append_only_with_one_current_row_per_key() {
+    let pool = common::pool().await;
+    let inst = getbloomdata_lib::instrument::store::create(&pool).await.unwrap();
+    let ins = |payload: &'static str| {
+        let pool = pool.clone();
+        let iid = inst.instrument_id;
+        async move {
+            sqlx::query(
+                "INSERT INTO corp_action
+                   (instrument_id, source_field, natural_key, event_date, amount, payload)
+                 VALUES ($1,'EQY_DVD_ADJUST_FACT','2020-08-31|1|3','2020-08-31',4.0,$2::jsonb)")
+                .bind(iid).bind(payload).execute(&pool).await
+        }
+    };
+    ins(r#"{"Adjustment Factor":4.0}"#).await.unwrap();
+    let dup = ins(r#"{"Adjustment Factor":5.0}"#).await;
+    assert!(dup.is_err(), "a second CURRENT row for the same key must be refused");
+
+    let rewrite = sqlx::query(
+        "UPDATE corp_action SET payload = '{}'::jsonb WHERE instrument_id = $1")
+        .bind(inst.instrument_id).execute(&pool).await;
+    assert!(rewrite.is_err(), "payload rewrite must be refused by the trigger");
+
+    sqlx::query("UPDATE corp_action SET system_to = now() WHERE instrument_id = $1")
+        .bind(inst.instrument_id).execute(&pool).await
+        .expect("closing system_to is the one permitted update");
+    ins(r#"{"Adjustment Factor":5.0}"#).await
+        .expect("after closing, the corrected row inserts");
+}
