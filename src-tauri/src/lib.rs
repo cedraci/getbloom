@@ -3,6 +3,7 @@ pub mod book;
 pub mod budget;
 pub mod bulk;
 pub mod commands;
+pub mod corp_actions;
 pub mod db;
 pub mod deletion;
 pub mod error;
