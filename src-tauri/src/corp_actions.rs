@@ -6,9 +6,11 @@
 //! extraction goes through a candidate-name map and a row it cannot read is
 //! stored, flagged (`fully_parsed = false`) and reported, never dropped.
 
+use crate::error::AppResult;
 use crate::fetch::SidecarBulkRows;
 use chrono::NaiveDate;
 use serde::Serialize;
+use sqlx::PgPool;
 
 pub const FACTOR_FIELD: &str = "EQY_DVD_ADJUST_FACT";
 pub const DVD_FIELD: &str = "DVD_HIST_ALL_WITH_AMT_STATUS";
@@ -94,6 +96,145 @@ pub fn parse_table(t: &SidecarBulkRows) -> Vec<ParsedAction> {
             }
         }
     }).collect()
+}
+
+// ------------------------------------------------------------------ storage
+
+#[derive(Debug, Default, Serialize)]
+pub struct RefreshSummary {
+    pub inserted: u64,
+    pub amended: u64,
+    pub withdrawn: u64,
+    pub unchanged: u64,
+    pub unparsed: u64,
+}
+
+/// Fetch both bulk fields for the instrument's current security and diff the
+/// full snapshot against the current rows. Per source_field:
+/// new key -> insert; changed payload -> close + insert (amendment); key
+/// missing from a NON-EMPTY snapshot -> close + ingest_issue (withdrawal);
+/// empty snapshot -> touch nothing (a failed field is not a cancellation).
+pub async fn refresh<F: crate::master_fetch::MasterFetcher>(
+    pool: &PgPool, fetcher: &F, instrument_id: i64, as_of: NaiveDate)
+    -> AppResult<RefreshSummary>
+{
+    let security = crate::instrument::store::current_security(pool, instrument_id, as_of)
+        .await?
+        .ok_or_else(|| crate::error::AppError::Validation(format!(
+            "instrument {instrument_id} has no security valid as of {as_of}")))?;
+    let answered = fetcher.corp_actions(&security).await?;
+
+    let mut summary = RefreshSummary::default();
+    let mut tx = pool.begin().await?;
+    for table in &answered.parsed {
+        let actions = parse_table(table);
+        if actions.is_empty() {
+            continue; // empty = failed/absent field, never a mass cancellation
+        }
+        let fresh_keys: std::collections::HashSet<&str> =
+            actions.iter().map(|a| a.natural_key.as_str()).collect();
+
+        let current: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, natural_key, payload FROM corp_action
+              WHERE instrument_id = $1 AND source_field = $2
+                AND system_to = 'infinity'")
+            .bind(instrument_id).bind(&table.field)
+            .fetch_all(&mut *tx).await?;
+        let by_key: std::collections::HashMap<&str, (i64, &serde_json::Value)> =
+            current.iter().map(|(id, k, p)| (k.as_str(), (*id, p))).collect();
+
+        for a in &actions {
+            if !a.fully_parsed {
+                summary.unparsed += 1;
+            }
+            match by_key.get(a.natural_key.as_str()) {
+                Some((_, existing)) if **existing == a.payload => {
+                    summary.unchanged += 1;
+                }
+                Some((id, _)) => {
+                    sqlx::query("UPDATE corp_action SET system_to = now() WHERE id = $1")
+                        .bind(id).execute(&mut *tx).await?;
+                    insert_action(&mut tx, instrument_id, a).await?;
+                    summary.amended += 1;
+                }
+                None => {
+                    insert_action(&mut tx, instrument_id, a).await?;
+                    summary.inserted += 1;
+                }
+            }
+        }
+        for (id, key, _) in &current {
+            if !fresh_keys.contains(key.as_str()) {
+                sqlx::query("UPDATE corp_action SET system_to = now() WHERE id = $1")
+                    .bind(id).execute(&mut *tx).await?;
+                sqlx::query(
+                    "INSERT INTO ingest_issue (instrument_id, severity, code, detail)
+                     VALUES ($1,'warn','corp_action_withdrawn',$2)")
+                    .bind(instrument_id)
+                    .bind(format!("{}: {} vanished from the fresh snapshot",
+                                  table.field, key))
+                    .execute(&mut *tx).await?;
+                summary.withdrawn += 1;
+            }
+        }
+    }
+    if summary.unparsed > 0 {
+        sqlx::query(
+            "INSERT INTO ingest_issue (instrument_id, severity, code, detail)
+             VALUES ($1,'warn','corp_action_unparsed',$2)")
+            .bind(instrument_id)
+            .bind(format!("{} row(s) stored with a fallback key; column-name \
+                           map needs the first live run's shapes", summary.unparsed))
+            .execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(summary)
+}
+
+async fn insert_action(tx: &mut crate::instrument::store::Tx<'_>,
+                       instrument_id: i64, a: &ParsedAction) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO corp_action
+           (instrument_id, source_field, natural_key, event_date, amount,
+            operator, flag, dvd_type, frequency, declared_date, record_date,
+            pay_date, amount_status, payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
+        .bind(instrument_id).bind(&a.source_field).bind(&a.natural_key)
+        .bind(a.event_date).bind(a.amount).bind(a.operator).bind(a.flag)
+        .bind(&a.dvd_type).bind(&a.frequency).bind(a.declared_date)
+        .bind(a.record_date).bind(a.pay_date).bind(&a.amount_status)
+        .bind(&a.payload)
+        .execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// Current rows for the instrument-detail panel, newest event first. A
+/// fallback (canonical-JSON) natural key starts with '{', which is how the
+/// UI knows to show the unparsed marker.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ActionRow {
+    pub id: i64,
+    pub source_field: String,
+    pub event_date: Option<NaiveDate>,
+    pub amount: Option<f64>,
+    pub operator: Option<i16>,
+    pub flag: Option<i16>,
+    pub dvd_type: Option<String>,
+    pub amount_status: Option<String>,
+    pub pay_date: Option<NaiveDate>,
+    pub fully_parsed_key: bool,
+}
+
+pub async fn list_current(pool: &PgPool, instrument_id: i64)
+    -> AppResult<Vec<ActionRow>> {
+    Ok(sqlx::query_as::<_, ActionRow>(
+        "SELECT id, source_field, event_date, amount, operator, flag,
+                dvd_type, amount_status, pay_date,
+                (natural_key NOT LIKE '{%') AS fully_parsed_key
+           FROM corp_action
+          WHERE instrument_id = $1 AND system_to = 'infinity'
+          ORDER BY event_date DESC NULLS LAST, id DESC")
+        .bind(instrument_id).fetch_all(pool).await?)
 }
 
 #[cfg(test)]
