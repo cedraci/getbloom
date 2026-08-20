@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces: table `corp_action` — consumed by Tasks 2–5. Natural-key uniqueness only among current rows; the only legal UPDATE closes `system_to`.
 
-- [ ] **Step 1: Write the failing test** (append to `tests/schema.rs`)
+- [x] **Step 1: Write the failing test** (append to `tests/schema.rs`)
 
 ```rust
 /// corp_action is snapshot-diffed: one current row per
@@ -67,12 +67,12 @@ async fn corp_action_is_append_only_with_one_current_row_per_key() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd src-tauri && cargo test --test schema -- --ignored corp_action_is_append_only`
 Expected: FAIL — `relation "corp_action" does not exist`.
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 `src-tauri/migrations/0003_corp_action.sql`:
 ```sql
@@ -127,12 +127,12 @@ CREATE TRIGGER corp_action_append_only BEFORE UPDATE ON corp_action
   FOR EACH ROW EXECUTE FUNCTION corp_action_append_only();
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cd src-tauri && cargo test --test schema -- --ignored`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/migrations/0003_corp_action.sql src-tauri/tests/schema.rs
@@ -173,7 +173,7 @@ pub struct ParsedAction {
 pub fn parse_table(t: &crate::fetch::SidecarBulkRows) -> Vec<ParsedAction>;
 ```
 
-- [ ] **Step 1: Write the failing tests** (in `corp_actions.rs` `mod tests` — replay the committed P0 capture, the same way `master_fetch.rs` replays `histids_report.json`)
+- [x] **Step 1: Write the failing tests** (in `corp_actions.rs` `mod tests` — replay the committed P0 capture, the same way `master_fetch.rs` replays `histids_report.json`)
 
 ```rust
 #[cfg(test)]
@@ -257,12 +257,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd src-tauri && cargo test --lib corp_actions`
 Expected: FAIL — module does not exist (after adding `pub mod corp_actions;` with an empty file, missing items).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src-tauri/src/corp_actions.rs` (parsing half):
 ```rust
@@ -368,12 +368,12 @@ pub fn parse_table(t: &SidecarBulkRows) -> Vec<ParsedAction> {
 ```
 Register in `lib.rs` after `pub mod commands;`: `pub mod corp_actions;`.
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `cd src-tauri && cargo test --lib corp_actions`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/corp_actions.rs src-tauri/src/lib.rs
@@ -399,7 +399,7 @@ fn corp_actions(&self, security: &str)
 (Constants live here as `pub const CORP_ACTIONS_FIELDS: [&str; 2] = ["EQY_DVD_ADJUST_FACT", "DVD_HIST_ALL_WITH_AMT_STATUS"];` — keep `corp_actions.rs`'s `FACTOR_FIELD`/`DVD_FIELD` referring to the same literals; a unit test pins they agree.)
 - `MockMasterFetcher` gains `pub corp_actions_raw: serde_json::Value` (a `bulk_rows`-shaped array) and records `"corp_actions:<security>"`.
 
-- [ ] **Step 1: Write the failing tests** (append to `master_fetch.rs` `mod tests`)
+- [x] **Step 1: Write the failing tests** (append to `master_fetch.rs` `mod tests`)
 
 ```rust
     /// The refresh cost is a promise to the budget screen: 1 security x 2
@@ -429,12 +429,12 @@ fn corp_actions(&self, security: &str)
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd src-tauri && cargo test --lib master_fetch`
 Expected: FAIL — missing items.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Constants (next to `IDENTITY_FIELDS`):
 ```rust
@@ -487,12 +487,12 @@ Mock: add field + `Default` entry + impl:
     }
 ```
 
-- [ ] **Step 4: Run to verify everything passes**
+- [x] **Step 4: Run to verify everything passes**
 
 Run: `cd src-tauri && cargo test`
 Expected: PASS (all unit tests, including every existing MockMasterFetcher consumer — they get the new method via the impl, no call-site changes).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/master_fetch.rs
@@ -526,7 +526,7 @@ pub struct ActionRow { pub id: i64, pub source_field: String,
 ```
 (`fully_parsed_key` = `natural_key NOT LIKE '{%'` — a canonical-JSON fallback key starts with `{`.)
 
-- [ ] **Step 1: Write the failing tests** (`src-tauri/tests/corp_actions.rs`)
+- [x] **Step 1: Write the failing tests** (`src-tauri/tests/corp_actions.rs`)
 
 ```rust
 mod common;
@@ -666,12 +666,12 @@ async fn unparsed_rows_are_stored_flagged_and_counted() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd src-tauri && cargo test --test corp_actions -- --ignored`
 Expected: FAIL — `refresh` does not exist.
 
-- [ ] **Step 3: Implement** (storage half of `corp_actions.rs`)
+- [x] **Step 3: Implement** (storage half of `corp_actions.rs`)
 
 ```rust
 #[derive(Debug, Default, Serialize)]
@@ -802,12 +802,12 @@ pub async fn list_current(pool: &PgPool, instrument_id: i64)
 ```
 (Use the crate's actual transaction alias if one exists — `store::Tx` — matching `insert_alias`'s signature style.)
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `cd src-tauri && cargo test --test corp_actions -- --ignored && cargo test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/corp_actions.rs src-tauri/tests/corp_actions.rs
@@ -828,7 +828,7 @@ git commit -m "feat: corp-action snapshot-diff refresh -- insert, amend, withdra
 - Consumes: `corp_actions::{refresh, list_current, RefreshSummary, ActionRow}`, `views::view_fields` (`FieldDef.bbg_ftype`).
 - Produces: Tauri commands `refresh_corp_actions(instrument_id) -> RefreshSummary`, `list_corp_actions(instrument_id) -> Vec<ActionRow>`.
 
-- [ ] **Step 1: Write the failing guard test** (append to `tests/pipeline.rs`)
+- [x] **Step 1: Write the failing guard test** (append to `tests/pipeline.rs`)
 
 ```rust
 /// A BulkFormat field configured on a view must be SKIPPED by the EOD
@@ -872,12 +872,12 @@ async fn a_bulk_field_on_a_view_is_skipped_with_an_issue_not_stringified() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored a_bulk_field_on_a_view_is_skipped`
 Expected: FAIL — the bulk mnemonic reaches the fetcher (assertion inside `Silent`).
 
-- [ ] **Step 3: Implement the guard** (in `orchestrator::load_view`, where `fields_db` is mapped)
+- [x] **Step 3: Implement the guard** (in `orchestrator::load_view`, where `fields_db` is mapped)
 
 ```rust
     let mut fields = Vec::with_capacity(fields_db.len());
@@ -902,12 +902,12 @@ Expected: FAIL — the bulk mnemonic reaches the fetcher (assertion inside `Sile
 ```
 (Check `views::view_fields`' `FieldDef` exposes `bbg_ftype`; it is a column on `field_def`, so add it to the struct/query if missing.)
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored`
 Expected: PASS.
 
-- [ ] **Step 5: Add the commands** (in `commands.rs`)
+- [x] **Step 5: Add the commands** (in `commands.rs`)
 
 ```rust
 // ---------------------------------------------------------------------------
@@ -934,7 +934,7 @@ pub async fn list_corp_actions(state: State<'_, AppState>, instrument_id: i64)
 ```
 Register both in `lib.rs`'s `generate_handler!` (after `commands::instrument_attrs`).
 
-- [ ] **Step 6: Wire the UI**
+- [x] **Step 6: Wire the UI**
 
 `src/lib/api.ts` — add types + calls following the file's existing pattern:
 ```ts
@@ -958,7 +958,7 @@ export interface CorpActionRow {
 
 Run: `npx svelte-check --threshold error` — no new errors.
 
-- [ ] **Step 7: Full suite + commit**
+- [x] **Step 7: Full suite + commit**
 
 Run: `cd src-tauri && cargo test && cargo test -- --ignored` (skip `smoke_real_bloomberg_end_to_end` if the Terminal is down: `cargo test -- --ignored --skip smoke_real`)
 Expected: PASS.

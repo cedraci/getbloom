@@ -31,14 +31,14 @@
 
 **Interfaces:** none (docs only).
 
-- [ ] **Step 1: Update the design spec status line**
+- [x] **Step 1: Update the design spec status line**
 
 Replace line 4:
 ```markdown
 **Status:** IMPLEMENTED (P1, this branch) — §4.2, §5.1 and §7 corrected 2026-08-20 to match the shipped code; the authoritative verification record is `docs/superpowers/plans/2026-08-19-p1-smoke-checklist.md`.
 ```
 
-- [ ] **Step 2: Correct §4.2's attribute-source paragraph**
+- [x] **Step 2: Correct §4.2's attribute-source paragraph**
 
 Replace the paragraph beginning "Attribute values are sourced from the P0-verified fields:" with:
 ```markdown
@@ -54,7 +54,7 @@ are P5 work (the live smoke pass caught this drift; see the P1 checklist).
 ```
 Keep the existing `status` paragraph unchanged.
 
-- [ ] **Step 3: Rewrite §5.1 to match the shipped behaviour**
+- [x] **Step 3: Rewrite §5.1 to match the shipped behaviour**
 
 Replace the first paragraph of §5.1 ("On first resolution, ... passed.") with:
 ```markdown
@@ -73,7 +73,7 @@ anchor that was passed.
 ```
 The FB/META/METV auto-merge-refusal paragraph stays as is.
 
-- [ ] **Step 4: Correct the §7 hit table**
+- [x] **Step 4: Correct the §7 hit table**
 
 Replace the two "resolving a never-seen instrument" rows and add a history row so the table reads:
 ```markdown
@@ -88,7 +88,7 @@ request is charged securities × 12 `IDENTITY_FIELDS`, matching
 `budget::estimate_eod_hits`' security-field accounting.
 ```
 
-- [ ] **Step 5: Mark the pre-P1 checklist superseded**
+- [x] **Step 5: Mark the pre-P1 checklist superseded**
 
 Prepend to `docs/superpowers/specs/smoke-test-checklist.md`:
 ```markdown
@@ -99,7 +99,7 @@ Prepend to `docs/superpowers/specs/smoke-test-checklist.md`:
 
 ```
 
-- [ ] **Step 6: Remove the junk directory and commit**
+- [x] **Step 6: Remove the junk directory and commit**
 
 ```bash
 rmdir "C:UsersLaurentDesktopCCgetbloomdatasrc-taurisrcresolution"
@@ -119,7 +119,7 @@ The sidecar computes and emits `bulk_rows` (`blp_fetch.py` `emit()`); Rust's `Si
 **Interfaces:**
 - Produces: `pub struct SidecarBulkRows { pub security: String, pub field: String, pub rows: Vec<serde_json::Map<String, serde_json::Value>> }` and `SidecarResponse.bulk_rows: Vec<SidecarBulkRows>` — P3's `MasterFetcher::corp_actions` deserializes this shape.
 
-- [ ] **Step 1: Write the failing test** (in `fetch.rs` `mod tests`, after `text_field_accepts_a_number_by_rendering_it`)
+- [x] **Step 1: Write the failing test** (in `fetch.rs` `mod tests`, after `text_field_accepts_a_number_by_rendering_it`)
 
 ```rust
     /// The sidecar has emitted `bulk_rows` since Task 5 of P1; the Rust side
@@ -142,12 +142,12 @@ The sidecar computes and emits `bulk_rows` (`blp_fetch.py` `emit()`); Rust's `Si
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd src-tauri && cargo test --lib fetch::tests::sidecar_bulk_rows_are_carried_not_dropped`
 Expected: FAIL — `no field 'bulk_rows' on type SidecarResponse` (compile error).
 
-- [ ] **Step 3: Add the types** (in `fetch.rs`, next to `SidecarProblem`)
+- [x] **Step 3: Add the types** (in `fetch.rs`, next to `SidecarProblem`)
 
 ```rust
 /// One security × one bulk (table-valued) field, rows verbatim from the
@@ -166,12 +166,12 @@ and in `SidecarResponse`:
     pub bulk_rows: Vec<SidecarBulkRows>,
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cd src-tauri && cargo test --lib fetch::`
 Expected: all fetch tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/fetch.rs
@@ -189,7 +189,7 @@ git commit -m "fix: carry the sidecar's bulk_rows through SidecarResponse instea
 **Interfaces:**
 - Produces: table `non_trading_day (instrument_id, obs_date, source, recorded_at)` PK `(instrument_id, obs_date)` — consumed by Task 6; column `ingest_issue.created_at TIMESTAMPTZ NOT NULL DEFAULT now()` — consumed by Task 7's cooldown.
 
-- [ ] **Step 1: Write the failing test** (append to `src-tauri/tests/schema.rs`)
+- [x] **Step 1: Write the failing test** (append to `src-tauri/tests/schema.rs`)
 
 ```rust
 /// Task 6 records evidence-based non-trading days; the PK is the dedup.
@@ -215,12 +215,12 @@ async fn non_trading_day_dedups_and_issues_are_timestamped() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd src-tauri && cargo test --test schema -- --ignored non_trading_day_dedups`
 Expected: FAIL — `relation "non_trading_day" does not exist`.
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 `src-tauri/migrations/0002_non_trading_and_issue_time.sql`:
 ```sql
@@ -247,12 +247,12 @@ ALTER TABLE ingest_issue
   ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cd src-tauri && cargo test --test schema -- --ignored`
 Expected: all PASS (migration applies on `common::pool()`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/migrations/0002_non_trading_and_issue_time.sql src-tauri/tests/schema.rs
@@ -273,7 +273,7 @@ git commit -m "feat(db): non_trading_day table and ingest_issue.created_at (migr
 - Consumes: `views::view_fields(pool, view_id) -> Vec<fields::FieldDef>` (has `.id`, `.asset_class_id`, `.value_kind`).
 - Produces: `detect_gaps` signature unchanged; `Gap` struct unchanged (Task 6 modifies the body again to exclude non-trading days).
 
-- [ ] **Step 1: Make `scaffold` configure the view's fields** (in `tests/pipeline.rs`, after the `view_instrument` insert)
+- [x] **Step 1: Make `scaffold` configure the view's fields** (in `tests/pipeline.rs`, after the `view_instrument` insert)
 
 ```rust
     sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
@@ -281,7 +281,7 @@ git commit -m "feat(db): non_trading_day table and ingest_issue.created_at (migr
 ```
 (Check the actual `view_field` column names in `migrations/0001_init.sql:315` first and match them.)
 
-- [ ] **Step 2: Write the failing test** (append to `tests/pipeline.rs`)
+- [x] **Step 2: Write the failing test** (append to `tests/pipeline.rs`)
 
 ```rust
 /// Gap detection is per (instrument, field-complete date): a PX_LAST hole
@@ -336,12 +336,12 @@ async fn a_missing_field_behind_a_present_sibling_is_still_a_gap() {
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored a_missing_field_behind_a_present_sibling_is_still_a_gap`
 Expected: FAIL on the first assertion (old query sees ANY observation as coverage).
 
-- [ ] **Step 4: Rewrite `detect_gaps`** (replace the query and per-member loop in `scheduler.rs`; keep the doc comment, extend it with the field-completeness rule)
+- [x] **Step 4: Rewrite `detect_gaps`** (replace the query and per-member loop in `scheduler.rs`; keep the doc comment, extend it with the field-completeness rule)
 
 ```rust
 pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
@@ -396,12 +396,12 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
 }
 ```
 
-- [ ] **Step 5: Run the new test and the two existing gap tests**
+- [x] **Step 5: Run the new test and the two existing gap tests**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored`
 Expected: all PASS, including `a_gap_in_one_instrument_is_not_hidden_by_another_that_reported` and `a_retired_member_is_not_reported_as_a_gap` (they now rely on Step 1's `view_field` row).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/scheduler.rs src-tauri/tests/pipeline.rs
@@ -424,7 +424,7 @@ A one-instrument gap currently re-fetches the entire view (`commands.rs:353-357`
 **Interfaces:**
 - Produces: `pub async fn run_backfill(pool, cfg, view_id, start, end, instrument_ids: Option<&[i64]>, confirmed) -> AppResult<RunOutcome>` (same extra param on `run_backfill_with`); Tauri command `run_backfill_now(view_id, start, end, instrument_ids: Option<Vec<i64>>, confirmed)`; `api.runBackfillNow(viewId, start, end, confirmed, instrumentIds?: number[] | null)`.
 
-- [ ] **Step 1: Write the failing test** (append to `tests/pipeline.rs`)
+- [x] **Step 1: Write the failing test** (append to `tests/pipeline.rs`)
 
 ```rust
 /// A one-instrument gap must not cost a whole-view refetch. The filter is
@@ -483,12 +483,12 @@ async fn a_filtered_backfill_fetches_only_the_target_instrument() {
 ```
 (`tempfile` is already a dev-dependency — `db_integration.rs` uses it; if the import is missing in pipeline.rs, add `tempfile` usage exactly as db_integration does.)
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored a_filtered_backfill_fetches_only_the_target_instrument`
 Expected: FAIL — compile error, `run_backfill_with` takes no `instrument_ids`.
 
-- [ ] **Step 3: Implement the filter**
+- [x] **Step 3: Implement the filter**
 
 `orchestrator.rs`:
 ```rust
@@ -525,12 +525,12 @@ Update the `GapRow` doc comment in `commands.rs` (the "Backfilling still runs th
 
 Fix compile errors at existing call sites (`tests/db_integration.rs` backfill tests, if any, gain `None`).
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored && cargo test`
 Expected: PASS.
 
-- [ ] **Step 5: Wire the UI**
+- [x] **Step 5: Wire the UI**
 
 `src/lib/api.ts`:
 ```ts
@@ -549,7 +549,7 @@ Expected: PASS.
 
 Run: `npx svelte-check --threshold error` (or `npm run check` if defined) — expect no new errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/orchestrator.rs src-tauri/src/commands.rs src-tauri/tests/ src/lib/api.ts src/lib/RunScreen.svelte
@@ -572,7 +572,7 @@ Holidays currently surface as permanent, un-clearable gaps: a holiday run stores
 - Consumes: `non_trading_day` table (Task 3); `FetchRequest` (`.assets`, `.start`, `.end`, `.is_single_day()`); `FetchOutcome` (`.cells`, `.problems`).
 - Produces: `pub async fn record_non_trading_days(pool: &PgPool, req: &FetchRequest, outcome: &FetchOutcome) -> AppResult<u64>` (rows inserted).
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/pipeline.rs`)
+- [x] **Step 1: Write the failing tests** (append to `tests/pipeline.rs`)
 
 ```rust
 /// Rule A: a dated no_data with no cells and no other problem for that
@@ -650,12 +650,12 @@ async fn a_silent_weekday_inside_a_range_with_neighbours_is_non_trading() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored non_trading`
 Expected: FAIL — `record_non_trading_days` does not exist.
 
-- [ ] **Step 3: Implement** (append to `ingest.rs`)
+- [x] **Step 3: Implement** (append to `ingest.rs`)
 
 ```rust
 use chrono::NaiveDate;
@@ -746,12 +746,12 @@ and inside the loop:
             .map(|(_, d)| *d));
 ```
 
-- [ ] **Step 4: Run to verify they pass**
+- [x] **Step 4: Run to verify they pass**
 
 Run: `cd src-tauri && cargo test --test pipeline -- --ignored && cargo test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/ingest.rs src-tauri/src/orchestrator.rs src-tauri/src/scheduler.rs src-tauri/tests/pipeline.rs
@@ -773,7 +773,7 @@ A renamed instrument keeps sending its dead ticker every day until a human notic
 - Consumes: `MasterFetcher::identity`, `record_decision`, `reconcile_identity` (both private, same module), `ingest_issue.created_at` (Task 3).
 - Produces: `pub async fn auto_reresolve_invalid<F: MasterFetcher>(pool: &PgPool, fetcher: &F, run_id: i64, as_of: NaiveDate) -> AppResult<u32>` (instruments re-pointed).
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/resolution.rs`; reuse that file's existing helpers for creating an instrument with a FIGI and a `bdp_security` alias — follow the pattern of `re_resolving_the_same_figi_under_a_new_security_records_the_rename`)
+- [x] **Step 1: Write the failing tests** (append to `tests/resolution.rs`; reuse that file's existing helpers for creating an instrument with a FIGI and a `bdp_security` alias — follow the pattern of `re_resolving_the_same_figi_under_a_new_security_records_the_rename`)
 
 ```rust
 /// A run that saw invalid_security for an instrument probes Bloomberg by the
@@ -850,12 +850,12 @@ async fn an_instrument_without_a_figi_is_skipped_not_probed() {
 
 Write the three small helpers (`scaffold_dead_run`, `scaffold_dead_run_no_figi`, `insert_invalid_security_run`) in the same file: create instrument (+ `store::set_bloomberg_ids` for the FIGI variant), insert the `bdp_security` alias, create a view + `run` row (`kind='eod'`, `status='partial'`), and insert `ingest_issue (run_id, instrument_id, severity, code) VALUES ($1,$2,'warn','invalid_security')`. Copy the alias-insertion pattern from `tests/pipeline.rs::scaffold`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cd src-tauri && cargo test --test resolution -- --ignored auto_reresolve`
 Expected: FAIL — `auto_reresolve_invalid` not found.
 
-- [ ] **Step 3: Implement** (in `resolution/engine.rs`)
+- [x] **Step 3: Implement** (in `resolution/engine.rs`)
 
 ```rust
 /// One probe per instrument per this many days: a permanently dead
@@ -963,12 +963,12 @@ Hook the live wrappers in `orchestrator.rs` (`run_eod` and `run_backfill`, NOT t
 ```
 (mirror in `run_backfill`).
 
-- [ ] **Step 4: Run to verify everything passes**
+- [x] **Step 4: Run to verify everything passes**
 
 Run: `cd src-tauri && cargo test --test resolution -- --ignored && cargo test`
 Expected: PASS (including all pre-existing resolution tests — none used the live wrappers).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/resolution/engine.rs src-tauri/src/orchestrator.rs src-tauri/tests/resolution.rs
@@ -983,7 +983,7 @@ The app has never run against its real database (`relation "instrument" does not
 
 **Files:** none (operational).
 
-- [ ] **Step 1: Create the database if missing**
+- [x] **Step 1: Create the database if missing**
 
 ```bash
 PGPASSWORD=postgres psql -U postgres -h localhost -tc \
@@ -991,11 +991,11 @@ PGPASSWORD=postgres psql -U postgres -h localhost -tc \
   || PGPASSWORD=postgres psql -U postgres -h localhost -c "CREATE DATABASE bloomdata"
 ```
 
-- [ ] **Step 2: Boot the app once**
+- [x] **Step 2: Boot the app once**
 
 Run `npm run tauri dev` (or the built exe) from the repo root; wait for the window; the startup panics loudly if migrations fail.
 
-- [ ] **Step 3: Verify the schema landed**
+- [x] **Step 3: Verify the schema landed**
 
 ```bash
 PGPASSWORD=postgres psql -U postgres -h localhost -d bloomdata -c "\dt" \
