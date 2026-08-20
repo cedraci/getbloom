@@ -282,6 +282,27 @@ impl MasterFetcher for KeyedFetcher {
         Ok(Answered { parsed: Default::default(), raw: serde_json::json!([]) })
     }
 
+    async fn market_status(&self, _securities: &[String])
+        -> AppResult<Answered<Vec<(String, String)>>>
+    {
+        self.record();
+        Ok(Answered { parsed: vec![], raw: serde_json::json!([]) })
+    }
+
+    async fn ma_deals(&self, _security: &str)
+        -> AppResult<Answered<getbloomdata_lib::master_fetch::MaDealsOutcome>>
+    {
+        self.record();
+        Ok(Answered { parsed: Default::default(), raw: serde_json::json!([]) })
+    }
+
+    async fn action_terms(&self, _action_id: &str)
+        -> AppResult<Answered<Option<getbloomdata_lib::master_fetch::ActionTerms>>>
+    {
+        self.record();
+        Ok(Answered { parsed: None, raw: serde_json::json!([]) })
+    }
+
     async fn instrument_list(&self, _query: &str, _yellow_key_filter: Option<&str>,
                              _max_results: u32) -> AppResult<Answered<Vec<Candidate>>>
     {

@@ -67,6 +67,48 @@ pub fn corp_actions_hit_cost(securities: usize) -> i64 {
     (securities * CORP_ACTIONS_FIELDS.len()) as i64
 }
 
+/// P6 lifecycle fields, all probed live 2026-08-20 against this licence
+/// (design: docs/superpowers/specs/2026-08-20-p6-merger-lifecycle-design.md).
+///
+/// MARKET_STATUS is NOT SIMP_SEC_STATUS: the latter is a realtime market
+/// session (P0 10.2) and stays banned; MARKET_STATUS answered ACTV for a
+/// live fund and ACQU for two independently-known absorbed ones, which is a
+/// lifecycle fact worth one hit.
+pub const MARKET_STATUS_FIELD: &str = "MARKET_STATUS";
+/// The lifecycle answer Bloomberg gives for a security that still trades.
+/// Every other value (ACQU measured live; others unenumerated) means "dead,
+/// investigate" -- the raw value is stored verbatim either way.
+pub const MARKET_STATUS_ACTIVE: &str = "ACTV";
+
+/// Bulk deal list on an EQUITY target: every row carries Bloomberg's own
+/// "Action Id". Measured "not applicable to security" on funds -- that
+/// not-applicable answer is itself the fund-vs-equity router in P6.
+pub const MA_DEALS_FIELD: &str = "MERGERS_AND_ACQUISITIONS";
+
+/// CA_MA_* terms on an "<ActionID> Action" security (a valid security
+/// string, measured). CA_MA_PAYMENT_TYP is deliberately absent: it arrives
+/// LOCALIZED ("Cash et Actions" on this French Terminal) and must never be
+/// parsed; the presence of STOCK_TERMS / CASH_TERMS is the reliable signal.
+pub const ACTION_TERMS_FIELDS: [&str; 6] = [
+    "CA_MA_TARGET_TICKER",
+    "CA_MA_ACQUIRER_TICKER",
+    "CA_MA_ACQUIRER_NAME",
+    "CA_MA_COMPLETE_DT",
+    "CA_MA_STOCK_TERMS",
+    "CA_MA_CASH_TERMS",
+];
+
+/// One scalar field per security, the standing per-security-field unit.
+pub fn market_status_hit_cost(securities: usize) -> i64 {
+    securities as i64
+}
+/// One security, one bulk field.
+pub const MA_DEALS_HIT_COST: i64 = 1;
+/// One Action security x the CA_MA_* fields.
+pub fn action_terms_hit_cost() -> i64 {
+    ACTION_TERMS_FIELDS.len() as i64
+}
+
 pub const HIST_IDS_FIELD: &str = "HISTORICAL_IDS_TIME_RANGE";
 /// Overrides on HIST_IDS_FIELD, resolved from its own FieldInfoRequest (P0 §6.3).
 pub const HIST_IDS_ANCHOR: &str = "HISTORICAL_STARTING_IDENTIFIER";
@@ -103,6 +145,42 @@ pub struct HistIdRow {
     pub source: Option<String>,
 }
 
+/// One row of the MERGERS_AND_ACQUISITIONS deal list, typed just far enough
+/// to sort and filter; `row` keeps the verbatim record for evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaDeal {
+    pub action_id: String,
+    pub deal_type: Option<String>,
+    pub deal_status: Option<String>,
+    pub announce_date: Option<NaiveDate>,
+    pub row: serde_json::Value,
+}
+
+/// The deal list, or Bloomberg's statement that the security has none to
+/// give. `not_applicable` is a routing answer, not an error: it is how a
+/// fund identifies itself to the lifecycle flow (measured live on SCHDYXA
+/// and OMUSEAA).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MaDealsOutcome {
+    pub deals: Vec<MaDeal>,
+    pub not_applicable: bool,
+}
+
+/// CA_MA_* fields read off one "<ActionID> Action" security. All optional:
+/// a delisting action answers none of them (measured), and a cash deal has
+/// no stock terms. `raw` keeps the verbatim fieldData for the link evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionTerms {
+    pub action_id: String,
+    pub target_ticker: Option<String>,
+    pub acquirer_ticker: Option<String>,
+    pub acquirer_name: Option<String>,
+    pub complete_dt: Option<NaiveDate>,
+    pub stock_terms: Option<String>,
+    pub cash_terms: Option<String>,
+    pub raw: serde_json::Value,
+}
+
 /// A parsed response paired with the wire JSON it came from.
 ///
 /// The parsed form is what callers use; `raw` is what gets written to
@@ -136,6 +214,25 @@ pub trait MasterFetcher {
     fn corp_actions(&self, securities: &[String])
         -> impl std::future::Future<
             Output = AppResult<Answered<CorpActionsTables>>> + Send;
+
+    /// MARKET_STATUS for a batch: (security, verbatim status) pairs. One
+    /// request, one hit per security -- callers chunk to
+    /// `fetch::MAX_SECURITIES_PER_REQUEST`.
+    fn market_status(&self, securities: &[String])
+        -> impl std::future::Future<
+            Output = AppResult<Answered<Vec<(String, String)>>>> + Send;
+
+    /// The M&A deal list of one (equity) target. `not_applicable` = true is
+    /// the fund answer, not a failure.
+    fn ma_deals(&self, security: &str)
+        -> impl std::future::Future<
+            Output = AppResult<Answered<MaDealsOutcome>>> + Send;
+
+    /// CA_MA_* terms on one "<ActionID> Action" security. None when the
+    /// action answers no term fields at all (a delisting action, measured).
+    fn action_terms(&self, action_id: &str)
+        -> impl std::future::Future<
+            Output = AppResult<Answered<Option<ActionTerms>>>> + Send;
 }
 
 /// A corp-actions answer is tables AND problems: "Field not applicable to
@@ -246,6 +343,72 @@ pub fn parse_list(raw: &serde_json::Value) -> Vec<Candidate> {
             })
         })
         .collect()
+}
+
+/// (security, MARKET_STATUS) pairs from a reference response. A security
+/// with an error or without the field is simply absent -- the caller treats
+/// silence as "unknown", never as "active".
+pub fn parse_market_status(raw: &serde_json::Value) -> Vec<(String, String)> {
+    each_security(raw)
+        .filter(|sd| sd.get("securityError").is_none())
+        .filter_map(|sd| {
+            let security = s(&sd["security"])?;
+            let status = s(&sd.pointer(&format!("/fieldData/{MARKET_STATUS_FIELD}"))
+                .cloned().unwrap_or(serde_json::Value::Null))?;
+            Some((security, status))
+        })
+        .collect()
+}
+
+/// MERGERS_AND_ACQUISITIONS rows from the sidecar's `bulk_rows` section,
+/// plus the not-applicable routing signal from `problems`. Column names are
+/// Bloomberg's own, spaces included ("Action Id", "Deal Type", ...).
+pub fn parse_ma_deals(bulk_rows: &serde_json::Value, problems: &serde_json::Value)
+    -> MaDealsOutcome
+{
+    let deals = bulk_rows.as_array().map(|v| v.as_slice()).unwrap_or(&[])
+        .iter()
+        .filter(|t| t.get("field").and_then(|f| f.as_str()) == Some(MA_DEALS_FIELD))
+        .filter_map(|t| t.get("rows")?.as_array())
+        .flatten()
+        .filter_map(|row| Some(MaDeal {
+            action_id: s(row.get("Action Id")?)?,
+            deal_type: row.get("Deal Type").and_then(s),
+            deal_status: row.get("Deal Status").and_then(s),
+            announce_date: row.get("Announcement Date").and_then(date),
+            row: row.clone(),
+        }))
+        .collect();
+    let not_applicable = problems.as_array().map(|v| v.as_slice()).unwrap_or(&[])
+        .iter()
+        .any(|p| p.get("field").and_then(|f| f.as_str()) == Some(MA_DEALS_FIELD)
+            && p.get("detail").and_then(|d| d.as_str())
+                .is_some_and(|d| d.contains("not applicable")));
+    MaDealsOutcome { deals, not_applicable }
+}
+
+/// CA_MA_* fields off an Action security's reference response. None when no
+/// term field came back at all: a delisting action is not a deal record.
+pub fn parse_action_terms(raw: &serde_json::Value, action_id: &str)
+    -> Option<ActionTerms>
+{
+    let sd = each_security(raw)
+        .find(|sd| sd.get("securityError").is_none())?;
+    let f = sd.get("fieldData").cloned().unwrap_or(serde_json::json!({}));
+    let g = |k: &str| f.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let terms = ActionTerms {
+        action_id: action_id.to_string(),
+        target_ticker: s(&g("CA_MA_TARGET_TICKER")),
+        acquirer_ticker: s(&g("CA_MA_ACQUIRER_TICKER")),
+        acquirer_name: s(&g("CA_MA_ACQUIRER_NAME")),
+        complete_dt: date(&g("CA_MA_COMPLETE_DT")),
+        stock_terms: s(&g("CA_MA_STOCK_TERMS")),
+        cash_terms: s(&g("CA_MA_CASH_TERMS")),
+        raw: f,
+    };
+    (terms.target_ticker.is_some() || terms.acquirer_ticker.is_some()
+        || terms.complete_dt.is_some() || terms.stock_terms.is_some())
+        .then_some(terms)
 }
 
 // ------------------------------------------------------------------ live
@@ -372,6 +535,49 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
         };
         Ok(Answered { parsed, raw: resp })
     }
+
+    async fn market_status(&self, securities: &[String])
+        -> AppResult<Answered<Vec<(String, String)>>>
+    {
+        let resp = self.call(serde_json::json!({
+            "kind": "reference",
+            "securities": securities,
+            "fields": [MARKET_STATUS_FIELD],
+            "obs_date": chrono::Local::now().date_naive().to_string(),
+            "raw": true,
+        })).await?;
+        self.charge("lifecycle", market_status_hit_cost(securities.len())).await;
+        let raw = resp["raw_messages"].clone();
+        let parsed = parse_market_status(&raw);
+        Ok(Answered { parsed, raw })
+    }
+
+    async fn ma_deals(&self, security: &str) -> AppResult<Answered<MaDealsOutcome>> {
+        let resp = self.call(serde_json::json!({
+            "kind": "bulk_reference",
+            "securities": [security],
+            "fields": [MA_DEALS_FIELD],
+        })).await?;
+        self.charge("lifecycle", MA_DEALS_HIT_COST).await;
+        let parsed = parse_ma_deals(&resp["bulk_rows"], &resp["problems"]);
+        Ok(Answered { parsed, raw: resp })
+    }
+
+    async fn action_terms(&self, action_id: &str)
+        -> AppResult<Answered<Option<ActionTerms>>>
+    {
+        let resp = self.call(serde_json::json!({
+            "kind": "reference",
+            "securities": [format!("{action_id} Action")],
+            "fields": ACTION_TERMS_FIELDS,
+            "obs_date": chrono::Local::now().date_naive().to_string(),
+            "raw": true,
+        })).await?;
+        self.charge("merger_terms", action_terms_hit_cost()).await;
+        let raw = resp["raw_messages"].clone();
+        let parsed = parse_action_terms(&raw, action_id);
+        Ok(Answered { parsed, raw })
+    }
 }
 
 // ------------------------------------------------------------------ mock
@@ -386,6 +592,13 @@ pub struct MockMasterFetcher {
     pub corp_actions_raw: serde_json::Value,
     /// A `problems`-shaped array (security/field/code/detail objects).
     pub corp_actions_problems: serde_json::Value,
+    /// A raw_messages-shaped array for MARKET_STATUS reference replies.
+    pub market_status_raw: serde_json::Value,
+    /// bulk_rows / problems for the MERGERS_AND_ACQUISITIONS request.
+    pub ma_deals_raw: serde_json::Value,
+    pub ma_deals_problems: serde_json::Value,
+    /// raw_messages keyed by action id; an absent key replays an empty reply.
+    pub action_terms_raw: std::collections::HashMap<String, serde_json::Value>,
     /// Every call recorded, so a test can assert Bloomberg was NOT called.
     pub calls: std::sync::Mutex<Vec<String>>,
 }
@@ -398,6 +611,10 @@ impl Default for MockMasterFetcher {
             list_raw: serde_json::json!([]),
             corp_actions_raw: serde_json::json!([]),
             corp_actions_problems: serde_json::json!([]),
+            market_status_raw: serde_json::json!([]),
+            ma_deals_raw: serde_json::json!([]),
+            ma_deals_problems: serde_json::json!([]),
+            action_terms_raw: std::collections::HashMap::new(),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -459,6 +676,31 @@ impl MasterFetcher for MockMasterFetcher {
                 .unwrap_or_default(),
         };
         Ok(Answered { parsed, raw: self.corp_actions_raw.clone() })
+    }
+
+    async fn market_status(&self, securities: &[String])
+        -> AppResult<Answered<Vec<(String, String)>>>
+    {
+        self.record(&format!("market_status:{}", securities.join(",")));
+        Ok(Answered { parsed: parse_market_status(&self.market_status_raw),
+                      raw: self.market_status_raw.clone() })
+    }
+
+    async fn ma_deals(&self, security: &str) -> AppResult<Answered<MaDealsOutcome>> {
+        self.record(&format!("ma_deals:{security}"));
+        Ok(Answered {
+            parsed: parse_ma_deals(&self.ma_deals_raw, &self.ma_deals_problems),
+            raw: self.ma_deals_raw.clone(),
+        })
+    }
+
+    async fn action_terms(&self, action_id: &str)
+        -> AppResult<Answered<Option<ActionTerms>>>
+    {
+        self.record(&format!("action_terms:{action_id}"));
+        let raw = self.action_terms_raw.get(action_id).cloned()
+            .unwrap_or(serde_json::json!([]));
+        Ok(Answered { parsed: parse_action_terms(&raw, action_id), raw })
     }
 }
 
@@ -581,6 +823,96 @@ mod tests {
         assert_eq!(corp_actions_hit_cost(0), 0, "a request for nothing costs nothing");
         assert_eq!(CORP_ACTIONS_FIELDS[0], crate::corp_actions::FACTOR_FIELD);
         assert_eq!(CORP_ACTIONS_FIELDS[1], crate::corp_actions::DVD_FIELD);
+    }
+
+    /// Shapes below are verbatim from the 2026-08-20 live probes (design
+    /// doc 2), not invented: MARKET_STATUS ACQU on a dead fund, the XLNX
+    /// deal list row, and the 222633226 Action terms reply.
+    #[test]
+    fn market_status_pairs_are_parsed_and_errors_stay_silent() {
+        let raw = serde_json::json!([{"securityData": [
+            {"security": "YODA LN Equity", "fieldExceptions": [],
+             "fieldData": {"MARKET_STATUS": "ACQU"}},
+            {"security": "SCHDYXA LN Equity", "fieldExceptions": [],
+             "fieldData": {"MARKET_STATUS": "ACTV"}},
+            {"security": "NOPE LN Equity",
+             "securityError": {"category": "BAD_SEC"}, "fieldData": {}}]}]);
+        let parsed = parse_market_status(&raw);
+        assert_eq!(parsed, vec![
+            ("YODA LN Equity".to_string(), "ACQU".to_string()),
+            ("SCHDYXA LN Equity".to_string(), "ACTV".to_string())],
+            "an errored security is absent -- unknown, never active");
+    }
+
+    #[test]
+    fn ma_deal_rows_are_parsed_with_bloombergs_own_column_names() {
+        let bulk = serde_json::json!([{"security": "XLNX US Equity",
+            "field": "MERGERS_AND_ACQUISITIONS", "rows": [
+              {"Action Id": "222633226", "Deal Type": "M&A",
+               "Announcement Date": "2020-10-27", "Deal Status": "Completed",
+               "Payment Type": "Stock"},
+              {"Action Id": "225740599", "Deal Type": "INV",
+               "Announcement Date": "2021-03-03", "Deal Status": "Completed"}]}]);
+        let out = parse_ma_deals(&bulk, &serde_json::json!([]));
+        assert!(!out.not_applicable);
+        assert_eq!(out.deals.len(), 2);
+        assert_eq!(out.deals[0].action_id, "222633226");
+        assert_eq!(out.deals[0].deal_type.as_deref(), Some("M&A"));
+        assert_eq!(out.deals[0].announce_date,
+                   Some("2020-10-27".parse().unwrap()));
+        assert!(out.deals[0].row.get("Payment Type").is_some(),
+                "the verbatim row rides along as evidence");
+    }
+
+    /// The fund answer, measured live: not-applicable is a ROUTE, not a
+    /// failure, and must survive the problems channel.
+    #[test]
+    fn ma_deals_not_applicable_routes_the_fund_path() {
+        let problems = serde_json::json!([{
+            "security": "OMUSEAA LN Equity", "field": "MERGERS_AND_ACQUISITIONS",
+            "code": "field_error",
+            "detail": "Field not applicable to security"}]);
+        let out = parse_ma_deals(&serde_json::json!([]), &problems);
+        assert!(out.deals.is_empty());
+        assert!(out.not_applicable);
+    }
+
+    #[test]
+    fn action_terms_are_parsed_from_the_live_reply_shape() {
+        let raw = serde_json::json!([{"securityData": [{
+            "security": "222633226 Action", "fieldExceptions": [],
+            "fieldData": {
+                "CA_MA_ACQUIRER_TICKER": "AMD US",
+                "CA_MA_ACQUIRER_NAME": "Advanced Micro Devices Inc",
+                "CA_MA_TARGET_TICKER": "XLNX US",
+                "CA_MA_COMPLETE_DT": "2022-02-15",
+                "CA_MA_STOCK_TERMS": "1.7234 Aqr sh./Tgt sh."}}]}]);
+        let t = parse_action_terms(&raw, "222633226").unwrap();
+        assert_eq!(t.acquirer_ticker.as_deref(), Some("AMD US"));
+        assert_eq!(t.target_ticker.as_deref(), Some("XLNX US"));
+        assert_eq!(t.complete_dt, Some("2022-02-15".parse().unwrap()));
+        assert_eq!(t.stock_terms.as_deref(), Some("1.7234 Aqr sh./Tgt sh."));
+        assert_eq!(t.cash_terms, None, "an all-stock deal has no cash terms");
+    }
+
+    /// A delisting action (measured: 238004028) answers no CA_MA fields at
+    /// all -- that is None, not a half-empty terms struct.
+    #[test]
+    fn an_action_with_no_term_fields_is_none() {
+        let raw = serde_json::json!([{"securityData": [{
+            "security": "238004028 Action", "fieldExceptions": [],
+            "fieldData": {}}]}]);
+        assert!(parse_action_terms(&raw, "238004028").is_none());
+    }
+
+    #[test]
+    fn lifecycle_hit_costs_match_the_field_counts() {
+        assert_eq!(market_status_hit_cost(3), 3, "one scalar field per security");
+        assert_eq!(MA_DEALS_HIT_COST, 1);
+        assert_eq!(action_terms_hit_cost(), 6);
+        assert_eq!(ACTION_TERMS_FIELDS.len(), 6);
+        assert!(!ACTION_TERMS_FIELDS.contains(&"CA_MA_PAYMENT_TYP"),
+                "localized field, never requested, never parsed");
     }
 
     #[tokio::test]

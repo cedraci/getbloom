@@ -377,6 +377,23 @@ pub async fn propose_link(pool: &PgPool, predecessor_id: i64, successor_id: i64,
         .fetch_one(pool).await?)
 }
 
+/// P6: Bloomberg-asserted merger terms on a link. COALESCE keeps an earlier
+/// non-null value when a re-run arrives with less (a terms payload that
+/// stopped parsing must not erase a ratio that once parsed); the verbatim
+/// payload is the authority, the ratio the extraction, as everywhere else.
+pub async fn set_link_terms(pool: &PgPool, link_id: i64,
+                            exchange_ratio: Option<f64>,
+                            terms: Option<serde_json::Value>) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE instrument_link
+            SET exchange_ratio = COALESCE($2, exchange_ratio),
+                terms = COALESCE($3, terms)
+          WHERE id = $1")
+        .bind(link_id).bind(exchange_ratio).bind(terms)
+        .execute(pool).await?;
+    Ok(())
+}
+
 /// A no-op against an already-confirmed link: without this guard a second
 /// call would silently overwrite who confirmed it and when.
 pub async fn confirm_link(pool: &PgPool, link_id: i64, by: &str) -> AppResult<()> {

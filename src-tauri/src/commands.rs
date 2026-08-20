@@ -184,6 +184,10 @@ pub struct LinkProposal {
     pub link_type: String,
     pub effective_date: chrono::NaiveDate,
     pub evidence: serde_json::Value,
+    /// P6: Bloomberg's asserted ratio (acquirer sh. per target sh.), when
+    /// the lifecycle flow found one. Shown so a reviewer confirming a
+    /// merger sees the terms, not just the dates.
+    pub exchange_ratio: Option<f64>,
 }
 
 #[tauri::command]
@@ -192,7 +196,7 @@ pub async fn list_link_proposals(state: State<'_, AppState>)
     Ok(sqlx::query_as::<_, LinkProposal>(
         "SELECT l.id, l.predecessor_id, l.successor_id,
                 bp.label AS predecessor_label, bs.label AS successor_label,
-                l.link_type, l.effective_date, l.evidence
+                l.link_type, l.effective_date, l.evidence, l.exchange_ratio
            FROM instrument_link l
            LEFT JOIN book_entry bp ON bp.instrument_id = l.predecessor_id
            LEFT JOIN book_entry bs ON bs.instrument_id = l.successor_id
@@ -338,18 +342,43 @@ pub async fn list_runs(state: State<'_, AppState>, limit: i64)
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct IssueRow {
-    pub id: i64, pub run_id: i64, pub instrument_id: Option<i64>, pub field_id: Option<i64>,
+    pub id: i64,
+    /// NULL for an issue that arose outside any run (lifecycle findings,
+    /// identifier-history refusals) -- see the schema comment on ingest_issue.
+    pub run_id: Option<i64>,
+    pub instrument_id: Option<i64>, pub field_id: Option<i64>,
     pub obs_date: Option<chrono::NaiveDate>, pub severity: String,
     pub code: String, pub detail: String,
+    /// Book label of the instrument, when it has one -- an issue naming
+    /// "instrument 2" is unreadable next to one naming "YODA LN Equity".
+    pub label: Option<String>,
 }
 
 #[tauri::command]
 pub async fn list_issues(state: State<'_, AppState>, run_id: i64)
     -> Result<Vec<IssueRow>, AppError> {
     Ok(sqlx::query_as::<_, IssueRow>(
-        "SELECT id, run_id, instrument_id, field_id, obs_date, severity, code, detail
-         FROM ingest_issue WHERE run_id = $1 ORDER BY id")
+        "SELECT i.id, i.run_id, i.instrument_id, i.field_id, i.obs_date,
+                i.severity, i.code, i.detail, b.label
+           FROM ingest_issue i
+           LEFT JOIN book_entry b ON b.instrument_id = i.instrument_id
+          WHERE i.run_id = $1 ORDER BY i.id")
         .bind(run_id).fetch_all(&state.pool).await?)
+}
+
+/// P6: issues that belong to no run -- lifecycle findings and
+/// identifier-history refusals. They were durable in the database from the
+/// start but had no surface in the UI; this is that surface.
+#[tauri::command]
+pub async fn list_standalone_issues(state: State<'_, AppState>)
+    -> Result<Vec<IssueRow>, AppError> {
+    Ok(sqlx::query_as::<_, IssueRow>(
+        "SELECT i.id, i.run_id, i.instrument_id, i.field_id, i.obs_date,
+                i.severity, i.code, i.detail, b.label
+           FROM ingest_issue i
+           LEFT JOIN book_entry b ON b.instrument_id = i.instrument_id
+          WHERE i.run_id IS NULL ORDER BY i.id DESC LIMIT 200")
+        .fetch_all(&state.pool).await?)
 }
 
 /// Gaps are per instrument, not per view: one member reporting on a date does
@@ -572,6 +601,20 @@ pub async fn refresh_corp_actions(state: State<'_, AppState>, instrument_id: i64
 pub async fn list_corp_actions(state: State<'_, AppState>, instrument_id: i64)
     -> Result<Vec<crate::corp_actions::ActionRow>, AppError> {
     crate::corp_actions::list_current(&state.pool, instrument_id).await
+}
+
+/// P6: the merger-lifecycle check, on demand. The same flow runs
+/// automatically after every completed run; this button exists so a user
+/// staring at a quiet instrument does not have to wait for the next run.
+/// Costed like everything else -- 1 hit per stale instrument, more only for
+/// the dead ones -- and bounded by the same 30-day cooldown.
+#[tauri::command]
+pub async fn run_lifecycle_check(state: State<'_, AppState>)
+    -> Result<crate::lifecycle::LifecycleSummary, AppError> {
+    let cfg = pipeline_cfg(&state).await;
+    let fetcher = master_fetch::BlpapiMasterFetcher { cfg: &cfg, pool: &state.pool };
+    crate::lifecycle::run_check(&state.pool, &fetcher,
+                                chrono::Local::now().date_naive()).await
 }
 
 // ---------------------------------------------------------------------------

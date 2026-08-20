@@ -71,6 +71,24 @@ impl MasterFetcher for TwoRowFetcher {
         Ok(Answered { parsed: Default::default(), raw: serde_json::json!([]) })
     }
 
+    async fn market_status(&self, _securities: &[String])
+        -> AppResult<Answered<Vec<(String, String)>>>
+    {
+        Ok(Answered { parsed: vec![], raw: serde_json::json!([]) })
+    }
+
+    async fn ma_deals(&self, _security: &str)
+        -> AppResult<Answered<getbloomdata_lib::master_fetch::MaDealsOutcome>>
+    {
+        Ok(Answered { parsed: Default::default(), raw: serde_json::json!([]) })
+    }
+
+    async fn action_terms(&self, _action_id: &str)
+        -> AppResult<Answered<Option<getbloomdata_lib::master_fetch::ActionTerms>>>
+    {
+        Ok(Answered { parsed: None, raw: serde_json::json!([]) })
+    }
+
     async fn instrument_list(&self, _q: &str, _yk: Option<&str>, _max: u32)
         -> AppResult<Answered<Vec<Candidate>>>
     {

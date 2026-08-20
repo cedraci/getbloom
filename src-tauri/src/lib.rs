@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod fields;
 pub mod ingest;
 pub mod instrument;
+pub mod lifecycle;
 pub mod master_fetch;
 pub mod orchestrator;
 pub mod registry;
@@ -98,6 +99,7 @@ pub fn run() {
             commands::search_local, commands::search_bloomberg,
             commands::instrument_aliases, commands::instrument_attrs,
             commands::refresh_corp_actions, commands::list_corp_actions,
+            commands::run_lifecycle_check, commands::list_standalone_issues,
             commands::refresh_view_corp_actions,
             commands::list_observations, commands::list_corp_actions_full,
             commands::export_observations_csv, commands::export_corp_actions_csv,

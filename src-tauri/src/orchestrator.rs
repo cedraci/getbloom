@@ -293,6 +293,7 @@ pub async fn run_eod(
                                   obs_date, confirmed).await;
     auto_reresolve_after(pool, cfg, &result).await;
     corp_actions_after(pool, cfg, view_id, &mut result).await;
+    lifecycle_after(pool, cfg, &result).await;
     result
 }
 
@@ -325,6 +326,27 @@ async fn corp_actions_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
             pool, &mf, view_id, chrono::Local::now().date_naive(), true).await {
             Ok(sum) => *corp_actions = Some(sum),
             Err(e) => eprintln!("corp-actions refresh after run {run_id} failed: {e}"),
+        }
+    }
+}
+
+/// P6: after a completed run, ask ONE cheap question about book instruments
+/// that have gone quiet (design: 2026-08-20-p6-merger-lifecycle-design.md).
+/// On a healthy book `stale_candidates` is empty and this costs nothing.
+/// Advisory like its two siblings: a lifecycle failure is reported on
+/// stderr and durable issues, never by failing a run that already ingested.
+async fn lifecycle_after(pool: &PgPool, cfg: &PipelineConfig,
+                         result: &AppResult<RunOutcome>) {
+    if let Ok(RunOutcome::Completed { run_id, .. }) = result {
+        let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+        match crate::lifecycle::run_check(
+            pool, &mf, chrono::Local::now().date_naive()).await {
+            Ok(s) if s.checked > 0 => eprintln!(
+                "lifecycle after run {run_id}: {} checked, {} dead, \
+                 {} links proposed, {} auto-confirmed, {} issues",
+                s.checked, s.dead, s.links_proposed, s.links_confirmed, s.issues),
+            Ok(_) => {}
+            Err(e) => eprintln!("lifecycle check after run {run_id} failed: {e}"),
         }
     }
 }
@@ -381,6 +403,7 @@ pub async fn run_backfill(
                                        instrument_ids, confirmed).await;
     auto_reresolve_after(pool, cfg, &result).await;
     corp_actions_after(pool, cfg, view_id, &mut result).await;
+    lifecycle_after(pool, cfg, &result).await;
     result
 }
 

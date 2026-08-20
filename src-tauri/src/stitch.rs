@@ -16,6 +16,9 @@ pub struct LinkRow {
     pub successor_id: i64,
     pub link_type: String,
     pub effective_date: NaiveDate,
+    /// P6: Bloomberg's asserted exchange ratio (ACQUIRER shares per TARGET
+    /// share, from CA_MA_STOCK_TERMS), when the link carries one.
+    pub exchange_ratio: Option<f64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -23,6 +26,7 @@ pub struct Junction {
     pub predecessor_id: i64,
     pub effective_date: NaiveDate,
     pub link_type: String,
+    pub exchange_ratio: Option<f64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -68,6 +72,7 @@ pub fn plan_chain(target: i64, links: &[LinkRow]) -> (Vec<Junction>, ChainStop) 
             predecessor_id: link.predecessor_id,
             effective_date: link.effective_date,
             link_type: link.link_type.clone(),
+            exchange_ratio: link.exchange_ratio,
         });
         if !seen.insert(link.predecessor_id) {
             return (junctions, ChainStop::Cycle);
@@ -134,13 +139,16 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
                              limit: i64)
     -> crate::error::AppResult<StitchedSeries>
 {
-    let links: Vec<(i64, i64, String, NaiveDate)> = sqlx::query_as(
-        "SELECT predecessor_id, successor_id, link_type, effective_date
+    let links: Vec<(i64, i64, String, NaiveDate, Option<f64>)> = sqlx::query_as(
+        "SELECT predecessor_id, successor_id, link_type, effective_date,
+                exchange_ratio
            FROM instrument_link WHERE confirmed_by IS NOT NULL")
         .fetch_all(pool).await?;
     let links: Vec<LinkRow> = links.into_iter()
-        .map(|(predecessor_id, successor_id, link_type, effective_date)| LinkRow {
-            predecessor_id, successor_id, link_type, effective_date })
+        .map(|(predecessor_id, successor_id, link_type, effective_date,
+               exchange_ratio)| LinkRow {
+            predecessor_id, successor_id, link_type, effective_date,
+            exchange_ratio })
         .collect();
     let (junctions, stop) = plan_chain(instrument_id, &links);
     let mut stopped = match stop {
@@ -184,10 +192,20 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
         let pred = crate::adjust::adjusted_series(
             pool, j.predecessor_id, field_id, mode, 5000).await?;
         let window_start = junctions.get(k + 1).map(|n| n.effective_date);
+        let mut ratio_note: Option<String> = None;
         let ratio = if is_volume {
             1.0
         } else if j.link_type == "rename" || j.link_type == "share_class_change" {
             1.0
+        } else if let Some(r) = j.exchange_ratio.filter(|r| *r > 0.0) {
+            // P6: Bloomberg asserted the terms (CA_MA_STOCK_TERMS, r =
+            // acquirer shares per target share). One target share became r
+            // successor shares, so a target price divides by r to land in
+            // successor units -- pinned live: XLNX 194.92 / 1.7234 = 113.1
+            // against AMD's 114.27 first close.
+            ratio_note = Some(format!(
+                "splice from Bloomberg terms: {r} acquirer sh. per target sh."));
+            1.0 / r
         } else {
             // rows are obs_date DESC; junction values sit inside each
             // segment's own window by construction.
@@ -223,7 +241,7 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
             note: if is_volume && j.link_type != "rename"
                      && j.link_type != "share_class_change" {
                 Some("volumes concatenated unscaled".into())
-            } else { None },
+            } else { ratio_note },
         });
         rows.extend(seg_rows);
         prev = pred;
@@ -260,7 +278,8 @@ mod tests {
     fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
     fn link(p: i64, s: i64, ty: &str, date: &str) -> LinkRow {
         LinkRow { predecessor_id: p, successor_id: s,
-                  link_type: ty.into(), effective_date: d(date) }
+                  link_type: ty.into(), effective_date: d(date),
+                  exchange_ratio: None }
     }
 
     #[test]
@@ -272,10 +291,21 @@ mod tests {
         assert_eq!(stop, ChainStop::End);
         assert_eq!(junctions, vec![
             Junction { predecessor_id: 2, effective_date: d("2024-06-01"),
-                       link_type: "rename".into() },
+                       link_type: "rename".into(), exchange_ratio: None },
             Junction { predecessor_id: 1, effective_date: d("2020-01-12"),
-                       link_type: "merger".into() },
+                       link_type: "merger".into(), exchange_ratio: None },
         ]);
+    }
+
+    /// P6: the asserted ratio rides the junction so the composer can prefer
+    /// it over price-continuity derivation.
+    #[test]
+    fn an_asserted_exchange_ratio_travels_with_its_junction() {
+        let mut l = link(1, 2, "merger", "2022-02-15");
+        l.exchange_ratio = Some(1.7234);
+        let (junctions, stop) = plan_chain(2, &[l]);
+        assert_eq!(stop, ChainStop::End);
+        assert_eq!(junctions[0].exchange_ratio, Some(1.7234));
     }
 
     #[test]
