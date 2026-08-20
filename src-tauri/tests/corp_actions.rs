@@ -246,6 +246,34 @@ async fn a_member_without_a_security_is_skipped_and_reported() {
     assert_eq!(issues, 1);
 }
 
+/// One bad name must not abort the whole view: its failure is counted and
+/// reported, and its neighbours still commit. (The bogus field name violates
+/// the source_field CHECK, standing in for any per-instrument DB failure.)
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn one_failing_member_does_not_abort_the_view_refresh() {
+    let pool = common::pool().await;
+    let (a, sec_a) = instrument_with_security(&pool, "CAVF").await;
+    let (b, sec_b) = instrument_with_security(&pool, "CAVG").await;
+    let vid = view_with(&pool, &[a, b]).await;
+    let mock = mock_with(serde_json::json!([
+        factor_table(&sec_a, "2020-08-31", 4.0),
+        {"security": sec_b, "field": "BOGUS_FIELD",
+         "rows": [{"Adjustment Date": "2020-08-31"}]}]));
+    let s = corp_actions::refresh_view(&pool, &mock, vid, d("2026-08-21")).await.unwrap();
+    assert_eq!((s.instruments, s.failed, s.inserted), (1, 1, 1),
+               "the healthy member committed, the bad one is counted as failed");
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM corp_action WHERE instrument_id = $1")
+        .bind(a).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1, "the healthy neighbour's row landed");
+    let issues: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'corp_actions_failed'")
+        .bind(b).fetch_one(&pool).await.unwrap();
+    assert_eq!(issues, 1);
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn a_view_refresh_is_idempotent() {

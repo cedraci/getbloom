@@ -246,6 +246,7 @@ async fn insert_action(tx: &mut crate::instrument::store::Tx<'_>,
 pub struct ViewRefreshSummary {
     pub instruments: u64,
     pub skipped: u64,
+    pub failed: u64,
     pub inserted: u64,
     pub amended: u64,
     pub withdrawn: u64,
@@ -292,13 +293,25 @@ pub async fn refresh_view<F: crate::master_fetch::MasterFetcher>(
             // No tables for this security (rejected, or both fields empty)
             // touches nothing: the per-field empty guard in apply_tables is
             // what protects the local history either way.
-            let s = apply_tables(pool, *iid, &tables).await?;
-            sum.instruments += 1;
-            sum.inserted += s.inserted;
-            sum.amended += s.amended;
-            sum.withdrawn += s.withdrawn;
-            sum.unchanged += s.unchanged;
-            sum.unparsed += s.unparsed;
+            match apply_tables(pool, *iid, &tables).await {
+                Ok(s) => {
+                    sum.instruments += 1;
+                    sum.inserted += s.inserted;
+                    sum.amended += s.amended;
+                    sum.withdrawn += s.withdrawn;
+                    sum.unchanged += s.unchanged;
+                    sum.unparsed += s.unparsed;
+                }
+                Err(e) => {
+                    // One name's failure is its own problem: counted,
+                    // reported, and the neighbours still commit.
+                    sum.failed += 1;
+                    let _ = sqlx::query(
+                        "INSERT INTO ingest_issue (instrument_id, severity, code, detail)
+                         VALUES ($1,'error','corp_actions_failed',$2)")
+                        .bind(*iid).bind(e.to_string()).execute(pool).await;
+                }
+            }
         }
     }
     Ok(sum)
