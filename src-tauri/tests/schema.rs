@@ -300,3 +300,25 @@ async fn seed_field_and_run(pool: &PgPool, _instrument_id: i64) -> (i64, i64) {
         .bind(vid).fetch_one(pool).await.unwrap();
     (fid, rid)
 }
+
+/// Task 6 records evidence-based non-trading days; the PK is the dedup.
+/// Task 7's auto-re-resolve cooldown needs to know WHEN an issue was written.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn non_trading_day_dedups_and_issues_are_timestamped() {
+    let pool = common::pool().await;
+    let inst = getbloomdata_lib::instrument::store::create(&pool).await.unwrap();
+    let d: chrono::NaiveDate = "2026-08-14".parse().unwrap();
+    sqlx::query("INSERT INTO non_trading_day (instrument_id, obs_date) VALUES ($1,$2)")
+        .bind(inst.instrument_id).bind(d).execute(&pool).await.unwrap();
+    let dup = sqlx::query("INSERT INTO non_trading_day (instrument_id, obs_date) VALUES ($1,$2)")
+        .bind(inst.instrument_id).bind(d).execute(&pool).await;
+    assert!(dup.is_err(), "the (instrument, date) PK must refuse a duplicate");
+
+    sqlx::query("INSERT INTO ingest_issue (instrument_id, severity, code) VALUES ($1,'warn','x')")
+        .bind(inst.instrument_id).execute(&pool).await.unwrap();
+    let ts: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT created_at FROM ingest_issue WHERE instrument_id = $1 ORDER BY id DESC LIMIT 1")
+        .bind(inst.instrument_id).fetch_one(&pool).await.unwrap();
+    assert!(ts <= chrono::Utc::now());
+}
