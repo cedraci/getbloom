@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, type BookEntry, type CorpActionFull, type FieldDef, type ObsRow } from "./api";
+  import { api, type AdjSeries, type AdjustModeStr, type BookEntry,
+           type CorpActionFull, type FieldDef, type ObsRow } from "./api";
 
   let book = $state<BookEntry[]>([]);
   let fields = $state<FieldDef[]>([]);
@@ -13,6 +14,11 @@
 
   let observations = $state<ObsRow[]>([]);
   let corpActions = $state<CorpActionFull[]>([]);
+
+  // P4: derived series. Raw shows the stored table; the other two derive
+  // from the factor chain on read -- nothing is stored.
+  let seriesMode = $state<AdjustModeStr>("raw");
+  let adjSeries = $state<AdjSeries | null>(null);
 
   // Fields that apply to the selected instrument's asset class.
   let classFields = $derived.by(() => {
@@ -41,13 +47,15 @@
     if (fieldId === null && classFields.length) fieldId = classFields[0].id;
   });
   $effect(() => {
-    // Reads all four inputs so any change reloads.
-    instrumentId; fieldId; includeSuperseded; limit;
+    // Reads all five inputs so any change reloads.
+    instrumentId; fieldId; includeSuperseded; limit; seriesMode;
     load();
   });
   $effect(() => {
     if (instrumentId !== null && dataDir) {
-      obsPath = `${dataDir}\\obs_${instrumentId}_${fieldId ?? "field"}.csv`;
+      obsPath = seriesMode === "raw"
+        ? `${dataDir}\\obs_${instrumentId}_${fieldId ?? "field"}.csv`
+        : `${dataDir}\\adj_${instrumentId}_${fieldId ?? "field"}_${seriesMode}.csv`;
       caPath = `${dataDir}\\corp_actions_${instrumentId}.csv`;
     }
   });
@@ -57,8 +65,16 @@
     error = "";
     try {
       corpActions = await api.listCorpActionsFull(instrumentId, includeSuperseded);
-      observations = fieldId === null ? []
-        : await api.listObservations(instrumentId, fieldId, includeSuperseded, limit);
+      if (fieldId === null) {
+        observations = []; adjSeries = null;
+      } else if (seriesMode === "raw") {
+        adjSeries = null;
+        observations = await api.listObservations(instrumentId, fieldId,
+                                                  includeSuperseded, limit);
+      } else {
+        observations = [];
+        adjSeries = await api.listAdjusted(instrumentId, fieldId, seriesMode, limit);
+      }
     } catch (e) { error = String(e); }
   }
 
@@ -66,8 +82,10 @@
     if (instrumentId === null || fieldId === null) return;
     notice = ""; error = "";
     try {
-      const n = await api.exportObservationsCsv(instrumentId, fieldId, obsPath);
-      notice = `${n} observation row(s) written to ${obsPath}`;
+      const n = seriesMode === "raw"
+        ? await api.exportObservationsCsv(instrumentId, fieldId, obsPath)
+        : await api.exportAdjustedCsv(instrumentId, fieldId, seriesMode, obsPath);
+      notice = `${n} row(s) written to ${obsPath}`;
     } catch (e) { error = String(e); }
   }
   async function exportCa() {
@@ -106,11 +124,19 @@
           {#each classFields as f}<option value={f.id}>{f.mnemonic}</option>{/each}
         </select>
       </label>
+      <label>Series
+        <select bind:value={seriesMode}>
+          <option value="raw">Raw (as stored)</option>
+          <option value="splits">Split-adjusted</option>
+          <option value="all">Split + dividend (net)</option>
+        </select>
+      </label>
       <label>Rows
         <input type="number" bind:value={limit} min="1" max="5000" />
       </label>
       <label class="check">
-        <input type="checkbox" bind:checked={includeSuperseded} />
+        <input type="checkbox" bind:checked={includeSuperseded}
+               disabled={seriesMode !== "raw"} />
         show superseded (corrections history)
       </label>
     </div>
@@ -121,6 +147,34 @@
     {#if !classFields.length}
       <p class="hint">No field is defined for this instrument's asset class yet
          (Views tab → Fields).</p>
+    {:else if seriesMode !== "raw"}
+      {#if adjSeries === null || !adjSeries.rows.length}
+        <p class="thin">Nothing stored for this instrument &amp; field.</p>
+      {:else}
+        <p class="thin">Derived on read from the stored factor chain
+           ({adjSeries.factors_used} factor(s) applied) — nothing is stored.
+           {#if adjSeries.unusable_factors}
+             <span class="hint">⚠ {adjSeries.unusable_factors} stored factor
+             row(s) could not be read and were NOT applied.</span>
+           {/if}</p>
+        <table>
+          <thead><tr><th>Date</th><th>Raw</th>
+                     <th>{seriesMode === "splits" ? "Split-adjusted" : "Net"}</th></tr></thead>
+          <tbody>
+            {#each adjSeries.rows as r}
+              <tr>
+                <td>{r.obs_date}</td>
+                <td class="num">{r.raw}</td>
+                <td class="num">{r.adjusted === r.raw ? r.raw : r.adjusted.toFixed(6)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <div class="exportrow">
+          <input bind:value={obsPath} />
+          <button onclick={exportObs}>Export CSV</button>
+        </div>
+      {/if}
     {:else if !observations.length}
       <p class="thin">Nothing stored for this instrument &amp; field.</p>
     {:else}

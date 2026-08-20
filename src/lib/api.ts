@@ -183,6 +183,11 @@ export interface ViewRefreshCorpActionsSummary {
   inserted: number; amended: number;
   withdrawn: number; unchanged: number; unparsed: number;
 }
+export type AdjustModeStr = "raw" | "splits" | "all";
+export interface AdjRow { obs_date: string; raw: number; adjusted: number; }
+export interface AdjSeries {
+  rows: AdjRow[]; factors_used: number; unusable_factors: number;
+}
 export interface CorpActionRow {
   id: number; source_field: string; event_date: string | null;
   amount: number | null; operator: number | null; flag: number | null;
@@ -267,6 +272,12 @@ export const api = {
     invoke<number>("export_observations_csv", { instrumentId, fieldId, path }),
   exportCorpActionsCsv: (instrumentId: number, path: string) =>
     invoke<number>("export_corp_actions_csv", { instrumentId, path }),
+  listAdjusted: (instrumentId: number, fieldId: number, mode: AdjustModeStr,
+                 limit: number) =>
+    invoke<AdjSeries>("list_adjusted", { instrumentId, fieldId, mode, limit }),
+  exportAdjustedCsv: (instrumentId: number, fieldId: number, mode: AdjustModeStr,
+                      path: string) =>
+    invoke<number>("export_adjusted_csv", { instrumentId, fieldId, mode, path }),
   listCorpActions: (instrumentId: number) =>
     invoke<CorpActionRow[]>("list_corp_actions", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),
