@@ -1,7 +1,7 @@
 # P4 — Adjustment engine (design)
 
 **Date:** 2026-08-21
-**Status:** APPROVED (user, 2026-08-21: "go" on merge + P4)
+**Status:** IMPLEMENTED 2026-08-21 (plan: ../plans/2026-08-21-p4-adjustment-engine.md)
 **Branch:** `bloomberg-security-master` (merged to master 2026-08-21; work continues here)
 **Depends on:** P3 design `2026-08-20-p3-corporate-actions-design.md` (the
 factor chain is stored and refreshed with every run), P0

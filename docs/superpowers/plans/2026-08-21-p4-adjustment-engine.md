@@ -40,13 +40,13 @@ pub fn apply_chain(kind: SeriesKind, mode: AdjustMode,
 ```
 `apply_chain`: for each event with `event_date > obs_date`, skip unless mode admits it (Splits: flag == 3; All: any; volumes additionally require flag == 3), then apply the operator per kind. Raw mode returns `raw` untouched.
 
-- [ ] Unit tests first (in-module), then implement:
+- [x] Unit tests first (in-module), then implement:
   1. `aapl_split_divides_prices_and_multiplies_volumes` — event (2020-08-31, 4.0, op 1, flag 3): price 400.0 on 2020-08-28 → 100.0 (Splits and All); volume 1000.0 → 4000.0; obs ON 2020-08-31 unchanged (strictly `>`).
   2. `dividend_factors_touch_prices_only_and_only_in_all_mode` — event (2025-05-05, 0.994902, op 2, flag 1): price before → `*0.994902` in All, untouched in Splits; volume untouched in All.
   3. `twin_same_day_events_both_apply` — two op-2 flag-1 events same date: product of both factors.
   4. `additive_operators_apply_in_chronological_order` — events e1 (2020-01-10, 2.0, op 3, flag 3) and e2 (2020-06-10, 3.0, op 2, flag 3) on price 10.0 dated 2019-12-31: `(10+2)*3 = 36`, NOT `10*3+2 = 32`.
   5. `raw_mode_is_identity` and `series_kind` detection (`PX_VOLUME` → Volume, `PX_LAST` → Price).
-- [ ] `cargo test --lib adjust` green. Commit `feat: P4 pure adjustment engine over the factor chain`.
+- [x] `cargo test --lib adjust` green. Commit `feat: P4 pure adjustment engine over the factor chain`.
 
 ### Task 2: `adjusted_series` — DB loader + integration tests
 
@@ -64,28 +64,28 @@ pub async fn adjusted_series(pool, instrument_id, field_id, mode: AdjustMode,
 ```
 Loads: current numeric observations (`layer='raw'`, `system_to='infinity'`, ORDER BY obs_date DESC, LIMIT clamp 1..=5000, value_num NOT NULL); the field's mnemonic (for `series_kind`); current `EQY_DVD_ADJUST_FACT` rows — fully typed ones become `FactorEvent`s sorted ascending, rows with any null typed column count into `unusable_factors`. `factors_used` = events admitted by the mode/kind filter (union over the series, i.e. events applied to at least the oldest row).
 
-- [ ] Integration tests: seed two observations (one before, one after a stored split factor row) + one unparsed factor row (nulls, JSON fallback key); `adjusted_series(All)` → older row adjusted, newer untouched, `unusable_factors == 1`; `Raw` mode → adjusted == raw everywhere.
-- [ ] Suites green. Commit `feat: adjusted series derived from stored observations and factors`.
+- [x] Integration tests: seed two observations (one before, one after a stored split factor row) + one unparsed factor row (nulls, JSON fallback key); `adjusted_series(All)` → older row adjusted, newer untouched, `unusable_factors == 1`; `Raw` mode → adjusted == raw everywhere.
+- [x] Suites green. Commit `feat: adjusted series derived from stored observations and factors`.
 
 ### Task 3: commands + CSV export
 
 **Files:** `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/dataview.rs` (reuse `csv_field`/`csv_line`), `src-tauri/tests/adjust.rs`.
 
-- [ ] `list_adjusted(instrument_id, field_id, mode: String, limit) -> AdjSeries` (mode parsed: "raw"|"splits"|"all", Validation error otherwise); `export_adjusted_csv(instrument_id, field_id, mode, path) -> u64` writing header `obs_date,raw,adjusted` (current rows, full series at limit 5000). Register both.
-- [ ] Integration test: export writes rows+1 lines with adjusted values matching `adjusted_series`.
-- [ ] Suites green. Commit `feat: adjusted-series command and CSV export`.
+- [x] `list_adjusted(instrument_id, field_id, mode: String, limit) -> AdjSeries` (mode parsed: "raw"|"splits"|"all", Validation error otherwise); `export_adjusted_csv(instrument_id, field_id, mode, path) -> u64` writing header `obs_date,raw,adjusted` (current rows, full series at limit 5000). Register both.
+- [x] Integration test: export writes rows+1 lines with adjusted values matching `adjusted_series`.
+- [x] Suites green. Commit `feat: adjusted-series command and CSV export`.
 
 ### Task 4: Data tab UI — Series selector
 
 **Files:** `src/lib/api.ts`, `src/lib/DataScreen.svelte`.
 
-- [ ] `api.ts`: `AdjSeries`/`AdjRow` types; `listAdjusted(instrumentId, fieldId, mode, limit)`; `exportAdjustedCsv(...)`.
-- [ ] DataScreen: a `Series` select (`raw` "Raw (as stored)" / `splits` "Split-adjusted" / `all` "Split + dividend (net)"). Raw keeps today's table (with supersession toggle). Non-raw loads `listAdjusted` and renders Date / Raw / Adjusted / (factors used, unusable warning line); superseded toggle disabled (derived series has no system time); CSV export path seeds `adj_{iid}_{fid}_{mode}.csv` and calls the new exporter. A thin note: "Derived on read from the stored factor chain — nothing is stored."
-- [ ] `svelte-check` 0 errors (1 pre-existing warning allowed). Commit `feat(ui): raw / split-adjusted / net series in the Data tab`.
+- [x] `api.ts`: `AdjSeries`/`AdjRow` types; `listAdjusted(instrumentId, fieldId, mode, limit)`; `exportAdjustedCsv(...)`.
+- [x] DataScreen: a `Series` select (`raw` "Raw (as stored)" / `splits` "Split-adjusted" / `all` "Split + dividend (net)"). Raw keeps today's table (with supersession toggle). Non-raw loads `listAdjusted` and renders Date / Raw / Adjusted / (factors used, unusable warning line); superseded toggle disabled (derived series has no system time); CSV export path seeds `adj_{iid}_{fid}_{mode}.csv` and calls the new exporter. A thin note: "Derived on read from the stored factor chain — nothing is stored."
+- [x] `svelte-check` 0 errors (1 pre-existing warning allowed). Commit `feat(ui): raw / split-adjusted / net series in the Data tab`.
 
 ### Task 5: Verification + docs + merge
 
-- [ ] Full suites (unit + `--ignored` minus live smoke) green.
-- [ ] P4 spec status → IMPLEMENTED; roadmap note in security-master design §11 if present; memory updated.
-- [ ] Fast-forward `master` (includes the .gitattributes fix commit).
-- [ ] Commit `docs: P4 adjustment engine shipped`.
+- [x] Full suites (unit + `--ignored` minus live smoke) green.
+- [x] P4 spec status → IMPLEMENTED; roadmap note in security-master design §11 if present; memory updated.
+- [x] Fast-forward `master` (includes the .gitattributes fix commit).
+- [x] Commit `docs: P4 adjustment engine shipped`.
