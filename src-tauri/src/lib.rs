@@ -18,6 +18,7 @@ pub mod orchestrator;
 pub mod registry;
 pub mod resolution;
 pub mod scheduler;
+pub mod stitch;
 pub mod views;
 
 use commands::{AppConfig, AppState};
