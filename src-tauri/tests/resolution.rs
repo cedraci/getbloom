@@ -275,7 +275,7 @@ impl MasterFetcher for KeyedFetcher {
         Ok(vec![])
     }
 
-    async fn corp_actions(&self, _security: &str)
+    async fn corp_actions(&self, _securities: &[String])
         -> AppResult<Answered<Vec<getbloomdata_lib::fetch::SidecarBulkRows>>>
     {
         self.record();

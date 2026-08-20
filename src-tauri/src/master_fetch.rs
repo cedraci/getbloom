@@ -60,8 +60,12 @@ pub const HIST_IDS_HIT_COST: i64 = 1;
 pub const CORP_ACTIONS_FIELDS: [&str; 2] =
     ["EQY_DVD_ADJUST_FACT", "DVD_HIST_ALL_WITH_AMT_STATUS"];
 pub const CORP_ACTIONS_FILTER: &str = "CORPORATE_ACTIONS_FILTER";
-/// 1 security x 2 fields, the standing per-security-field unit.
-pub const CORP_ACTIONS_HIT_COST: i64 = CORP_ACTIONS_FIELDS.len() as i64;
+
+/// What one batched corp-actions request is charged: securities x 2 fields,
+/// the standing per-security-field unit (mirrors `identity_hit_cost`).
+pub fn corp_actions_hit_cost(securities: usize) -> i64 {
+    (securities * CORP_ACTIONS_FIELDS.len()) as i64
+}
 
 pub const HIST_IDS_FIELD: &str = "HISTORICAL_IDS_TIME_RANGE";
 /// Overrides on HIST_IDS_FIELD, resolved from its own FieldInfoRequest (P0 §6.3).
@@ -126,8 +130,10 @@ pub trait MasterFetcher {
                        max_results: u32)
         -> impl std::future::Future<Output = AppResult<Answered<Vec<Candidate>>>> + Send;
 
-    /// Both corporate-action bulk fields for one security, verbatim tables.
-    fn corp_actions(&self, security: &str)
+    /// Both corporate-action bulk fields for a batch of securities, verbatim
+    /// tables keyed by security. One Bloomberg request per call -- callers
+    /// chunk to `fetch::MAX_SECURITIES_PER_REQUEST`.
+    fn corp_actions(&self, securities: &[String])
         -> impl std::future::Future<
             Output = AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>> + Send;
 }
@@ -336,17 +342,17 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
         Ok(Answered { parsed, raw })
     }
 
-    async fn corp_actions(&self, security: &str)
+    async fn corp_actions(&self, securities: &[String])
         -> AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>
     {
         let resp = self.call(serde_json::json!({
             "kind": "bulk_reference",
-            "securities": [security],
+            "securities": securities,
             "fields": CORP_ACTIONS_FIELDS,
             "overrides": [{"fieldId": CORP_ACTIONS_FILTER,
                            "value": crate::corp_actions::CORP_ACTIONS_FILTER_VALUE}],
         })).await?;
-        self.charge("corp_actions", CORP_ACTIONS_HIT_COST).await;
+        self.charge("corp_actions", corp_actions_hit_cost(securities.len())).await;
         // The sidecar's top-level bulk_rows section, not raw_messages: the
         // tables arrive already row-shaped from parse_bulk_message.
         let raw = resp["bulk_rows"].clone();
@@ -427,10 +433,10 @@ impl MasterFetcher for MockMasterFetcher {
         Ok(Answered { parsed: parse_list(&self.list_raw), raw: self.list_raw.clone() })
     }
 
-    async fn corp_actions(&self, security: &str)
+    async fn corp_actions(&self, securities: &[String])
         -> AppResult<Answered<Vec<crate::fetch::SidecarBulkRows>>>
     {
-        self.record(&format!("corp_actions:{security}"));
+        self.record(&format!("corp_actions:{}", securities.join(",")));
         let parsed = serde_json::from_value(self.corp_actions_raw.clone())
             .unwrap_or_default();
         Ok(Answered { parsed, raw: self.corp_actions_raw.clone() })
@@ -546,12 +552,14 @@ mod tests {
         assert_eq!(HIST_IDS_HIT_COST, 1);
     }
 
-    /// The refresh cost is a promise to the budget screen: 1 security x 2
+    /// The refresh cost is a promise to the budget screen: securities x 2
     /// bulk fields, same per-security-field unit as every other estimate.
     #[test]
     fn corp_actions_cost_matches_the_field_count() {
         assert_eq!(CORP_ACTIONS_FIELDS.len(), 2);
-        assert_eq!(CORP_ACTIONS_HIT_COST, CORP_ACTIONS_FIELDS.len() as i64);
+        assert_eq!(corp_actions_hit_cost(1), 2, "one instrument refreshed = 2 hits");
+        assert_eq!(corp_actions_hit_cost(50), 100);
+        assert_eq!(corp_actions_hit_cost(0), 0, "a request for nothing costs nothing");
         assert_eq!(CORP_ACTIONS_FIELDS[0], crate::corp_actions::FACTOR_FIELD);
         assert_eq!(CORP_ACTIONS_FIELDS[1], crate::corp_actions::DVD_FIELD);
     }
@@ -566,10 +574,11 @@ mod tests {
                            "Adjustment Factor Flag": 3.0}]}]),
             ..Default::default()
         };
-        let ans = mock.corp_actions("AAPL US Equity").await.unwrap();
+        let ans = mock.corp_actions(&["AAPL US Equity".to_string(),
+                                      "MSFT US Equity".to_string()]).await.unwrap();
         assert_eq!(ans.parsed.len(), 1);
         assert_eq!(ans.parsed[0].field, "EQY_DVD_ADJUST_FACT");
-        assert_eq!(mock.call_count(), 1);
+        assert_eq!(mock.call_count(), 1, "one BATCH is one call, however many names");
     }
 
     #[tokio::test]

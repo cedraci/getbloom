@@ -122,7 +122,7 @@ pub async fn refresh<F: crate::master_fetch::MasterFetcher>(
         .await?
         .ok_or_else(|| crate::error::AppError::Validation(format!(
             "instrument {instrument_id} has no security valid as of {as_of}")))?;
-    let answered = fetcher.corp_actions(&security).await?;
+    let answered = fetcher.corp_actions(std::slice::from_ref(&security)).await?;
 
     let mut summary = RefreshSummary::default();
     let mut tx = pool.begin().await?;

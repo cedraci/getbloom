@@ -65,7 +65,7 @@ impl MasterFetcher for TwoRowFetcher {
         Ok(vec![])
     }
 
-    async fn corp_actions(&self, _security: &str)
+    async fn corp_actions(&self, _securities: &[String])
         -> AppResult<Answered<Vec<getbloomdata_lib::fetch::SidecarBulkRows>>>
     {
         Ok(Answered { parsed: vec![], raw: serde_json::json!([]) })
