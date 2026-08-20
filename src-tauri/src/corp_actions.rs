@@ -49,8 +49,30 @@ fn get_text(row: &serde_json::Map<String, serde_json::Value>, keys: &[&str])
     keys.iter().find_map(|k| row.get(*k)?.as_str().map(str::to_string))
 }
 
+/// One snapshot can legitimately carry the same base key twice: RMS FP
+/// (live, 2026-08-21) pays an ordinary + extraordinary dividend with one
+/// ex-date, giving two factor rows on the same `{date}|{op}|{flag}`. The
+/// duplicates get occurrence suffixes (`|2`, `|3`…) after a sort by
+/// canonical payload, so the same snapshot always yields the same keys.
+fn disambiguate_keys(actions: &mut [ParsedAction]) {
+    let mut groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, a) in actions.iter().enumerate() {
+        groups.entry(a.natural_key.clone()).or_default().push(i);
+    }
+    for (key, mut idxs) in groups {
+        if idxs.len() < 2 {
+            continue;
+        }
+        idxs.sort_by_key(|&i| actions[i].payload.to_string());
+        for (n, &i) in idxs.iter().enumerate().skip(1) {
+            actions[i].natural_key = format!("{key}|{}", n + 1);
+        }
+    }
+}
+
 pub fn parse_table(t: &SidecarBulkRows) -> Vec<ParsedAction> {
-    t.rows.iter().map(|row| {
+    let mut out: Vec<ParsedAction> = t.rows.iter().map(|row| {
         let payload = serde_json::Value::Object(row.clone());
         if t.field == FACTOR_FIELD {
             // Column names measured in P0 (headline_report.json).
@@ -95,7 +117,9 @@ pub fn parse_table(t: &SidecarBulkRows) -> Vec<ParsedAction> {
                 payload, fully_parsed: fully,
             }
         }
-    }).collect()
+    }).collect();
+    disambiguate_keys(&mut out);
+    out
 }
 
 // ------------------------------------------------------------------ storage
@@ -371,6 +395,33 @@ mod tests {
         assert_eq!(odd.payload["Mystery Column"], "??", "payload is the authority");
         assert!(odd.natural_key.contains("Mystery Column"),
                 "fallback key is the canonical row JSON, so the row still diffs");
+    }
+
+    #[test]
+    fn same_day_twin_dividend_factors_get_distinct_keys() {
+        // Live 2026-08-21: RMS FP pays an ordinary + extraordinary dividend
+        // with one ex-date; both rows are operator 2 / flag 1 and differ only
+        // in factor. One snapshot may carry the same base key twice.
+        let t = SidecarBulkRows {
+            security: "RMS FP Equity".into(), field: FACTOR_FIELD.into(),
+            rows: serde_json::from_value(serde_json::json!([
+                {"Adjustment Date": "2025-05-05", "Adjustment Factor": 0.994902,
+                 "Adjustment Factor Operator Type": 2.0, "Adjustment Factor Flag": 1.0},
+                {"Adjustment Date": "2025-05-05", "Adjustment Factor": 0.995901,
+                 "Adjustment Factor Operator Type": 2.0, "Adjustment Factor Flag": 1.0}
+            ])).unwrap(),
+        };
+        let acts = parse_table(&t);
+        let mut keys: Vec<&str> = acts.iter().map(|a| a.natural_key.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["2025-05-05|2|1", "2025-05-05|2|1|2"],
+                   "duplicates disambiguated, deterministic");
+        let again = parse_table(&t);
+        for a in &acts {
+            let twin = again.iter().find(|b| b.payload == a.payload).unwrap();
+            assert_eq!(twin.natural_key, a.natural_key,
+                       "same payload keeps the same key across parses");
+        }
     }
 
     /// P0 4: META's factor table has a pre-IPO row (2010-10-31, factor 5).

@@ -134,6 +134,34 @@ async fn unparsed_rows_are_stored_flagged_and_counted() {
     assert_eq!(issues, 1);
 }
 
+/// Live 2026-08-21 (RMS FP): an ordinary + extraordinary dividend share one
+/// ex-date -- two factor rows with the same base key in ONE snapshot. Both
+/// must land (occurrence-suffixed), and the refresh must stay idempotent.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn same_day_twin_factors_land_and_the_refresh_stays_idempotent() {
+    let pool = common::pool().await;
+    let (iid, sec) = instrument_with_security(&pool, "CATWIN").await;
+    let twins = serde_json::json!([{"security": sec, "field": "EQY_DVD_ADJUST_FACT",
+        "rows": [
+          {"Adjustment Date": "2025-05-05", "Adjustment Factor": 0.994902,
+           "Adjustment Factor Operator Type": 2.0, "Adjustment Factor Flag": 1.0},
+          {"Adjustment Date": "2025-05-05", "Adjustment Factor": 0.995901,
+           "Adjustment Factor Operator Type": 2.0, "Adjustment Factor Flag": 1.0}]}]);
+    let s1 = corp_actions::refresh(&pool, &mock_with(twins.clone()), iid,
+                                   d("2026-08-21")).await.unwrap();
+    assert_eq!((s1.inserted, s1.unchanged), (2, 0), "both same-day events stored");
+    let s2 = corp_actions::refresh(&pool, &mock_with(twins), iid,
+                                   d("2026-08-21")).await.unwrap();
+    assert_eq!((s2.inserted, s2.amended, s2.unchanged), (0, 0, 2),
+               "identical snapshot converges");
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT natural_key FROM corp_action
+          WHERE instrument_id = $1 AND system_to = 'infinity' ORDER BY natural_key")
+        .bind(iid).fetch_all(&pool).await.unwrap();
+    assert_eq!(keys, vec!["2025-05-05|2|1", "2025-05-05|2|1|2"]);
+}
+
 // ---------------------------------------------------------------------------
 // refresh_view: a whole set of stocks, batched
 // ---------------------------------------------------------------------------
