@@ -241,8 +241,9 @@ export const api = {
   estimateView: (viewId: number) => invoke<EstimateOut>("estimate_view", { viewId }),
   runEodNow: (viewId: number, confirmed: boolean) =>
     invoke<RunOutcome>("run_eod_now", { viewId, confirmed }),
-  runBackfillNow: (viewId: number, start: string, end: string, confirmed: boolean) =>
-    invoke<RunOutcome>("run_backfill_now", { viewId, start, end, confirmed }),
+  runBackfillNow: (viewId: number, start: string, end: string, confirmed: boolean,
+                   instrumentIds: number[] | null = null) =>
+    invoke<RunOutcome>("run_backfill_now", { viewId, start, end, instrumentIds, confirmed }),
   listRuns: (limit: number) => invoke<RunRow[]>("list_runs", { limit }),
   listIssues: (runId: number) => invoke<IssueRow[]>("list_issues", { runId }),
   detectViewGaps: (viewId: number) => invoke<GapRow[]>("detect_view_gaps", { viewId }),

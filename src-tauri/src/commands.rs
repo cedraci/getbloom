@@ -308,12 +308,14 @@ pub async fn run_eod_now(state: State<'_, AppState>, view_id: i64, confirmed: bo
 
 #[tauri::command]
 pub async fn run_backfill_now(state: State<'_, AppState>, view_id: i64,
-                              start: String, end: String, confirmed: bool)
+                              start: String, end: String,
+                              instrument_ids: Option<Vec<i64>>, confirmed: bool)
     -> Result<RunOutcome, AppError> {
     let cfg = pipeline_cfg(&state).await;
     let s = start.parse().map_err(|_| AppError::Validation("bad start date".into()))?;
     let e = end.parse().map_err(|_| AppError::Validation("bad end date".into()))?;
-    orchestrator::run_backfill(&state.pool, &cfg, view_id, s, e, confirmed).await
+    orchestrator::run_backfill(&state.pool, &cfg, view_id, s, e,
+                               instrument_ids.as_deref(), confirmed).await
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -351,10 +353,9 @@ pub async fn list_issues(state: State<'_, AppState>, run_id: i64)
 }
 
 /// Gaps are per instrument, not per view: one member reporting on a date does
-/// not mean the others did. Backfilling still runs the whole view for the
-/// range -- the range is what `run_backfill_now` takes -- but the user now
-/// sees which instrument is actually missing data, which is the difference
-/// between a visible hole and a silent one.
+/// not mean the others did. The gap row's Backfill button passes the gap's
+/// own instrument to `run_backfill_now`, so closing a one-name hole costs
+/// that one name's hits, not the whole view's.
 #[derive(Debug, Serialize)]
 pub struct GapRow {
     pub instrument_id: i64,

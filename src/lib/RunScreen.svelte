@@ -16,7 +16,8 @@
 
   type PendingConfirm =
     | { kind: "eod"; estimated: number; today_total: number }
-    | { kind: "backfill"; start: string; end: string; estimated: number; today_total: number };
+    | { kind: "backfill"; start: string; end: string; instrument_ids: number[] | null;
+        estimated: number; today_total: number };
   let pending = $state<PendingConfirm | null>(null);
 
   async function loadViews() {
@@ -62,13 +63,15 @@
     finally { inFlight = false; }
   }
 
-  async function backfillRange(start: string, end: string) {
+  async function backfillGap(g: GapRow) {
     if (selectedViewId === null) return;
     inFlight = true;
     try {
-      const outcome = await api.runBackfillNow(selectedViewId, start, end, false);
+      const ids = [g.instrument_id];
+      const outcome = await api.runBackfillNow(selectedViewId, g.start, g.end, false, ids);
       if ("NeedsConfirmation" in outcome) {
-        pending = { kind: "backfill", start, end, ...outcome.NeedsConfirmation };
+        pending = { kind: "backfill", start: g.start, end: g.end, instrument_ids: ids,
+                    ...outcome.NeedsConfirmation };
       } else {
         pending = null;
         await Promise.all([loadViewData(), refreshRuns()]);
@@ -84,7 +87,8 @@
       if (pending.kind === "eod") {
         await api.runEodNow(selectedViewId, true);
       } else {
-        await api.runBackfillNow(selectedViewId, pending.start, pending.end, true);
+        await api.runBackfillNow(selectedViewId, pending.start, pending.end, true,
+                                 pending.instrument_ids);
       }
       pending = null;
       await Promise.all([loadViewData(), refreshRuns()]);
@@ -127,8 +131,8 @@
 
   <h2>Gaps (last 30 days)</h2>
   <p class="thin">Per instrument, not per view: one member reporting on a date
-     says nothing about the others. Backfilling runs the whole view for the
-     range shown.</p>
+     says nothing about the others. The Backfill button fetches only the
+     instrument shown, for the range shown.</p>
   {#if !gaps.length}<p class="thin">No gaps.</p>{/if}
   <table>
     <thead><tr><th>Instrument</th><th>Start</th><th>End</th><th></th></tr></thead>
@@ -136,7 +140,7 @@
       {#each gaps as g}
         <tr>
           <td>{g.label}</td><td>{g.start}</td><td>{g.end}</td>
-          <td><button onclick={() => backfillRange(g.start, g.end)} disabled={inFlight}>Backfill</button></td>
+          <td><button onclick={() => backfillGap(g)} disabled={inFlight}>Backfill</button></td>
         </tr>
       {/each}
     </tbody>

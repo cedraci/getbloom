@@ -381,3 +381,57 @@ async fn a_missing_field_behind_a_present_sibling_is_still_a_gap() {
     assert!(gaps.iter().all(|g| g.instrument_id != iid),
             "both numeric fields present; a missing TEXT field is not a gap: {gaps:?}");
 }
+
+/// A one-instrument gap must not cost a whole-view refetch. The filter is
+/// applied at load_view, so the estimate, the request and the ingest all see
+/// only the targeted instrument.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_filtered_backfill_fetches_only_the_target_instrument() {
+    struct Recording(std::sync::Mutex<Vec<Vec<i64>>>);
+    impl DataFetcher for Recording {
+        async fn fetch(&self, req: &FetchRequest, _audit: Option<&Path>)
+            -> AppResult<FetchOutcome> {
+            self.0.lock().unwrap()
+                .push(req.assets.iter().map(|a| a.instrument_id).collect());
+            Ok(FetchOutcome::default())
+        }
+    }
+
+    let pool = common::pool().await;
+    let (a, _fid, vid, _rid) = scaffold(&pool, "BFONE").await;
+    // Second member, same class.
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM book_entry WHERE instrument_id = $1")
+        .bind(a).fetch_one(&pool).await.unwrap();
+    let b_inst = store::create(&pool).await.unwrap();
+    let b = b_inst.instrument_id;
+    let b_sec = format!("{} US Equity", uniq("BFTWO"));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, b, &NewAlias {
+        id_type: "bdp_security".into(), value: b_sec.clone(),
+        exch_code: Some("US".into()), valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(b).bind(class).bind(&b_sec).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(vid).bind(b).execute(&pool).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = PipelineConfig {
+        data_dir: dir.path().to_path_buf(),
+        python_path: "python".into(), script_path: "scripts/blp_fetch.py".into(),
+        request_timeout_s: 5, soft_limit: 100_000,
+    };
+    let rec = Recording(std::sync::Mutex::new(Vec::new()));
+    let out = orchestrator::run_backfill_with(
+        &pool, &cfg, &rec, vid, d("2026-08-17"), d("2026-08-18"),
+        Some(&[b]), true).await.unwrap();
+    assert!(matches!(out, RunOutcome::Completed { .. }));
+    let seen = rec.0.lock().unwrap().clone();
+    assert_eq!(seen, vec![vec![b]],
+               "only the targeted instrument may reach the fetcher: {seen:?}");
+}

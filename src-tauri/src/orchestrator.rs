@@ -92,12 +92,18 @@ struct Loaded {
     fields: Vec<FetchField>,
 }
 
-async fn load_view(pool: &PgPool, view_id: i64) -> AppResult<Loaded> {
+async fn load_view(pool: &PgPool, view_id: i64, only: Option<&[i64]>) -> AppResult<Loaded> {
     let view = sqlx::query_as::<_, views::View>("SELECT * FROM view WHERE id = $1")
         .bind(view_id)
         .fetch_one(pool)
         .await?;
-    let members = views::view_instruments(pool, view_id).await?;
+    let mut members = views::view_instruments(pool, view_id).await?;
+    if let Some(ids) = only {
+        // A filtered backfill (a per-instrument gap) fetches only its target;
+        // an id not in the view is simply absent, and plan_requests' empty-
+        // assets validation reports the net result.
+        members.retain(|m| ids.contains(&m.instrument_id));
+    }
     let fields_db = views::view_fields(pool, view_id).await?;
     let classes = crate::registry::list_asset_classes(pool).await?;
     let class_name = |id: i64| {
@@ -272,7 +278,7 @@ pub async fn run_eod_with<F: DataFetcher>(
     obs_date: NaiveDate,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
-    let loaded = load_view(pool, view_id).await?;
+    let loaded = load_view(pool, view_id, None).await?;
     let estimated = budget::estimate_eod_hits(&loaded.assets, &loaded.fields);
     let today_total = budget::today_hits(pool).await?;
     if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm
@@ -284,17 +290,21 @@ pub async fn run_eod_with<F: DataFetcher>(
             obs_date, obs_date, estimated).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_backfill(
     pool: &PgPool,
     cfg: &PipelineConfig,
     view_id: i64,
     start: NaiveDate,
     end: NaiveDate,
+    instrument_ids: Option<&[i64]>,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
-    run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end, confirmed).await
+    run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end,
+                      instrument_ids, confirmed).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_backfill_with<F: DataFetcher>(
     pool: &PgPool,
     cfg: &PipelineConfig,
@@ -302,6 +312,7 @@ pub async fn run_backfill_with<F: DataFetcher>(
     view_id: i64,
     start: NaiveDate,
     end: NaiveDate,
+    instrument_ids: Option<&[i64]>,
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
     if start > end {
@@ -312,7 +323,7 @@ pub async fn run_backfill_with<F: DataFetcher>(
             "backfill range exceeds {BACKFILL_CAP_DAYS}-day cap"
         )));
     }
-    let loaded = load_view(pool, view_id).await?;
+    let loaded = load_view(pool, view_id, instrument_ids).await?;
     let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end);
     let today_total = budget::today_hits(pool).await?;
     // Spec §5.3: every backfill shows its cost and requires explicit confirmation.
