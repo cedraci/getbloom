@@ -133,12 +133,17 @@ pub async fn create_roll_link(pool: &sqlx::PgPool, predecessor_id: i64,
         return Err(crate::error::AppError::Validation(
             "a roll link cannot join an instrument to itself".into()));
     }
-    let link_id = crate::instrument::store::propose_link(
-        pool, predecessor_id, successor_id, "roll", effective_date,
+    // One transaction for all three statements: a failure partway through
+    // (e.g. a bad successor id) must not strand a proposed-but-unconfirmed
+    // link, or a confirmed link missing the offset the caller asked for.
+    let mut tx = pool.begin().await?;
+    let link_id = crate::instrument::store::propose_link_tx(
+        &mut tx, predecessor_id, successor_id, "roll", effective_date,
         serde_json::json!({"source": "user"})).await?;
     sqlx::query("UPDATE instrument_link SET roll_offset = $2 WHERE id = $1")
-        .bind(link_id).bind(roll_offset).execute(pool).await?;
-    crate::instrument::store::confirm_link(pool, link_id, "user").await?;
+        .bind(link_id).bind(roll_offset).execute(&mut *tx).await?;
+    crate::instrument::store::confirm_link_tx(&mut tx, link_id, "user").await?;
+    tx.commit().await?;
     Ok(link_id)
 }
 

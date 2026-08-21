@@ -435,3 +435,30 @@ async fn volumes_cross_a_roll_unscaled() {
     assert!((b_row.value - 50_000.0).abs() < 1e-9,
             "a share count crosses a roll verbatim: {}", b_row.value);
 }
+
+// --------------------------------------- P10 Task 8: create_roll_link is atomic
+
+/// `create_roll_link` runs propose/set-offset/confirm as three statements;
+/// a failure partway through must not strand a proposed-but-unconfirmed (or
+/// offset-less) row. The cleanest inducible failure -- a successor id with no
+/// matching `instrument` row -- violates the FK on the very FIRST statement
+/// (the INSERT inside `propose_link`), so this cannot exercise a rollback of
+/// an already-inserted row; it still pins the required "error implies zero
+/// rows" contract, and the txn plumbing itself is judged structurally.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn create_roll_link_leaves_no_row_when_the_successor_does_not_exist() {
+    let pool = common::pool().await;
+    let (a, _f, _) = scaffold(&pool, "RollAtomic").await;
+    // Far past any BIGSERIAL value this test run could have generated.
+    let bogus_successor = 987_654_321_000_i64;
+
+    let result = stitch::create_roll_link(&pool, a, bogus_successor, d("2026-03-11"),
+                                          Some(2.5)).await;
+    assert!(result.is_err(), "a roll link to a nonexistent successor must fail");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instrument_link WHERE predecessor_id = $1 AND successor_id = $2")
+        .bind(a).bind(bogus_successor).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 0, "a failed create_roll_link must not strand a row");
+}

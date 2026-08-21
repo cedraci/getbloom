@@ -368,13 +368,27 @@ pub async fn propose_link(pool: &PgPool, predecessor_id: i64, successor_id: i64,
                           link_type: &str, effective_date: NaiveDate,
                           evidence: serde_json::Value) -> AppResult<i64>
 {
+    let mut tx = pool.begin().await?;
+    let id = propose_link_tx(&mut tx, predecessor_id, successor_id, link_type,
+                             effective_date, evidence).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Same as `propose_link`, but inside a transaction the caller controls -- for
+/// a caller (stitch::create_roll_link) that must propose, set fields, and
+/// confirm as one atomic unit.
+pub async fn propose_link_tx(tx: &mut Tx<'_>, predecessor_id: i64, successor_id: i64,
+                             link_type: &str, effective_date: NaiveDate,
+                             evidence: serde_json::Value) -> AppResult<i64>
+{
     Ok(sqlx::query_scalar(
         "INSERT INTO instrument_link
            (predecessor_id, successor_id, link_type, effective_date, evidence)
          VALUES ($1,$2,$3,$4,$5) RETURNING id")
         .bind(predecessor_id).bind(successor_id).bind(link_type)
         .bind(effective_date).bind(evidence)
-        .fetch_one(pool).await?)
+        .fetch_one(&mut **tx).await?)
 }
 
 /// P6: Bloomberg-asserted merger terms on a link. COALESCE keeps an earlier
@@ -397,9 +411,17 @@ pub async fn set_link_terms(pool: &PgPool, link_id: i64,
 /// A no-op against an already-confirmed link: without this guard a second
 /// call would silently overwrite who confirmed it and when.
 pub async fn confirm_link(pool: &PgPool, link_id: i64, by: &str) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    confirm_link_tx(&mut tx, link_id, by).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Same as `confirm_link`, but inside a transaction the caller controls.
+pub async fn confirm_link_tx(tx: &mut Tx<'_>, link_id: i64, by: &str) -> AppResult<()> {
     sqlx::query("UPDATE instrument_link SET confirmed_by = $2, confirmed_at = now()
                   WHERE id = $1 AND confirmed_by IS NULL")
-        .bind(link_id).bind(by).execute(pool).await?;
+        .bind(link_id).bind(by).execute(&mut **tx).await?;
     Ok(())
 }
 
