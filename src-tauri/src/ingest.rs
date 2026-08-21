@@ -65,6 +65,22 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
             }
             sqlx::query("UPDATE observation SET system_to = now() WHERE id = $1")
                 .bind(id).execute(&mut *tx).await?;
+            // A restatement is legitimate -- and invisible unless said. The
+            // run stays ok/partial on its own merits; this row is the audit
+            // trail's headline, not a failure.
+            let describe = |n: &Option<f64>, t: &Option<String>| match (n, t) {
+                (Some(v), _) => v.to_string(),
+                (_, Some(s)) => format!("{s:?}"),
+                _ => "NULL".into(),
+            };
+            sqlx::query(
+                "INSERT INTO ingest_issue
+                   (run_id, instrument_id, field_id, obs_date, severity, code, detail)
+                 VALUES ($1,$2,$3,$4,'warn','value_superseded',$5)")
+                .bind(run_id).bind(c.instrument_id).bind(c.field_id).bind(c.obs_date)
+                .bind(format!("stored value {} superseded by {}",
+                              describe(&old_num, &old_text), describe(&num, &text)))
+                .execute(&mut *tx).await?;
             superseded += 1;
         }
 

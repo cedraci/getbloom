@@ -166,3 +166,30 @@ async fn unexplained_silence_becomes_quality_no_response() {
         .bind(rid).bind(iid).fetch_one(&pool).await.unwrap();
     assert_eq!(code, "quality_no_response");
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_superseded_value_leaves_a_visible_issue_and_unchanged_does_not() {
+    let pool = common::pool().await;
+    let (iid, fid, rid) = qc_scaffold(&pool, "QSUP").await;
+    let cell = |v: f64| FetchOutcome {
+        cells: vec![ObsCell { instrument_id: iid, field_id: fid,
+                              obs_date: d("2026-08-13"),
+                              value: CellValue::Num(v) }],
+        problems: vec![],
+    };
+    ingest::ingest_outcome(&pool, rid, &cell(101.5)).await.unwrap();
+    // Same value again: no supersession, no issue.
+    let s2 = ingest::ingest_outcome(&pool, rid, &cell(101.5)).await.unwrap();
+    assert_eq!((s2.superseded, s2.unchanged), (0, 1));
+    // Restated value: superseded + a value_superseded issue naming both numbers.
+    let s3 = ingest::ingest_outcome(&pool, rid, &cell(99.75)).await.unwrap();
+    assert_eq!(s3.superseded, 1);
+    let details: Vec<String> = sqlx::query_scalar(
+        "SELECT detail FROM ingest_issue
+          WHERE run_id = $1 AND code = 'value_superseded'")
+        .bind(rid).fetch_all(&pool).await.unwrap();
+    assert_eq!(details.len(), 1, "one alert for one restatement");
+    assert!(details[0].contains("101.5") && details[0].contains("99.75"),
+            "detail must name old and new: {}", details[0]);
+}
