@@ -151,6 +151,21 @@ async fn investigate<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                                        summary: &mut LifecycleSummary)
     -> AppResult<()>
 {
+    // P9: a class can opt out of M&A investigation entirely (asset_class
+    // .ma_capable, migration 0011) -- the called-bond story (design 9.3).
+    // book_entry.instrument_id is the primary key, so at most one row; an
+    // instrument with no book_entry at all keeps today's behaviour, which is
+    // what unwrap_or(true) encodes.
+    let ma_capable: bool = sqlx::query_scalar(
+        "SELECT ac.ma_capable FROM book_entry be
+         JOIN asset_class ac ON ac.id = be.asset_class_id
+         WHERE be.instrument_id = $1")
+        .bind(instrument_id).fetch_optional(pool).await?
+        .unwrap_or(true);
+    if !ma_capable {
+        return retire_path(pool, fetcher, instrument_id, security, today, summary).await;
+    }
+
     let deals = fetcher.ma_deals(security).await?;
     if deals.parsed.not_applicable {
         return fund_path(pool, fetcher, instrument_id, security, status,
@@ -265,6 +280,20 @@ async fn build_link(pool: &PgPool, instrument_id: i64, deal: &MaDeal,
     Ok(())
 }
 
+/// The 6-year `HISTORICAL_IDS_TIME_RANGE` ingest both dead-instrument routes
+/// need: it is how a delisting's Action IDs and any recorded rename chain
+/// reach `instrument_alias`/`instrument_link` on their own, via the existing
+/// history machinery (`instrument::history`). Shared so `fund_path` and
+/// `retire_path` cannot drift on how that refresh is invoked.
+async fn refresh_identity_history<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
+                                                     instrument_id: i64, security: &str,
+                                                     today: NaiveDate)
+    -> AppResult<crate::instrument::history::HistoryOutcome>
+{
+    let start = today - chrono::Days::new(6 * 365);
+    crate::instrument::history::ingest(pool, fetcher, instrument_id, security, start).await
+}
+
 /// Funds: the M&A table does not exist and no field names a successor
 /// (probed exhaustively, design 2). What the API does give is identifier
 /// history -- Action IDs of the delisting, and a rename chain when one was
@@ -277,9 +306,7 @@ async fn fund_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                                      summary: &mut LifecycleSummary)
     -> AppResult<()>
 {
-    let start = today - chrono::Days::new(6 * 365);
-    match crate::instrument::history::ingest(
-        pool, fetcher, instrument_id, security, start).await {
+    match refresh_identity_history(pool, fetcher, instrument_id, security, today).await {
         Ok(outcome) => {
             summary.links_proposed += outcome.links_proposed.len();
             record_issue(pool, instrument_id, "lifecycle_dead_fund",
@@ -299,6 +326,31 @@ async fn fund_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
             &format!("{security} answered MARKET_STATUS {status}; identifier \
                       history fetch failed: {e}"), summary).await,
     }
+}
+
+/// A dead instrument whose class opted out of M&A investigation entirely
+/// (`asset_class.ma_capable = FALSE`) -- the called-bond story (design 9.3):
+/// a called or matured bond gets `INACTIVE_DATE` from Bloomberg and ends its
+/// series exactly like a delisted equity, with no successor to look for.
+///
+/// Gets the same identifier-history refresh `fund_path` performs -- so a
+/// delisting Action ID still lands if Bloomberg records one -- but proposes
+/// no link and burns no `ma_deals` hit; the class has already said M&A does
+/// not apply. The refresh is advisory here, same as everywhere else in this
+/// module: a failure is logged and the retirement issue is still recorded,
+/// never lost behind a propagated error.
+async fn retire_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
+                                       instrument_id: i64, security: &str,
+                                       today: NaiveDate,
+                                       summary: &mut LifecycleSummary)
+    -> AppResult<()>
+{
+    if let Err(e) = refresh_identity_history(pool, fetcher, instrument_id, security, today).await {
+        eprintln!("lifecycle: retire_path identity refresh for {security} failed: {e}");
+    }
+    record_issue(pool, instrument_id, "lifecycle_retired",
+        "instrument inactive; class opted out of M&A investigation -- series \
+         capped at INACTIVE_DATE, retire the book entry", summary).await
 }
 
 /// Durable, queryable, idempotent on (instrument_id, code, detail) -- the

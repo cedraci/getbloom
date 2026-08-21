@@ -9,6 +9,13 @@ use getbloomdata_lib::adjust::{self, AdjustMode};
 use getbloomdata_lib::fetch::{CellValue, FetchOutcome, ObsCell};
 use getbloomdata_lib::ingest;
 use getbloomdata_lib::instrument::store::{self, NewAlias};
+use getbloomdata_lib::error::AppResult;
+use getbloomdata_lib::lifecycle;
+use getbloomdata_lib::master_fetch::{
+    ActionTerms, Answered, CorpActionsTables, HistIdRow, IdentityBlock, MaDealsOutcome,
+    MasterFetcher, MockMasterFetcher,
+};
+use getbloomdata_lib::resolution::score::Candidate;
 
 fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
 
@@ -299,3 +306,136 @@ async fn field_level_stale_days_wins_over_class_default() {
     assert!(!codes.is_empty(),
             "field-level threshold (2) must win over the class default (5)");
 }
+
+// ---------------------------------------------------------------------------
+// ma_capable gates lifecycle::investigate: FALSE skips ma_deals entirely and
+// retires the instrument instead (the called-bond story, design 9.3).
+// ---------------------------------------------------------------------------
+
+/// Wraps a MockMasterFetcher and panics if `ma_deals` is ever called. That
+/// panic IS the assertion that an `ma_capable = FALSE` class never spends an
+/// M&A hit -- `investigate` must short-circuit to `retire_path` before its
+/// `ma_deals` call is reached at all.
+struct NoMaDealsFetcher(MockMasterFetcher);
+
+impl MasterFetcher for NoMaDealsFetcher {
+    async fn identity(&self, securities: &[String])
+        -> AppResult<Answered<Vec<IdentityBlock>>>
+    { self.0.identity(securities).await }
+
+    async fn hist_ids(&self, security: &str, anchor: &str, start: NaiveDate)
+        -> AppResult<Vec<HistIdRow>>
+    { self.0.hist_ids(security, anchor, start).await }
+
+    async fn instrument_list(&self, query: &str, yellow_key_filter: Option<&str>,
+                             max_results: u32) -> AppResult<Answered<Vec<Candidate>>>
+    { self.0.instrument_list(query, yellow_key_filter, max_results).await }
+
+    async fn corp_actions(&self, securities: &[String])
+        -> AppResult<Answered<CorpActionsTables>>
+    { self.0.corp_actions(securities).await }
+
+    async fn market_status(&self, securities: &[String])
+        -> AppResult<Answered<Vec<(String, String)>>>
+    { self.0.market_status(securities).await }
+
+    async fn ma_deals(&self, security: &str) -> AppResult<Answered<MaDealsOutcome>> {
+        panic!("ma_deals must never be called for an ma_capable=FALSE class \
+                (security {security}); investigate's capability check must \
+                route to retire_path before this fetcher method is reached");
+    }
+
+    async fn action_terms(&self, action_id: &str)
+        -> AppResult<Answered<Option<ActionTerms>>>
+    { self.0.action_terms(action_id).await }
+}
+
+/// One instrument in an `ma_capable = FALSE` class, stale since January --
+/// the "called bond" shape. Returns (instrument_id, bdp_security).
+async fn retire_scaffold(pool: &sqlx::PgPool, stem: &str) -> (i64, String) {
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, ma_capable) VALUES ($1, FALSE) RETURNING id")
+        .bind(uniq(stem)).fetch_one(pool).await.unwrap();
+    let fid: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind)
+         VALUES ($1,'PX_LAST','Last price','numeric') RETURNING id")
+        .bind(class).fetch_one(pool).await.unwrap();
+    let vid: i64 = sqlx::query_scalar(
+        "INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("retireview")).fetch_one(pool).await.unwrap();
+    let rid: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'eod','manual','ok') RETURNING id")
+        .bind(vid).fetch_one(pool).await.unwrap();
+
+    let inst = store::create(pool).await.unwrap();
+    let iid = inst.instrument_id;
+    let sec = format!("{} Corp", uniq(stem));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, iid, &NewAlias {
+        id_type: "bdp_security".into(), value: sec.clone(),
+        exch_code: Some("US".into()), valid_from: d("2000-01-03"),
+        valid_to: None, source: "user".into(),
+        bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(iid).bind(class).bind("Called bond").execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id)
+                 VALUES ($1,$2)")
+        .bind(vid).bind(iid).execute(pool).await.unwrap();
+    let cells = vec![
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-01-02"), value: CellValue::Num(100.0) },
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-01-05"), value: CellValue::Num(100.0) },
+    ];
+    ingest::ingest_outcome(pool, rid, &FetchOutcome { cells, problems: vec![] })
+        .await.unwrap();
+    (iid, sec)
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn ma_incapable_class_retires_instead_of_investigating_ma() {
+    let pool = common::pool().await;
+    let (iid, sec) = retire_scaffold(&pool, "CapRetire").await;
+
+    let inner = MockMasterFetcher {
+        market_status_raw: serde_json::json!([{"securityData": [
+            {"security": sec, "fieldExceptions": [],
+             "fieldData": {"MARKET_STATUS": "CALL"}}]}]),
+        identity_raw: serde_json::json!([{"securityData": [
+            {"security": sec, "fieldExceptions": [],
+             "fieldData": {"INACTIVE_DATE": "2026-08-01"}}]}]),
+        ..Default::default()
+    };
+    let mock = NoMaDealsFetcher(inner);
+
+    let s = lifecycle::run_check(&pool, &mock, "2026-08-20".parse().unwrap())
+        .await.unwrap();
+    assert_eq!(s.checked, 1);
+    assert_eq!(s.dead, 1, "a called bond still counts as dead");
+    assert_eq!(s.links_proposed, 0);
+    assert_eq!(s.links_confirmed, 0);
+
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingest_issue
+         WHERE instrument_id = $1 AND code = 'lifecycle_retired'")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 1);
+
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail FROM ingest_issue
+          WHERE instrument_id = $1 AND code = 'lifecycle_retired'")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    assert_eq!(detail, "instrument inactive; class opted out of M&A investigation \
+                         -- series capped at INACTIVE_DATE, retire the book entry");
+
+    let links: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instrument_link WHERE predecessor_id = $1")
+        .bind(iid).fetch_one(&pool).await.unwrap();
+    assert_eq!(links, 0, "a retired non-equity proposes no successor link");
+}
+
