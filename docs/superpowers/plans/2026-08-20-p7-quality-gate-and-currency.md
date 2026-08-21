@@ -51,7 +51,7 @@
 **Interfaces:**
 - Produces: `ingest_issue.severity` accepts `'quality'`; `field_def.qc_nonpositive BOOLEAN NOT NULL DEFAULT FALSE`, `field_def.qc_outlier_pct DOUBLE PRECISION NULL`, `field_def.qc_stale_days INTEGER NULL`; `schedule.verify_dow SMALLINT DEFAULT 5` (1=Mon..7=Sun, NULL=off), `schedule.last_verified_on DATE NULL`.
 
-- [ ] **Step 1: Write the failing schema tests**
+- [x] **Step 1: Write the failing schema tests**
 
 Create `src-tauri/tests/quality.rs`:
 
@@ -112,12 +112,12 @@ async fn schedule_verify_dow_defaults_to_friday() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run (from `src-tauri/`): `cargo test --test quality -- --ignored`
 Expected: FAIL — `'quality'` violates the current severity CHECK; `qc_nonpositive`/`verify_dow` columns do not exist.
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 Create `src-tauri/migrations/0007_quality_and_verify.sql`:
 
@@ -160,14 +160,14 @@ ALTER TABLE schedule ADD COLUMN verify_dow SMALLINT DEFAULT 5
 ALTER TABLE schedule ADD COLUMN last_verified_on DATE;
 ```
 
-- [ ] **Step 4: Verify LF endings, run tests to verify they pass**
+- [x] **Step 4: Verify LF endings, run tests to verify they pass**
 
 Run: `git add src-tauri/migrations/0007_quality_and_verify.sql && git ls-files --eol src-tauri/migrations`
 Expected: the new file shows `w/lf` (or `i/lf`); if not, fix `.gitattributes` coverage before proceeding.
 Run: `cargo test --test quality -- --ignored`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/migrations/0007_quality_and_verify.sql src-tauri/tests/quality.rs
@@ -189,7 +189,7 @@ git commit -m "feat(db): quality severity, per-field QC thresholds, verify sched
 - Produces: `FieldDef { …existing…, qc_nonpositive: bool, qc_outlier_pct: Option<f64>, qc_stale_days: Option<i32> }`; `fields::create_field(pool, asset_class_id, mnemonic, label, value_kind, bbg_ftype, bbg_datatype, entitlement_note, qc_nonpositive: bool, qc_outlier_pct: Option<f64>, qc_stale_days: Option<i32>) -> AppResult<FieldDef>`; `fields::validate_qc(value_kind, qc_nonpositive, qc_outlier_pct, qc_stale_days) -> AppResult<()>`.
 - Consumes: Task 1's columns.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `src-tauri/src/fields.rs` tests module, add:
 
@@ -228,12 +228,12 @@ async fn create_field_persists_qc_config() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p getbloomdata qc_thresholds` → FAIL (`validate_qc` not defined).
 Run: `cargo test --test quality create_field_persists -- --ignored` → FAIL to compile (wrong arity).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src-tauri/src/fields.rs`, extend `FieldDef` (after `active: bool`):
 
@@ -293,13 +293,13 @@ In `src/lib/ViewsScreen.svelte`: extend `newField` state with `qc_nonpositive: f
 
 and add `.check { flex-direction: row; gap: 0.3rem; align-items: center; }` scoped style if the form labels are column-flex (they are: `form label { flex-direction: column; }` — add `form label.check { flex-direction: row; align-items: center; }`).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p getbloomdata qc_thresholds` → PASS.
 Run: `cargo test --test quality -- --ignored` → PASS.
 Run (repo root): `npm run check` → no new errors.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/fields.rs src-tauri/src/commands.rs src-tauri/tests/quality.rs src/lib/api.ts src/lib/ViewsScreen.svelte
@@ -322,7 +322,7 @@ git commit -m "feat: per-field quality thresholds -- config plumbing end to end"
   - `pub fn unexplained_instruments(requested: &[i64], outcome: &crate::fetch::FetchOutcome) -> Vec<i64>`
 - Codes emitted: `quality_not_finite` (unconditional), `quality_nonpositive`, `quality_outlier`, `quality_stale`.
 
-- [ ] **Step 1: Write the module with failing tests first**
+- [x] **Step 1: Write the module with failing tests first**
 
 Create `src-tauri/src/quality.rs` with this skeleton — write the tests module first, stub `evaluate_series` to return `vec![]` and `unexplained_instruments` to return `vec![]`:
 
@@ -511,13 +511,13 @@ mod tests {
 
 NOTE: check `crate::fetch::CellProblem`'s exact field types before writing the test (open `src-tauri/src/fetch.rs`; `code`/`detail` may be `String`, construct accordingly). Adjust the struct literal to compile against the real definition — the semantic assertions stay as written.
 
-- [ ] **Step 2: Run tests to verify they fail** — `cargo test -p getbloomdata quality::` → FAIL with stubs.
+- [x] **Step 2: Run tests to verify they fail** — `cargo test -p getbloomdata quality::` → FAIL with stubs.
 
-- [ ] **Step 3: Paste the real implementations** (bodies shown above).
+- [x] **Step 3: Paste the real implementations** (bodies shown above).
 
-- [ ] **Step 4: Run tests to verify they pass** — `cargo test -p getbloomdata quality::` → PASS (5 tests). Note: the outlier detail assertion expects `44.3%` (145/100.5 − 1 = 44.28%); if rounding differs, fix the expectation to the actual one-decimal rendering, not the code.
+- [x] **Step 4: Run tests to verify they pass** — `cargo test -p getbloomdata quality::` → PASS (5 tests). Note: the outlier detail assertion expects `44.3%` (145/100.5 − 1 = 44.28%); if rounding differs, fix the expectation to the actual one-decimal rendering, not the code.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/quality.rs src-tauri/src/lib.rs
@@ -539,7 +539,7 @@ git commit -m "feat: P7 pure quality checks -- nonpositive, outlier, stale, unex
 - Produces: `quality::run_quality_gate(pool: &PgPool, run_id: i64, req: &crate::fetch::FetchRequest, outcome: &crate::fetch::FetchOutcome) -> AppResult<u64>`; `RunOutcome::Completed { run_id, summary, corp_actions, quality_findings: u64 }`.
 - Consumes: Task 2's `field_def.qc_*` columns, Task 3's pure functions.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 Append to `src-tauri/tests/quality.rs`:
 
@@ -640,9 +640,9 @@ async fn unexplained_silence_becomes_quality_no_response() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test --test quality -- --ignored` → FAIL to compile (`run_quality_gate` missing).
+- [x] **Step 2: Run to verify failure** — `cargo test --test quality -- --ignored` → FAIL to compile (`run_quality_gate` missing).
 
-- [ ] **Step 3: Implement the runner**
+- [x] **Step 3: Implement the runner**
 
 Append to `src-tauri/src/quality.rs`:
 
@@ -728,7 +728,7 @@ pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
 }
 ```
 
-- [ ] **Step 4: Wire into the orchestrator**
+- [x] **Step 4: Wire into the orchestrator**
 
 In `src-tauri/src/orchestrator.rs`:
 
@@ -784,11 +784,11 @@ and render after the `caLine` paragraph (`RunScreen.svelte:169`):
   {#if qualityLine}<p class="amber">{qualityLine}</p>{/if}
 ```
 
-- [ ] **Step 5: Run all tests**
+- [x] **Step 5: Run all tests**
 
 `cargo test` → unit suites PASS. `cargo test -- --ignored` → PASS including the two new gate tests. `npm run check` → clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/quality.rs src-tauri/src/orchestrator.rs src-tauri/src/scheduler.rs src-tauri/tests src/lib/api.ts src/lib/RunScreen.svelte
@@ -806,7 +806,7 @@ git commit -m "feat: P7 quality gate rides every run; findings make it partial a
 **Interfaces:**
 - Produces: an `ingest_issue` row `(run_id, instrument_id, field_id, obs_date, 'warn', 'value_superseded', detail)` for every superseded observation. `IngestSummary` semantics unchanged (`issues` still counts fetch problems only; run status is untouched by supersession — a correction is legitimate, it just must be visible).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `src-tauri/tests/quality.rs`:
 
@@ -839,9 +839,9 @@ async fn a_superseded_value_leaves_a_visible_issue_and_unchanged_does_not() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test --test quality a_superseded -- --ignored` → FAIL (no issue rows).
+- [x] **Step 2: Run to verify failure** — `cargo test --test quality a_superseded -- --ignored` → FAIL (no issue rows).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src-tauri/src/ingest.rs`, replace the supersede branch (lines 61-69) with:
 
@@ -873,9 +873,9 @@ In `src-tauri/src/ingest.rs`, replace the supersede branch (lines 61-69) with:
         }
 ```
 
-- [ ] **Step 4: Run tests** — `cargo test --test quality -- --ignored` → PASS. Also run `cargo test --test pipeline -- --ignored` and `cargo test --test db_integration -- --ignored`: if any existing test counts `ingest_issue` rows after a supersession, update its expectation and say so in the commit body.
+- [x] **Step 4: Run tests** — `cargo test --test quality -- --ignored` → PASS. Also run `cargo test --test pipeline -- --ignored` and `cargo test --test db_integration -- --ignored`: if any existing test counts `ingest_issue` rows after a supersession, update its expectation and say so in the commit body.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/ingest.rs src-tauri/tests/quality.rs
@@ -897,7 +897,7 @@ git commit -m "feat: restatements announce themselves -- value_superseded issue 
 - Produces: `scheduler::iso_dow(d: NaiveDate) -> i16` (1=Mon..7=Sun); `scheduler::verify_window_start(end: NaiveDate) -> NaiveDate` (4 more weekdays back → a 5-weekday window ending at `end`); `orchestrator::run_verify(pool, cfg, view_id, start, end) -> AppResult<RunOutcome>` and `run_verify_with<F: DataFetcher>(pool, cfg, fetcher, view_id, start, end)` — a backfill with trigger `'scheduled'`, gated at `HardConfirm` (returns `NeedsConfirmation` instead of running; never asks for a click).
 - Consumes: Task 1's `schedule.verify_dow`/`last_verified_on`; Task 4's `RunOutcome` shape.
 
-- [ ] **Step 1: Write the failing pure tests**
+- [x] **Step 1: Write the failing pure tests**
 
 In `src-tauri/src/scheduler.rs` tests module, add:
 
@@ -920,9 +920,9 @@ In `src-tauri/src/scheduler.rs` tests module, add:
     }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p getbloomdata verify_window` → FAIL (missing fns).
+- [x] **Step 2: Run to verify failure** — `cargo test -p getbloomdata verify_window` → FAIL (missing fns).
 
-- [ ] **Step 3: Implement scheduler helpers + orchestrator entry**
+- [x] **Step 3: Implement scheduler helpers + orchestrator entry**
 
 `src-tauri/src/scheduler.rs`, after `previous_weekday`:
 
@@ -1065,7 +1065,7 @@ pub async fn run_verify_with<F: DataFetcher>(
 }
 ```
 
-- [ ] **Step 4: Command + UI surface**
+- [x] **Step 4: Command + UI surface**
 
 `src-tauri/src/commands.rs`:
 - `ScheduleRow` gains `pub verify_dow: Option<i16>, pub last_verified_on: Option<chrono::NaiveDate>`; `list_schedules`' SELECT adds `verify_dow, last_verified_on`.
@@ -1103,7 +1103,7 @@ with `.bind(verify_dow)` appended.
 ```
 - The schedules table header gains `<th>Verify</th>` (after "Window end") and each row `<td>{s.verify_dow ? ["","Mon","Tue","Wed","Thu","Fri","Sat","Sun"][s.verify_dow] + (s.last_verified_on ? ` (last ${s.last_verified_on})` : "") : "off"}</td>`.
 
-- [ ] **Step 5: Write and run the DB tests**
+- [x] **Step 5: Write and run the DB tests**
 
 Append to `src-tauri/tests/quality.rs`:
 
@@ -1127,7 +1127,7 @@ async fn a_scheduled_verify_backfill_counts_as_todays_run() {
 
 Run: `cargo test -p getbloomdata` and `cargo test --test quality -- --ignored` → PASS. `npm run check` → clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/scheduler.rs src-tauri/src/orchestrator.rs src-tauri/src/commands.rs src-tauri/tests/quality.rs src/lib/api.ts src/lib/SettingsScreen.svelte
@@ -1145,7 +1145,7 @@ git commit -m "feat: weekly verification re-fetch -- scheduled 5-weekday backfil
 **Interfaces:**
 - Produces: `observation.currency TEXT NULL`, backfilled from the current-belief `currency` attribute valid at each row's `obs_date`, and immutable via the extended `observation_append_only` trigger.
 
-- [ ] **Step 1: Write the failing schema tests**
+- [x] **Step 1: Write the failing schema tests**
 
 Create `src-tauri/tests/currency.rs`:
 
@@ -1196,9 +1196,9 @@ async fn observation_currency_exists_and_is_append_only() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test --test currency -- --ignored` → FAIL (column does not exist).
+- [x] **Step 2: Run to verify failure** — `cargo test --test currency -- --ignored` → FAIL (column does not exist).
 
-- [ ] **Step 3: Write the migration**
+- [x] **Step 3: Write the migration**
 
 Create `src-tauri/migrations/0008_observation_currency.sql`:
 
@@ -1243,9 +1243,9 @@ BEGIN
 END $fn$ LANGUAGE plpgsql;
 ```
 
-- [ ] **Step 4: Verify LF endings and run** — `git ls-files --eol` check as in Task 1, then `cargo test --test currency -- --ignored` → PASS.
+- [x] **Step 4: Verify LF endings and run** — `git ls-files --eol` check as in Task 1, then `cargo test --test currency -- --ignored` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/migrations/0008_observation_currency.sql src-tauri/tests/currency.rs
@@ -1265,7 +1265,7 @@ git commit -m "feat(db): observation.currency -- stamped, backfilled, append-onl
 **Interfaces:**
 - Produces: `ingest_outcome` stamps `observation.currency` from the instrument's current-belief `currency` attribute valid at the cell's `obs_date` (numeric cells only). An unchanged value whose currency changed is superseded with issue code `currency_changed` (severity `'warn'`). `dataview::ObsRow` gains `pub currency: Option<String>`; observations CSV header becomes `obs_date,value,currency,basis,run_id,recorded_at`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/currency.rs`:
 
@@ -1353,9 +1353,9 @@ async fn a_currency_change_supersedes_and_raises_currency_changed() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test --test currency -- --ignored` → first new test FAILS (currency NULL — nothing stamps it yet).
+- [x] **Step 2: Run to verify failure** — `cargo test --test currency -- --ignored` → first new test FAILS (currency NULL — nothing stamps it yet).
 
-- [ ] **Step 3: Implement ingest stamping**
+- [x] **Step 3: Implement ingest stamping**
 
 In `src-tauri/src/ingest.rs`, inside `ingest_outcome` after the `raw_basis` query, load the currency periods once:
 
@@ -1419,15 +1419,15 @@ In the per-cell loop:
 (hoist the `describe` closure from Task 5 above the loop so both arms share it);
 - the INSERT gains the column: `INSERT INTO observation (instrument_id, field_id, obs_date, granularity, layer, basis_id, value_num, value_text, run_id, currency) VALUES ($1,$2,$3,'eod','raw',$4,$5,$6,$7,$8)` with `.bind(ccy)` appended.
 
-- [ ] **Step 4: Expose in reads**
+- [x] **Step 4: Expose in reads**
 
 `src-tauri/src/dataview.rs`: `ObsRow` gains `pub currency: Option<String>,` (after `value_text`); the `observations` SELECT adds `o.currency,`; `export_observations_csv` header becomes `"obs_date,value,currency,basis,run_id,recorded_at\n"` and the row line inserts `r.currency.clone().unwrap_or_default(),` after `value`.
 `src/lib/api.ts`: `ObsRow` gains `currency: string | null;`.
 `src/lib/DataScreen.svelte`: raw observations table header (`:245`) gains `<th>Ccy</th>` after `<th>Value</th>`; each row gains `<td class="thin">{o.currency ?? "—"}</td>` after the value cell.
 
-- [ ] **Step 5: Run tests** — `cargo test --test currency -- --ignored` and `cargo test --test quality -- --ignored` (Task 5's supersession test must still pass) → PASS. `npm run check` → clean.
+- [x] **Step 5: Run tests** — `cargo test --test currency -- --ignored` and `cargo test --test quality -- --ignored` (Task 5's supersession test must still pass) → PASS. `npm run check` → clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/ingest.rs src-tauri/src/dataview.rs src-tauri/tests/currency.rs src/lib/api.ts src/lib/DataScreen.svelte
@@ -1445,7 +1445,7 @@ git commit -m "feat: every numeric observation carries its currency; redenominat
 **Interfaces:**
 - Produces: `stitched_series` stops (with a `stopped` message containing `"cross-currency"`) before splicing a predecessor whose current-belief currency differs from the queried instrument's. Volume series exempt. Unknown currencies (either side `None`) proceed as before — refusing on ignorance would break every user-created instrument.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `src-tauri/tests/currency.rs`:
 
@@ -1511,9 +1511,9 @@ async fn stitching_still_works_when_currencies_match() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test --test currency stitching -- --ignored` → the cross-currency test FAILS (no guard yet; the same-currency one should already pass and pins the non-regression).
+- [x] **Step 2: Run to verify failure** — `cargo test --test currency stitching -- --ignored` → the cross-currency test FAILS (no guard yet; the same-currency one should already pass and pins the non-regression).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src-tauri/src/stitch.rs`, add near `segment_label`:
 
@@ -1562,9 +1562,9 @@ Inside the loop, immediately after `let pred = crate::adjust::adjusted_series(..
         }
 ```
 
-- [ ] **Step 4: Run tests** — `cargo test --test currency -- --ignored` → PASS both; `cargo test --test stitch -- --ignored` → existing stitch suite unaffected (its fixtures set no currency attrs → guard is inert).
+- [x] **Step 4: Run tests** — `cargo test --test currency -- --ignored` → PASS both; `cargo test --test stitch -- --ignored` → existing stitch suite unaffected (its fixtures set no currency attrs → guard is inert).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/stitch.rs src-tauri/tests/currency.rs
@@ -1579,20 +1579,30 @@ git commit -m "feat: stitching refuses cross-currency junctions -- a ratio conve
 - Modify: `docs/superpowers/plans/2026-08-20-p7-quality-gate-and-currency.md` (tick executed checkboxes)
 - No production code.
 
-- [ ] **Step 1: Full test sweep**
+- [x] **Step 1: Full test sweep**
 
 From `src-tauri/`: `cargo test` (all pure suites), then `cargo test -- --ignored` (full DB suite — requires local Postgres; if unavailable, say so explicitly in the final report rather than claiming green). From repo root: `npm run check`.
 
-- [ ] **Step 2: Manual smoke notes (needs the GUI + Terminal — record, do not fake)**
+- [x] **Step 2: Manual smoke notes (needs the GUI + Terminal — record, do not fake)**
 
 Add to this plan file a "Live smoke" section listing the three checks that need a Bloomberg Terminal session, unchecked: (1) a real run produces `quality` issues when a threshold is deliberately set low; (2) the Friday verify run appears as kind=backfill/trigger=scheduled and `value_superseded` fires on a genuinely restated close; (3) an LSE instrument's observations show `GBp`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-08-20-p7-quality-gate-and-currency.md
 git commit -m "docs: P7 quality gate and currency dimension shipped"
 ```
+
+---
+
+## Live smoke (needs a Bloomberg Terminal session — unchecked until run for real)
+
+These three checks cannot be automated in CI and were NOT performed as part of this plan's execution; they require the GUI plus a live Terminal login. Record results here when run — do not tick from memory.
+
+- [ ] A real run against a view with a deliberately low `qc_outlier_pct` (e.g. 0.1%) produces `severity='quality'` ingest issues, the run lands as `partial`, and the amber quality line shows on the Run screen.
+- [ ] The Friday verify run appears in run history as `kind=backfill` / `trigger=scheduled`, and a genuinely restated close inside the 5-weekday window fires a `value_superseded` warn issue.
+- [ ] An LSE instrument (e.g. `VOD LN Equity`) shows `GBp` verbatim in the Data screen's Ccy column and in the CSV export — never normalized to GBP.
 
 ---
 
