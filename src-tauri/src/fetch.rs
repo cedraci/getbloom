@@ -246,6 +246,18 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
     Ok(out)
 }
 
+/// Hits actually dispatched to Bloomberg, computed from the planned wire
+/// requests -- NOT the pre-flight gate estimate. The two differ: text fields
+/// are dropped from multi-day ranges, and the gate estimate also folds in the
+/// corp-action leg, which charges itself at the wire seam.
+pub fn dispatched_hits(specs: &[RequestSpec], start: NaiveDate, end: NaiveDate) -> i64 {
+    specs.iter().map(|s| {
+        let per_day = (s.securities.len() * s.fields.len()) as i64;
+        let days = if s.kind == "history" { crate::budget::weekdays_between(start, end) } else { 1 };
+        per_day * days
+    }).sum()
+}
+
 // ------------------------------------------------------------ response mapping
 
 struct Lookup<'a> {
@@ -591,6 +603,34 @@ mod tests {
         // A response without the key (old fixture, EOD run) still parses.
         let legacy = resp(r#"{"status":"ok","observations":[],"problems":[]}"#);
         assert!(legacy.bulk_rows.is_empty());
+    }
+
+    #[test]
+    fn dispatched_hits_counts_only_planned_requests() {
+        // 2 assets, 1 numeric field, 1 text field, 3-weekday range
+        // (2026-08-17 Mon .. 2026-08-19 Wed). plan_requests drops the text
+        // field on multi-day ranges, so dispatched = 2 secs x 1 field x 3 days = 6,
+        // while the naive estimate (estimate_backfill_hits) would say
+        // 2 x 2 x 3 = 12.
+        let req = FetchRequest {
+            run_id: 1,
+            assets: vec![
+                FetchAsset { instrument_id: 1, asset_class_id: 10, class_name: "Equity".into(),
+                             label: "A".into(), bdp_security: "A US Equity".into() },
+                FetchAsset { instrument_id: 2, asset_class_id: 10, class_name: "Equity".into(),
+                             label: "B".into(), bdp_security: "B US Equity".into() },
+            ],
+            fields: vec![
+                FetchField { field_id: 100, asset_class_id: 10, mnemonic: "PX_LAST".into(),
+                             value_kind: "numeric".into() },
+                FetchField { field_id: 101, asset_class_id: 10, mnemonic: "NAME".into(),
+                             value_kind: "text".into() },
+            ],
+            start: d(2026, 8, 17),
+            end: d(2026, 8, 19),
+        };
+        let specs = plan_requests(&req).unwrap();
+        assert_eq!(dispatched_hits(&specs, req.start, req.end), 6);
     }
 
     #[test]

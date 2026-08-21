@@ -241,10 +241,18 @@ async fn execute<F: DataFetcher>(
     };
     let result = fetcher.fetch(&req, Some(&audit)).await;
 
-    // Hits are recorded for every fetch attempt, even on failure — over-counting
-    // is the safe direction for a budget guard. Losing this advisory ledger row
-    // must not abort or mask the pipeline result.
-    if let Err(e) = budget::record_hits(pool, run_id, estimated).await {
+    // Hits are recorded for every fetch attempt, even on failure -- Bloomberg
+    // was asked. The ledger gets what was actually dispatched over the wire,
+    // not the pre-flight gate estimate: `run.estimated_hits` keeps that
+    // number, but the two differ (text fields drop out of multi-day ranges,
+    // and the gate estimate folds in the corp-action leg, which charges
+    // itself separately at the wire seam in master_fetch.rs) -- charging the
+    // gate estimate here double-counted corp actions. Losing this advisory
+    // ledger row must not abort or mask the pipeline result.
+    let dispatched = fetch::plan_requests(&req)
+        .map(|specs| fetch::dispatched_hits(&specs, start, end))
+        .unwrap_or(estimated);
+    if let Err(e) = budget::record_hits(pool, run_id, dispatched).await {
         eprintln!("warning: failed to record budget hit for run {run_id}: {e}");
     }
 

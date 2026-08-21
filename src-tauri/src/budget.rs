@@ -9,6 +9,9 @@ pub const DEFAULT_SOFT_LIMIT: i64 = 100_000;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum BudgetLevel { Ok, SoftWarn, HardConfirm }
 
+/// Inclusive weekday count between `start` and `end` (Mon..Fri). Used both by
+/// the pre-flight gate estimate here and by `fetch::dispatched_hits`, which
+/// needs the exact same range semantics to be comparable to it.
 pub fn weekdays_between(start: NaiveDate, end: NaiveDate) -> i64 {
     let mut d = start;
     let mut n = 0;
