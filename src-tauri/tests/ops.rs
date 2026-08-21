@@ -366,3 +366,50 @@ async fn gap_backfill_attempts_at_most_once_per_day() {
     assert_eq!(scheduled_backfill_runs(&pool, vid).await, after_first,
                "the second call of the day must not launch anything");
 }
+
+// ---------------------------------------------------------------------------
+// current_eod view: the flat table downstream consumers read without ever
+// learning bitemporality.
+// ---------------------------------------------------------------------------
+
+use getbloomdata_lib::ingest;
+
+/// Only the current belief for a day surfaces, never the superseded value
+/// beneath it -- the whole point of the view is that a downstream consumer
+/// never has to know a correction happened.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn current_eod_shows_current_belief_only() {
+    let pool = common::pool().await;
+    let class = registry::create_asset_class(&pool, &uniq("EodCls"), "t").await.unwrap();
+    let field = fields::create_field(
+        &pool, class.id, "PX_LAST", "Last", "numeric",
+        None, None, "", false, None, None).await.unwrap();
+    let entry = add_book_entry(&pool, class.id, "EodA", &uniq("EODA")).await;
+    let view = views::create_view(&pool, &uniq("eodview"), "").await.unwrap();
+    views::set_view_instruments(&pool, view.id, &[entry.instrument_id]).await.unwrap();
+    views::set_view_fields(&pool, view.id, &[field.id]).await.unwrap();
+
+    let rid: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'eod','manual','ok') RETURNING id")
+        .bind(view.id).fetch_one(&pool).await.unwrap();
+
+    let cell = |v: f64| FetchOutcome {
+        cells: vec![ObsCell { instrument_id: entry.instrument_id, field_id: field.id,
+            obs_date: d("2026-08-14"), value: CellValue::Num(v) }],
+        problems: vec![],
+    };
+    // First belief, then a correction: the view must show only the latter.
+    ingest::ingest_outcome(&pool, rid, &cell(100.0)).await.unwrap();
+    ingest::ingest_outcome(&pool, rid, &cell(101.0)).await.unwrap();
+
+    let iid = entry.instrument_id;
+    let mnemonic = "PX_LAST".to_string();
+    let rows: Vec<(f64, Option<String>)> = sqlx::query_as(
+        "SELECT value_num, currency FROM current_eod
+         WHERE instrument_id = $1 AND mnemonic = $2 AND obs_date = '2026-08-14'")
+        .bind(iid).bind(&mnemonic).fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1, "exactly one current belief per day");
+    assert_eq!(rows[0].0, 101.0);
+}
