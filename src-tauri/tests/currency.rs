@@ -173,6 +173,33 @@ async fn stitching_refuses_a_cross_currency_junction() {
             "no predecessor rows may be spliced in a foreign currency");
 }
 
+/// P7 fix: `current_currency` used to require a period valid TODAY, but a
+/// dead merger predecessor has ALL its attrs capped at the inactive date
+/// (instrument/store.rs::close_attrs_at) -- so "valid today" finds nothing
+/// for exactly the case the cross-currency guard exists for, and the guard
+/// falls open. Cap the predecessor's currency period at the link date (as
+/// death would) and confirm the guard still fires from the latest KNOWN
+/// belief, not a "valid today" belief.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn stitching_refuses_a_cross_currency_junction_for_a_dead_predecessor() {
+    let pool = common::pool().await;
+    let (pred, succ, fid) = linked_pair(&pool, "DXCCY", "EUR", "USD").await;
+    // Simulate the predecessor dying on the link's effective date: cap its
+    // currency period there, exactly as close_attrs_at would.
+    sqlx::query(
+        "UPDATE instrument_attr SET valid_to = '2026-07-01'
+          WHERE instrument_id = $1 AND attr = 'currency'")
+        .bind(pred).execute(&pool).await.unwrap();
+    let s = stitch::stitched_series(&pool, succ, fid, AdjustMode::Raw, 100)
+        .await.unwrap();
+    assert!(s.stopped.as_deref().unwrap_or("").contains("cross-currency"),
+            "a dead predecessor's currency belief must still gate the splice; \
+             stopped: {:?}", s.stopped);
+    assert!(s.rows.iter().all(|r| r.source_instrument_id == succ),
+            "no predecessor rows may be spliced in a foreign currency");
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn stitching_still_works_when_currencies_match() {

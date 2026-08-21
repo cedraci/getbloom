@@ -100,10 +100,19 @@ pub fn evaluate_series(
 /// Instruments the run REQUESTED and Bloomberg answered with silence -- no
 /// cell, no problem. A holiday is not silence (it arrives as no_data); this
 /// is the partial-response case where a name simply vanished from the reply.
+///
+/// A request/session-level problem (`instrument_id: None`, e.g. a sidecar
+/// failure) explains the silence for the WHOLE run, just not per name: if
+/// any problem in the outcome is global, every instrument's silence is
+/// already accounted for, so this returns empty rather than flagging each
+/// requested instrument as individually unexplained.
 pub fn unexplained_instruments(
     requested: &[i64],
     outcome: &crate::fetch::FetchOutcome,
 ) -> Vec<i64> {
+    if outcome.problems.iter().any(|p| p.instrument_id.is_none()) {
+        return Vec::new();
+    }
     use std::collections::HashSet;
     let mut explained: HashSet<i64> = outcome.cells.iter().map(|c| c.instrument_id).collect();
     explained.extend(outcome.problems.iter().filter_map(|p| p.instrument_id));
@@ -121,6 +130,15 @@ use sqlx::PgPool;
 /// an EOD run are judged identically. Findings are ingest_issue rows with
 /// severity 'quality', attached to the run. Advisory by contract -- the
 /// caller logs an error and keeps the run.
+///
+/// Findings are a per-run statement about the data as fetched by THAT run,
+/// not a durable per-instrument fact deduped across runs. The Friday verify
+/// run (see orchestrator::run_verify) re-fetches and re-judges its trailing
+/// 5-weekday window, so any finding a daily run already reported inside that
+/// window gets a second `ingest_issue` row attached to the verify run, and
+/// the verify run lands 'partial' again for data a prior run already flagged.
+/// This is DELIBERATE, not a bug to dedupe away: each run's findings answer
+/// "what did this run see," and the verify run's whole point is to re-see.
 pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
                               outcome: &FetchOutcome) -> AppResult<u64> {
     let mut findings = 0u64;
@@ -278,5 +296,23 @@ mod tests {
         };
         assert_eq!(unexplained_instruments(&[1, 2, 3], &out), vec![3]);
         assert!(unexplained_instruments(&[1, 2], &out).is_empty());
+    }
+
+    /// A request/session-level problem (no instrument_id, e.g. a sidecar
+    /// failure) explains the whole run's silence -- it must not leave every
+    /// requested instrument looking individually unexplained.
+    #[test]
+    fn a_global_problem_explains_the_whole_runs_silence() {
+        let out = FetchOutcome {
+            cells: vec![],
+            problems: vec![CellProblem {
+                instrument_id: None,
+                field_id: None,
+                obs_date: None,
+                code: "sidecar_failed".into(),
+                detail: "the fetch sidecar exited before answering".into(),
+            }],
+        };
+        assert!(unexplained_instruments(&[1, 2, 3], &out).is_empty());
     }
 }

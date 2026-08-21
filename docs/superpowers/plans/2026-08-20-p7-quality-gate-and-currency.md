@@ -1604,6 +1604,8 @@ These three checks cannot be automated in CI and were NOT performed as part of t
 - [ ] The Friday verify run appears in run history as `kind=backfill` / `trigger=scheduled`, and a genuinely restated close inside the 5-weekday window fires a `value_superseded` warn issue.
 - [ ] An LSE instrument (e.g. `VOD LN Equity`) shows `GBp` verbatim in the Data screen's Ccy column and in the CSV export — never normalized to GBP.
 
+**Note:** the Friday verify run re-fetches and re-judges its trailing 5-weekday window, so findings that week's daily runs already reported are re-attached to the verify run and it lands `partial` again for the same data — by design, not a dedup bug (see the comment on `run_quality_gate` in `quality.rs`).
+
 ---
 
 ## Self-Review

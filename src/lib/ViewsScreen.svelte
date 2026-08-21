@@ -128,15 +128,33 @@
     catch (e) { error = String(e); }
   }
 
+  // Svelte 5 binds an emptied type="number" input to null, not "" -- so the
+  // coercion has to treat null/undefined the same as "" (blank/cleared),
+  // rather than letting Number(null) silently become 0 and trip the DB's
+  // CHECK constraint as a raw, confusing error.
+  function toOptionalNumber(v: unknown): number | null {
+    return v === null || v === undefined || v === "" ? null : Number(v);
+  }
+
   async function addField() {
+    error = "";
+    const outlierPct = toOptionalNumber(newField.qc_outlier_pct);
+    const staleDays = toOptionalNumber(newField.qc_stale_days);
+    if (outlierPct !== null && !(outlierPct > 0)) {
+      error = "Outlier % must be greater than 0.";
+      return;
+    }
+    if (staleDays !== null && !(staleDays >= 2)) {
+      error = "Stale-after N must be at least 2.";
+      return;
+    }
     try {
       await api.createField(newField.asset_class_id, newField.mnemonic, newField.label,
         newField.value_kind,
         newField.bbg_ftype || null, newField.bbg_datatype || null,
         newField.entitlement_note || null,
         newField.qc_nonpositive,
-        newField.qc_outlier_pct === "" ? null : Number(newField.qc_outlier_pct),
-        newField.qc_stale_days === "" ? null : Number(newField.qc_stale_days));
+        outlierPct, staleDays);
       newField.mnemonic = ""; newField.label = "";
       newField.bbg_ftype = ""; newField.bbg_datatype = ""; newField.entitlement_note = "";
       newField.qc_nonpositive = false; newField.qc_outlier_pct = ""; newField.qc_stale_days = "";

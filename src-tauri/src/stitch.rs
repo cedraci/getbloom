@@ -131,9 +131,19 @@ async fn segment_label(pool: &sqlx::PgPool, instrument_id: i64)
         .bind(instrument_id).fetch_optional(pool).await?)
 }
 
-/// The instrument's currently-believed currency, valid today. None for a
+/// The instrument's latest known current-belief currency. None for a
 /// user-created instrument Bloomberg was never asked about -- the guard
 /// below deliberately does not refuse on ignorance.
+///
+/// Deliberately NOT "valid today": when an instrument dies (the primary
+/// case for the cross-currency guard -- a merger predecessor), the
+/// resolution engine caps ALL its attrs at the inactive date
+/// (`instrument/store.rs::close_attrs_at`), so a "valid today" predicate
+/// would find nothing for a dead predecessor and the guard would fall open.
+/// Taking the latest `system_to = 'infinity'` period regardless of whether
+/// it still covers today gives the identical answer for a live instrument
+/// and the final quoting currency for a dead one -- which is what its
+/// stored observations are actually denominated in.
 async fn current_currency(pool: &sqlx::PgPool, instrument_id: i64)
     -> crate::error::AppResult<Option<String>>
 {
@@ -141,7 +151,6 @@ async fn current_currency(pool: &sqlx::PgPool, instrument_id: i64)
         "SELECT value FROM instrument_attr
           WHERE instrument_id = $1 AND attr = 'currency'
             AND system_to = 'infinity'
-            AND valid_from <= CURRENT_DATE AND valid_to > CURRENT_DATE
           ORDER BY valid_from DESC LIMIT 1")
         .bind(instrument_id).fetch_optional(pool).await?)
 }
