@@ -325,6 +325,38 @@ class EmptyResultTests(unittest.TestCase):
         self.assertEqual(out["status"], "empty")
 
 
+class NilFillTests(unittest.TestCase):
+    """Task 5 / P0 8: with nonTradingDayFillOption=NON_TRADING_WEEKDAYS and
+    nonTradingDayFillMethod=NIL_VALUE, Bloomberg returns an explicit dated
+    fieldData row for a holiday instead of omitting the day entirely -- but
+    the row carries none of the requested field values. Before this, such a
+    row was silently dropped, so a genuine exchange holiday inside a backfill
+    range was indistinguishable from a gap the pipeline never asked about.
+    Now it must surface as a dated `no_data` problem so ingest Rule A can mark
+    it a non-trading day rather than a gap to keep retrying forever.
+    """
+
+    def test_nil_fill_row_is_reported_as_a_non_trading_day_problem(self):
+        capture = {"captured": [{
+            "request": {"kind": "history", "securities": ["AAPL US Equity"],
+                        "fields": ["PX_LAST"], "start": "20260814", "end": "20260817"},
+            "messages": [{"securityData": {
+                "security": "AAPL US Equity", "eidData": [], "sequenceNumber": 0,
+                "fieldExceptions": [],
+                "fieldData": [
+                    {"date": "2026-08-14", "PX_LAST": 305.93},
+                    {"date": "2026-08-17"},
+                ]}}]}]}
+        obs, probs, _bulk_rows, _list_results, fatal = blp_fetch.parse_capture(capture)
+        self.assertIsNone(fatal)
+        self.assertEqual(len(obs), 1)
+        self.assertEqual(obs[0], {"security": "AAPL US Equity", "field": "PX_LAST",
+                                  "date": "2026-08-14", "num": 305.93})
+        self.assertEqual(probs, [{"security": "AAPL US Equity", "field": None,
+                                  "date": "2026-08-17", "code": "no_data",
+                                  "detail": "non-trading day (NIL fill)"}])
+
+
 class FatalTests(unittest.TestCase):
     def test_bad_date_is_rejected_before_it_can_be_mistaken_for_a_holiday(self):
         # Live capture of start=end=20261301. Bloomberg returned an empty

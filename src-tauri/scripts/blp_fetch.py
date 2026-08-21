@@ -251,6 +251,7 @@ def parse_history_message(req, msg, obs_out, prob_out):
         return
 
     failed = parse_field_exceptions(security, req_date, sec_data, obs_out, prob_out)
+    active_fields = [f for f in requested_fields if f not in failed]
 
     rows = as_list(sec_data.get("fieldData"))
     if not rows:
@@ -260,17 +261,25 @@ def parse_history_message(req, msg, obs_out, prob_out):
         # existed, so absence is simply a gap -- consistent with the
         # no-holiday-calendar design.
         if single_day:
-            for f in requested_fields:
-                if f not in failed:
-                    prob_out.append(problem(security, f, req_date, "no_data",
-                                            "no trading day returned"))
+            for f in active_fields:
+                prob_out.append(problem(security, f, req_date, "no_data",
+                                        "no trading day returned"))
         return
 
     for row in rows:
         d = iso_date(row.get("date"))
-        for f in requested_fields:
-            if f in failed:
-                continue
+        if active_fields and not any(f in row for f in active_fields):
+            # nonTradingDayFillOption=NON_TRADING_WEEKDAYS +
+            # nonTradingDayFillMethod=NIL_VALUE: Bloomberg now returns an
+            # explicit dated row for a non-trading day instead of omitting it,
+            # but with none of the requested fields present. That is direct
+            # evidence of a holiday, not silence to be swallowed -- applies to
+            # both single-day EOD and multi-day backfill requests, since a
+            # dated row is unambiguous either way (Task 5).
+            prob_out.append(problem(security, None, d, "no_data",
+                                    "non-trading day (NIL fill)"))
+            continue
+        for f in active_fields:
             if f in row:
                 obs_out.append(observation(security, f, d, row[f]))
             elif single_day:
@@ -446,9 +455,14 @@ def build_request(blpapi, service, spec):
         r.set("startDate", spec["start"])
         r.set("endDate", spec["end"])
         r.set("periodicitySelection", "DAILY")
-        # Holidays must come back as *absent* rows, not as filled-forward
-        # values -- that is what makes the `no_data` issue honest.
-        r.set("nonTradingDayFillOption", "ACTIVE_DAYS_ONLY")
+        # Holidays must come back as *explicit* rows carrying none of the
+        # requested field values, not as filled-forward values and not as
+        # silently omitted days -- that is what turns a holiday into direct
+        # evidence (a NIL-fill row parse_history_message can report) rather
+        # than silence indistinguishable from a gap the pipeline never asked
+        # about (Task 5, spec Open Question 1).
+        r.set("nonTradingDayFillOption", "NON_TRADING_WEEKDAYS")
+        r.set("nonTradingDayFillMethod", "NIL_VALUE")
         # P0 3.1: with none of these set, the values follow the Terminal's
         # DPDF<GO> setting -- a per-user preference that is not captured with the
         # data and can change between runs. AAPL closed 2020-08-28 at 499.23 with

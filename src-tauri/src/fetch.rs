@@ -94,6 +94,16 @@ impl FetchRequest {
 
 // -------------------------------------------------------- sidecar wire types
 
+/// A BLPAPI field override (e.g. `CDR` for a calendar code), serialized in
+/// the sidecar's own shape -- see `blp_fetch.py`'s `overrides` handling in
+/// `validate_request_spec` and `build_request`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Override {
+    #[serde(rename = "fieldId")]
+    pub field_id: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RequestSpec {
     pub kind: &'static str,
@@ -105,6 +115,12 @@ pub struct RequestSpec {
     pub end: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub obs_date: Option<String>,
+    /// Empty for now -- `plan_requests` does not yet compute CDR calendar
+    /// codes (spec Open Question 3, a deferred live probe). Skipped when
+    /// empty so the wire payload is byte-compatible with the pre-override
+    /// sidecar contract.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub overrides: Vec<Override>,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,6 +243,7 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
                     start: Some(compact(req.start)),
                     end: Some(compact(req.end)),
                     obs_date: None,
+                    overrides: Vec::new(),
                 });
             }
         }
@@ -239,6 +256,7 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
                     start: None,
                     end: None,
                     obs_date: Some(req.start.to_string()),
+                    overrides: Vec::new(),
                 });
             }
         }
@@ -631,6 +649,17 @@ mod tests {
         };
         let specs = plan_requests(&req).unwrap();
         assert_eq!(dispatched_hits(&specs, req.start, req.end), 6);
+    }
+
+    #[test]
+    fn overrides_serialize_in_sidecar_shape_and_vanish_when_empty() {
+        let day = d(2026, 8, 17);
+        let mut spec = plan_requests(&sample(day, day)).unwrap().remove(0);
+        assert!(!serde_json::to_string(&spec).unwrap().contains("overrides"));
+        spec.overrides.push(Override { field_id: "CDR".into(), value: "US".into() });
+        let js = serde_json::to_value(&spec).unwrap();
+        assert_eq!(js["overrides"][0]["fieldId"], "CDR");
+        assert_eq!(js["overrides"][0]["value"], "US");
     }
 
     #[test]
