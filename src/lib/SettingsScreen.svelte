@@ -13,7 +13,8 @@
     if (changed) reload();
   }
 
-  let newSchedule = $state({ view_id: 0, window_start: "09:00", window_end: "18:00", active: true });
+  let newSchedule = $state({ view_id: 0, window_start: "09:00", window_end: "18:00", active: true,
+                             verify_dow: 5 as number | null });
 
   async function reload() {
     try {
@@ -32,14 +33,15 @@
 
   async function upsert() {
     try {
-      await api.upsertSchedule(newSchedule.view_id, newSchedule.window_start, newSchedule.window_end, newSchedule.active);
+      await api.upsertSchedule(newSchedule.view_id, newSchedule.window_start, newSchedule.window_end,
+                               newSchedule.active, newSchedule.verify_dow);
       await reload();
     } catch (e) { error = String(e); }
   }
 
   async function toggleScheduleActive(s: ScheduleRow) {
     try {
-      await api.upsertSchedule(s.view_id, s.window_start, s.window_end, !s.active);
+      await api.upsertSchedule(s.view_id, s.window_start, s.window_end, !s.active, s.verify_dow);
       await reload();
     } catch (e) { error = String(e); }
   }
@@ -75,7 +77,7 @@
   <h2>Schedules</h2>
   <table>
     <thead>
-      <tr><th>View</th><th>Window start</th><th>Window end</th><th>Drawn at</th><th>Last result</th><th>Active</th><th></th></tr>
+      <tr><th>View</th><th>Window start</th><th>Window end</th><th>Verify</th><th>Drawn at</th><th>Last result</th><th>Active</th><th></th></tr>
     </thead>
     <tbody>
       {#each schedules as s}
@@ -83,6 +85,7 @@
           <td>{viewName(s.view_id)}</td>
           <td>{s.window_start}</td>
           <td>{s.window_end}</td>
+          <td>{s.verify_dow ? ["","Mon","Tue","Wed","Thu","Fri","Sat","Sun"][s.verify_dow] + (s.last_verified_on ? ` (last ${s.last_verified_on})` : "") : "off"}</td>
           <td>{s.drawn_at ?? ""}</td>
           <td>{s.last_result ?? ""}</td>
           <td><input type="checkbox" checked={s.active} onchange={() => toggleScheduleActive(s)} /></td>
@@ -100,6 +103,18 @@
     </select>
     <input type="time" bind:value={newSchedule.window_start} required />
     <input type="time" bind:value={newSchedule.window_end} required />
+    <label>
+      Verify day
+      <select bind:value={newSchedule.verify_dow}
+              title="Once a week, re-fetch the trailing 5 weekdays so upstream restatements are caught. Off = never.">
+        <option value={null}>Off</option>
+        <option value={1}>Monday</option>
+        <option value={2}>Tuesday</option>
+        <option value={3}>Wednesday</option>
+        <option value={4}>Thursday</option>
+        <option value={5}>Friday</option>
+      </select>
+    </label>
     <label><input type="checkbox" bind:checked={newSchedule.active} /> Active</label>
     <button type="submit">Save schedule</button>
   </form>

@@ -41,11 +41,14 @@ pub async fn ensure_draw(pool: &PgPool, schedule_id: i64, today: NaiveDate)
     Ok(t)
 }
 
+// A scheduled verify backfill IS that day's scheduled run: without widening
+// this past 'eod', a completed verify would not stop the EOD run from firing
+// an hour later and double-charging the day.
 pub async fn already_ran_today(pool: &PgPool, view_id: i64, today: NaiveDate)
     -> AppResult<bool> {
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM run
-         WHERE view_id = $1 AND kind = 'eod' AND trigger_kind = 'scheduled'
+         WHERE view_id = $1 AND kind IN ('eod','backfill') AND trigger_kind = 'scheduled'
            AND status <> 'failed' AND started_at::date = $2")
         .bind(view_id).bind(today).fetch_one(pool).await?;
     Ok(n > 0)
@@ -57,11 +60,13 @@ pub async fn already_ran_today(pool: &PgPool, view_id: i64, today: NaiveDate)
 const MAX_FAILED_SCHEDULED_ATTEMPTS_PER_DAY: i64 = 3;
 const GIVE_UP_MSG: &str = "giving up for today after 3 failed attempts";
 
+// Same widening as already_ran_today: three failed verify attempts must also
+// stop the day, not just three failed EOD attempts.
 pub async fn failed_attempts_today(pool: &PgPool, view_id: i64, today: NaiveDate)
     -> AppResult<i64> {
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM run
-         WHERE view_id = $1 AND kind = 'eod' AND trigger_kind = 'scheduled'
+         WHERE view_id = $1 AND kind IN ('eod','backfill') AND trigger_kind = 'scheduled'
            AND status = 'failed' AND started_at::date = $2")
         .bind(view_id).bind(today).fetch_one(pool).await?;
     Ok(n)
@@ -83,12 +88,30 @@ pub fn previous_weekday(d: NaiveDate) -> NaiveDate {
     p
 }
 
+/// ISO weekday, matching schedule.verify_dow: 1 = Monday .. 7 = Sunday.
+pub fn iso_dow(d: NaiveDate) -> i16 {
+    d.weekday().number_from_monday() as i16
+}
+
+/// The verify run covers the trailing five weekdays: `end` plus four more
+/// weekdays back. One week of history is enough to catch the common
+/// restatement (yesterday's close corrected today) without pricing a
+/// five-fold budget surprise into every single day.
+pub fn verify_window_start(end: NaiveDate) -> NaiveDate {
+    let mut d = end;
+    for _ in 0..4 {
+        d = previous_weekday(d);
+    }
+    d
+}
+
 /// Schedules eligible to fire. A schedule is due only when BOTH it and its view
 /// are active -- retiring a view has to stop its scheduled runs, or "retire"
 /// would mean nothing for the one entity that drives collection.
-pub async fn due_schedules(pool: &PgPool) -> AppResult<Vec<(i64, i64, Option<String>)>> {
+pub async fn due_schedules(pool: &PgPool)
+    -> AppResult<Vec<(i64, i64, Option<String>, Option<i16>, Option<NaiveDate>)>> {
     Ok(sqlx::query_as(
-        "SELECT s.id, s.view_id, s.last_result
+        "SELECT s.id, s.view_id, s.last_result, s.verify_dow, s.last_verified_on
          FROM schedule s JOIN view v ON v.id = s.view_id
          WHERE s.active AND v.active")
         .fetch_all(pool).await?)
@@ -102,7 +125,7 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
     }
     let schedules = due_schedules(pool).await?;
     let mut launched = Vec::new();
-    for (sid, view_id, last_result) in schedules {
+    for (sid, view_id, last_result, verify_dow, last_verified_on) in schedules {
         // Isolate per-schedule errors: one schedule's failure never blocks the others
         let drawn = match ensure_draw(pool, sid, today).await {
             Ok(t) => t,
@@ -147,10 +170,37 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
             continue;
         }
 
-        // Amendment A1: the daily run targets the previous trading day's close, never
-        // today's live values. The weekend guard above stays: Monday's run covers Friday.
+        // Amendment A1 stands: the run targets the previous trading day.
+        // On the schedule's verify day, the same slot instead re-reads the
+        // trailing five weekdays (kind backfill, trigger scheduled) so an
+        // upstream restatement is actually seen. Budget-blocked verifies
+        // degrade to the normal one-day run rather than blocking the day.
         let obs_date = previous_weekday(today);
-        let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", obs_date, false).await;
+        let want_verify = verify_dow == Some(iso_dow(today))
+            && last_verified_on.is_none_or(|d| d < today);
+        let mut note = String::new();
+        let result = if want_verify {
+            match orchestrator::run_verify(pool, cfg, view_id,
+                                           verify_window_start(obs_date), obs_date).await {
+                Ok(RunOutcome::NeedsConfirmation { estimated, .. }) => {
+                    note = format!("verify skipped ({estimated} est. hits needs \
+                                    confirmation); ");
+                    orchestrator::run_eod(pool, cfg, view_id, "scheduled",
+                                          obs_date, false).await
+                }
+                other => {
+                    if matches!(other, Ok(RunOutcome::Completed { .. })) {
+                        note = "verify ".into();
+                        let _ = sqlx::query(
+                            "UPDATE schedule SET last_verified_on = $2 WHERE id = $1")
+                            .bind(sid).bind(today).execute(pool).await;
+                    }
+                    other
+                }
+            }
+        } else {
+            orchestrator::run_eod(pool, cfg, view_id, "scheduled", obs_date, false).await
+        };
         let msg = match &result {
             Ok(RunOutcome::Completed { run_id, summary, corp_actions,
                                        quality_findings }) => {
@@ -161,12 +211,12 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
                 let q = if *quality_findings > 0 {
                     format!(" quality={quality_findings}")
                 } else { String::new() };
-                format!("ok run={run_id} inserted={} superseded={} issues={}{q}{ca}",
+                format!("{note}ok run={run_id} inserted={} superseded={} issues={}{q}{ca}",
                         summary.inserted, summary.superseded, summary.issues)
             }
             Ok(RunOutcome::NeedsConfirmation { estimated, .. }) =>
-                format!("blocked: needs confirmation for {estimated} estimated hits"),
-            Err(e) => format!("failed: {e}"),
+                format!("{note}blocked: needs confirmation for {estimated} estimated hits"),
+            Err(e) => format!("{note}failed: {e}"),
         };
         let _ = sqlx::query("UPDATE schedule SET last_result = $2 WHERE id = $1")
             .bind(sid).bind(&msg).execute(pool).await;
@@ -342,6 +392,23 @@ mod tests {
         assert!(is_weekend(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap())); // Sun
         assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap())); // Fri
         assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap())); // Mon
+    }
+
+    #[test]
+    fn verify_window_is_five_weekdays_ending_at_end() {
+        // Friday 2026-08-14 back to Monday 2026-08-10
+        assert_eq!(verify_window_start(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 10).unwrap());
+        // Monday 2026-08-17 back across the weekend to Tuesday 2026-08-11
+        assert_eq!(verify_window_start(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()),
+                   NaiveDate::from_ymd_opt(2026, 8, 11).unwrap());
+    }
+
+    #[test]
+    fn iso_dow_is_monday_one_sunday_seven() {
+        assert_eq!(iso_dow(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap()), 1); // Mon
+        assert_eq!(iso_dow(NaiveDate::from_ymd_opt(2026, 8, 21).unwrap()), 5); // Fri
+        assert_eq!(iso_dow(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap()), 7); // Sun
     }
 
     #[test]

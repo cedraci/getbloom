@@ -417,30 +417,33 @@ pub struct ScheduleRow {
     pub window_start: chrono::NaiveTime, pub window_end: chrono::NaiveTime,
     pub drawn_for: Option<chrono::NaiveDate>, pub drawn_at: Option<chrono::NaiveTime>,
     pub last_result: Option<String>,
+    pub verify_dow: Option<i16>, pub last_verified_on: Option<chrono::NaiveDate>,
 }
 
 #[tauri::command]
 pub async fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleRow>, AppError> {
     Ok(sqlx::query_as::<_, ScheduleRow>(
         "SELECT id, view_id, active, window_start, window_end,
-                drawn_for, drawn_at, last_result
+                drawn_for, drawn_at, last_result, verify_dow, last_verified_on
          FROM schedule ORDER BY view_id")
         .fetch_all(&state.pool).await?)
 }
 
 #[tauri::command]
 pub async fn upsert_schedule(state: State<'_, AppState>, view_id: i64,
-                             window_start: String, window_end: String, active: bool)
+                             window_start: String, window_end: String, active: bool,
+                             verify_dow: Option<i16>)
     -> Result<(), AppError> {
     sqlx::query(
-        "INSERT INTO schedule (view_id, window_start, window_end, active)
-         VALUES ($1, $2::time, $3::time, $4)
+        "INSERT INTO schedule (view_id, window_start, window_end, active, verify_dow)
+         VALUES ($1, $2::time, $3::time, $4, $5)
          ON CONFLICT (view_id) DO UPDATE
            SET window_start = EXCLUDED.window_start,
                window_end = EXCLUDED.window_end,
                active = EXCLUDED.active,
+               verify_dow = EXCLUDED.verify_dow,
                drawn_for = NULL, drawn_at = NULL")  // window changed: force a fresh draw
-        .bind(view_id).bind(window_start).bind(window_end).bind(active)
+        .bind(view_id).bind(window_start).bind(window_end).bind(active).bind(verify_dow)
         .execute(&state.pool).await?;
     Ok(())
 }

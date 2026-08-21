@@ -193,3 +193,19 @@ async fn a_superseded_value_leaves_a_visible_issue_and_unchanged_does_not() {
     assert!(details[0].contains("101.5") && details[0].contains("99.75"),
             "detail must name old and new: {}", details[0]);
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_scheduled_verify_backfill_counts_as_todays_run() {
+    let pool = common::pool().await;
+    let vid: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("vfyv")).fetch_one(&pool).await.unwrap();
+    let today = chrono::Local::now().date_naive();
+    sqlx::query(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'backfill','scheduled','ok')")
+        .bind(vid).execute(&pool).await.unwrap();
+    assert!(getbloomdata_lib::scheduler::already_ran_today(&pool, vid, today)
+        .await.unwrap(),
+        "a completed scheduled verify must stop the EOD run from double-firing");
+}

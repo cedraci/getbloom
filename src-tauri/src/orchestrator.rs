@@ -455,6 +455,52 @@ pub async fn run_backfill_with<F: DataFetcher>(
             start, end, estimated).await
 }
 
+/// P7: the weekly verification re-fetch -- a SCHEDULED multi-day backfill
+/// over the trailing week, so upstream restatements are re-read and ingest's
+/// value_superseded alert has something to bite on. Gated like an EOD run
+/// (HardConfirm blocks it -- a scheduler cannot click a confirm box);
+/// NeedsConfirmation here means "skip this week's verify", never "ask".
+pub async fn run_verify(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    view_id: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> AppResult<RunOutcome> {
+    let mut result = run_verify_with(pool, cfg, &BlpapiFetcher { cfg }, view_id,
+                                     start, end).await;
+    auto_reresolve_after(pool, cfg, &result).await;
+    corp_actions_after(pool, cfg, view_id, &mut result).await;
+    lifecycle_after(pool, cfg, &result).await;
+    result
+}
+
+pub async fn run_verify_with<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    view_id: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> AppResult<RunOutcome> {
+    if start > end {
+        return Err(AppError::Validation("start after end".into()));
+    }
+    if (end - start).num_days() + 1 > BACKFILL_CAP_DAYS {
+        return Err(AppError::Validation(format!(
+            "verify range exceeds {BACKFILL_CAP_DAYS}-day cap")));
+    }
+    let loaded = load_view(pool, view_id, None).await?;
+    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
+        + corp_actions_estimate(pool, view_id).await?;
+    let today_total = budget::today_hits(pool).await?;
+    if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm {
+        return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
+    }
+    execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "scheduled",
+            start, end, estimated).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

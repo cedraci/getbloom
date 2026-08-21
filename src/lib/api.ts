@@ -34,6 +34,7 @@ export interface ScheduleRow {
   id: number; view_id: number; active: boolean; window_start: string;
   window_end: string; drawn_for: string | null; drawn_at: string | null;
   last_result: string | null;
+  verify_dow: number | null; last_verified_on: string | null;
 }
 export type EntityKind = "asset_class" | "asset" | "field" | "view" | "schedule";
 export type DeleteMode = "retire" | "purge";
@@ -342,8 +343,9 @@ export const api = {
   listIssues: (runId: number) => invoke<IssueRow[]>("list_issues", { runId }),
   detectViewGaps: (viewId: number) => invoke<GapRow[]>("detect_view_gaps", { viewId }),
   listSchedules: () => invoke<ScheduleRow[]>("list_schedules"),
-  upsertSchedule: (viewId: number, windowStart: string, windowEnd: string, active: boolean) =>
-    invoke<void>("upsert_schedule", { viewId, windowStart, windowEnd, active }),
+  upsertSchedule: (viewId: number, windowStart: string, windowEnd: string, active: boolean,
+                   verifyDow: number | null) =>
+    invoke<void>("upsert_schedule", { viewId, windowStart, windowEnd, active, verifyDow }),
   describeDeletion: (kind: EntityKind, id: number) =>
     invoke<DeletionImpact>("describe_deletion", { kind, id }),
   deleteAsset: (id: number, mode: DeleteMode) => invoke<void>("delete_asset", { id, mode }),
