@@ -19,6 +19,9 @@ pub struct LinkRow {
     /// P6: Bloomberg's asserted exchange ratio (ACQUIRER shares per TARGET
     /// share, from CA_MA_STOCK_TERMS), when the link carries one.
     pub exchange_ratio: Option<f64>,
+    /// P9: the signed roll offset (successor = predecessor + offset at the
+    /// junction). NULL unless `link_type` is 'roll'.
+    pub roll_offset: Option<f64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -27,6 +30,7 @@ pub struct Junction {
     pub effective_date: NaiveDate,
     pub link_type: String,
     pub exchange_ratio: Option<f64>,
+    pub roll_offset: Option<f64>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -73,6 +77,7 @@ pub fn plan_chain(target: i64, links: &[LinkRow]) -> (Vec<Junction>, ChainStop) 
             effective_date: link.effective_date,
             link_type: link.link_type.clone(),
             exchange_ratio: link.exchange_ratio,
+            roll_offset: link.roll_offset,
         });
         if !seen.insert(link.predecessor_id) {
             return (junctions, ChainStop::Cycle);
@@ -101,6 +106,10 @@ pub struct SegmentInfo {
     pub link_type: Option<String>,
     /// The junction ratio applied to reach successor units (not cumulative).
     pub ratio: Option<f64>,
+    /// The junction offset added to reach successor units, in the
+    /// PREDECESSOR's units (not cumulative). Set on roll segments only, where
+    /// `ratio` is None: a junction splices by one or the other, never both.
+    pub offset: Option<f64>,
     pub note: Option<String>,
 }
 
@@ -163,16 +172,17 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
                              limit: i64)
     -> crate::error::AppResult<StitchedSeries>
 {
-    let links: Vec<(i64, i64, String, NaiveDate, Option<f64>)> = sqlx::query_as(
+    type Row = (i64, i64, String, NaiveDate, Option<f64>, Option<f64>);
+    let links: Vec<Row> = sqlx::query_as(
         "SELECT predecessor_id, successor_id, link_type, effective_date,
-                exchange_ratio
+                exchange_ratio, roll_offset
            FROM instrument_link WHERE confirmed_by IS NOT NULL")
         .fetch_all(pool).await?;
     let links: Vec<LinkRow> = links.into_iter()
         .map(|(predecessor_id, successor_id, link_type, effective_date,
-               exchange_ratio)| LinkRow {
+               exchange_ratio, roll_offset)| LinkRow {
             predecessor_id, successor_id, link_type, effective_date,
-            exchange_ratio })
+            exchange_ratio, roll_offset })
         .collect();
     let (junctions, stop) = plan_chain(instrument_id, &links);
     let mut stopped = match stop {
@@ -204,7 +214,7 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
         label: segment_label(pool, instrument_id).await?,
         from: first_junction,
         to: None,
-        link_type: None, ratio: None, note: None,
+        link_type: None, ratio: None, offset: None, note: None,
     }];
 
     // P7: a share ratio converts share COUNTS, not currencies. Splicing a
@@ -218,7 +228,17 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
     // `prev` = the segment on the successor side of the next junction, in
     // its OWN units (the cumulative factor converts to queried units).
     let mut prev = own;
-    let mut cumulative = 1.0f64;
+    // P9: composition is AFFINE, not multiplicative -- `value = raw * mul +
+    // add`. A futures roll splices by DIFFERENCE, and its offset is
+    // denominated in the units of that junction's successor side, so every
+    // ratio junction NEARER the target has to scale it. The walk runs
+    // target-first, so those ratios are already in `mul` when the roll is
+    // reached: banking `s * mul` there converts the offset exactly once, and
+    // a deeper ratio junction met afterwards multiplies into `mul` without
+    // disturbing offsets already banked. One `cumulative` factor cannot hold
+    // both halves.
+    let mut mul = 1.0f64;
+    let mut add = 0.0f64;
     for (k, j) in junctions.iter().enumerate() {
         let d = j.effective_date;
         let pred = crate::adjust::adjusted_series(
@@ -238,9 +258,35 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
 
         let window_start = junctions.get(k + 1).map(|n| n.effective_date);
         let mut ratio_note: Option<String> = None;
+        let mut seg_offset: Option<f64> = None;
         let ratio = if is_volume {
             1.0
         } else if j.link_type == "rename" || j.link_type == "share_class_change" {
+            1.0
+        } else if j.link_type == "roll" {
+            let asserted = j.roll_offset.or_else(|| {
+                // Same two-sided junction lookup the ratio fallback uses, with
+                // `-` for `/`. No zero guard: a zero offset is a real answer
+                // (the two contracts happened to meet), unlike a zero divisor.
+                let succ_val = prev.rows.iter().rev()
+                    .find(|r| r.obs_date >= d).map(|r| r.adjusted);
+                let pred_val = pred.rows.iter()
+                    .find(|r| r.obs_date < d).map(|r| r.adjusted);
+                match (succ_val, pred_val) {
+                    (Some(s), Some(p)) => Some(s - p),
+                    _ => None,
+                }
+            });
+            let Some(s) = asserted else {
+                stopped = Some(format!(
+                    "no junction offset at {d}: need one observation on \
+                     each side"));
+                break;
+            };
+            add += s * mul;
+            seg_offset = Some(s);
+            // A roll changes no units, so `mul` is untouched; the segment
+            // reports the offset instead of a ratio.
             1.0
         } else if let Some(r) = j.exchange_ratio.filter(|r| *r > 0.0) {
             // P6: Bloomberg asserted the terms (CA_MA_STOCK_TERMS, r =
@@ -268,12 +314,12 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
                 }
             }
         };
-        cumulative *= ratio;
+        mul *= ratio;
         let seg_rows: Vec<StitchRow> = pred.rows.iter()
             .filter(|r| r.obs_date < d
                 && window_start.is_none_or(|w| r.obs_date >= w))
             .map(|r| StitchRow { obs_date: r.obs_date,
-                                 value: r.adjusted * cumulative,
+                                 value: r.adjusted * mul + add,
                                  source_instrument_id: j.predecessor_id })
             .collect();
         segments.push(SegmentInfo {
@@ -282,7 +328,8 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
             from: window_start,
             to: Some(d),
             link_type: Some(j.link_type.clone()),
-            ratio: Some(ratio),
+            ratio: if seg_offset.is_some() { None } else { Some(ratio) },
+            offset: seg_offset,
             note: if is_volume && j.link_type != "rename"
                      && j.link_type != "share_class_change" {
                 Some("volumes concatenated unscaled".into())
@@ -324,7 +371,7 @@ mod tests {
     fn link(p: i64, s: i64, ty: &str, date: &str) -> LinkRow {
         LinkRow { predecessor_id: p, successor_id: s,
                   link_type: ty.into(), effective_date: d(date),
-                  exchange_ratio: None }
+                  exchange_ratio: None, roll_offset: None }
     }
 
     #[test]
@@ -336,9 +383,11 @@ mod tests {
         assert_eq!(stop, ChainStop::End);
         assert_eq!(junctions, vec![
             Junction { predecessor_id: 2, effective_date: d("2024-06-01"),
-                       link_type: "rename".into(), exchange_ratio: None },
+                       link_type: "rename".into(), exchange_ratio: None,
+                       roll_offset: None },
             Junction { predecessor_id: 1, effective_date: d("2020-01-12"),
-                       link_type: "merger".into(), exchange_ratio: None },
+                       link_type: "merger".into(), exchange_ratio: None,
+                       roll_offset: None },
         ]);
     }
 

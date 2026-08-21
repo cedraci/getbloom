@@ -208,6 +208,8 @@ export interface StitchRow {
 export interface SegmentInfo {
   instrument_id: number; label: string | null; from: string | null;
   to: string | null; link_type: string | null; ratio: number | null;
+  /// P9: a roll junction splices by difference; set where `ratio` is null.
+  offset: number | null;
   note: string | null;
 }
 export interface StitchedSeries {

@@ -38,7 +38,9 @@
     s.segments.map((g) => {
       const range = `${g.from ?? "…"} → ${g.to ?? "latest"}`;
       const ratio = g.ratio !== null && g.ratio !== 1 ? ` ×${g.ratio.toFixed(6)}` : "";
-      return `${g.label ?? "#" + g.instrument_id} (${range}${ratio}${g.note ? "; " + g.note : ""})`;
+      // A roll splices by difference: the sign carries the meaning, so show it.
+      const offset = g.offset !== null ? ` ${g.offset >= 0 ? "+" : ""}${g.offset}` : "";
+      return `${g.label ?? "#" + g.instrument_id} (${range}${ratio}${offset}${g.note ? "; " + g.note : ""})`;
     }).join("  ·  ");
 
   // Fields that apply to the selected instrument's asset class.
