@@ -149,3 +149,31 @@ async fn a_missing_junction_observation_stops_the_walk_with_a_reason() {
     let reason = s.stopped.expect("a silent stop is a lie");
     assert!(reason.contains("ratio"), "reason: {reason}");
 }
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_roll_link_with_offset_is_accepted() {
+    let pool = common::pool().await;
+    let (a, _f, _) = scaffold(&pool, "RollA").await;
+    let (b, _f2, _) = scaffold(&pool, "RollB").await;
+    sqlx::query(
+        "INSERT INTO instrument_link
+           (predecessor_id, successor_id, link_type, effective_date, evidence, roll_offset)
+         VALUES ($1, $2, 'roll', '2026-03-11', '{\"source\":\"test\"}', 2.5)")
+        .bind(a).bind(b).execute(&pool).await
+        .expect("'roll' must pass the link_type CHECK");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn roll_offset_is_rejected_on_a_merger() {
+    let pool = common::pool().await;
+    let (a, _f, _) = scaffold(&pool, "RollC").await;
+    let (b, _f2, _) = scaffold(&pool, "RollD").await;
+    let err = sqlx::query(
+        "INSERT INTO instrument_link
+           (predecessor_id, successor_id, link_type, effective_date, evidence, roll_offset)
+         VALUES ($1, $2, 'merger', '2026-03-11', '{}', 2.5)")
+        .bind(a).bind(b).execute(&pool).await;
+    assert!(err.is_err(), "an additive offset is meaningless on a ratio link");
+}
