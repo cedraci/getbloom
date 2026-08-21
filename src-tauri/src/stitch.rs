@@ -131,6 +131,30 @@ async fn segment_label(pool: &sqlx::PgPool, instrument_id: i64)
         .bind(instrument_id).fetch_optional(pool).await?)
 }
 
+/// The instrument's latest known current-belief currency. None for a
+/// user-created instrument Bloomberg was never asked about -- the guard
+/// below deliberately does not refuse on ignorance.
+///
+/// Deliberately NOT "valid today": when an instrument dies (the primary
+/// case for the cross-currency guard -- a merger predecessor), the
+/// resolution engine caps ALL its attrs at the inactive date
+/// (`instrument/store.rs::close_attrs_at`), so a "valid today" predicate
+/// would find nothing for a dead predecessor and the guard would fall open.
+/// Taking the latest `system_to = 'infinity'` period regardless of whether
+/// it still covers today gives the identical answer for a live instrument
+/// and the final quoting currency for a dead one -- which is what its
+/// stored observations are actually denominated in.
+async fn current_currency(pool: &sqlx::PgPool, instrument_id: i64)
+    -> crate::error::AppResult<Option<String>>
+{
+    Ok(sqlx::query_scalar(
+        "SELECT value FROM instrument_attr
+          WHERE instrument_id = $1 AND attr = 'currency'
+            AND system_to = 'infinity'
+          ORDER BY valid_from DESC LIMIT 1")
+        .bind(instrument_id).fetch_optional(pool).await?)
+}
+
 /// The queried instrument's series, extended backward through confirmed
 /// links (design 3): per segment the P4-adjusted series in `mode`, spliced
 /// at each junction by the derived ratio. Read-only, derived, never stored.
@@ -183,6 +207,14 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
         link_type: None, ratio: None, note: None,
     }];
 
+    // P7: a share ratio converts share COUNTS, not currencies. Splicing a
+    // EUR history onto a USD series with only a ratio fabricates numbers, so
+    // a junction whose two sides carry different believed currencies stops
+    // the walk. GBp vs GBP counts: pence are not pounds. Volumes are exempt
+    // (a share count has no currency).
+    let target_ccy = if is_volume { None }
+                     else { current_currency(pool, instrument_id).await? };
+
     // `prev` = the segment on the successor side of the next junction, in
     // its OWN units (the cumulative factor converts to queried units).
     let mut prev = own;
@@ -191,6 +223,19 @@ pub async fn stitched_series(pool: &sqlx::PgPool, instrument_id: i64,
         let d = j.effective_date;
         let pred = crate::adjust::adjusted_series(
             pool, j.predecessor_id, field_id, mode, 5000).await?;
+
+        if let Some(t) = target_ccy.as_deref() {
+            if let Some(p) = current_currency(pool, j.predecessor_id).await? {
+                if p != t {
+                    stopped = Some(format!(
+                        "cross-currency link at {d}: predecessor quoted in {p}, \
+                         this instrument in {t}; extension refused -- no FX \
+                         conversion exists"));
+                    break;
+                }
+            }
+        }
+
         let window_start = junctions.get(k + 1).map(|n| n.effective_date);
         let mut ratio_note: Option<String> = None;
         let ratio = if is_volume {

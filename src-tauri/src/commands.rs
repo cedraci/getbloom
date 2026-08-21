@@ -225,11 +225,14 @@ pub async fn list_fields(state: State<'_, AppState>) -> Result<Vec<fields::Field
 pub async fn create_field(state: State<'_, AppState>, asset_class_id: i64,
                           mnemonic: String, label: String, value_kind: String,
                           bbg_ftype: Option<String>, bbg_datatype: Option<String>,
-                          entitlement_note: Option<String>)
+                          entitlement_note: Option<String>,
+                          qc_nonpositive: Option<bool>, qc_outlier_pct: Option<f64>,
+                          qc_stale_days: Option<i32>)
     -> Result<fields::FieldDef, AppError> {
     fields::create_field(&state.pool, asset_class_id, &mnemonic, &label, &value_kind,
                          bbg_ftype.as_deref(), bbg_datatype.as_deref(),
-                         entitlement_note.as_deref().unwrap_or("")).await
+                         entitlement_note.as_deref().unwrap_or(""),
+                         qc_nonpositive.unwrap_or(false), qc_outlier_pct, qc_stale_days).await
 }
 
 // ---------------------------------------------------------------------------
@@ -414,30 +417,33 @@ pub struct ScheduleRow {
     pub window_start: chrono::NaiveTime, pub window_end: chrono::NaiveTime,
     pub drawn_for: Option<chrono::NaiveDate>, pub drawn_at: Option<chrono::NaiveTime>,
     pub last_result: Option<String>,
+    pub verify_dow: Option<i16>, pub last_verified_on: Option<chrono::NaiveDate>,
 }
 
 #[tauri::command]
 pub async fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleRow>, AppError> {
     Ok(sqlx::query_as::<_, ScheduleRow>(
         "SELECT id, view_id, active, window_start, window_end,
-                drawn_for, drawn_at, last_result
+                drawn_for, drawn_at, last_result, verify_dow, last_verified_on
          FROM schedule ORDER BY view_id")
         .fetch_all(&state.pool).await?)
 }
 
 #[tauri::command]
 pub async fn upsert_schedule(state: State<'_, AppState>, view_id: i64,
-                             window_start: String, window_end: String, active: bool)
+                             window_start: String, window_end: String, active: bool,
+                             verify_dow: Option<i16>)
     -> Result<(), AppError> {
     sqlx::query(
-        "INSERT INTO schedule (view_id, window_start, window_end, active)
-         VALUES ($1, $2::time, $3::time, $4)
+        "INSERT INTO schedule (view_id, window_start, window_end, active, verify_dow)
+         VALUES ($1, $2::time, $3::time, $4, $5)
          ON CONFLICT (view_id) DO UPDATE
            SET window_start = EXCLUDED.window_start,
                window_end = EXCLUDED.window_end,
                active = EXCLUDED.active,
+               verify_dow = EXCLUDED.verify_dow,
                drawn_for = NULL, drawn_at = NULL")  // window changed: force a fresh draw
-        .bind(view_id).bind(window_start).bind(window_end).bind(active)
+        .bind(view_id).bind(window_start).bind(window_end).bind(active).bind(verify_dow)
         .execute(&state.pool).await?;
     Ok(())
 }

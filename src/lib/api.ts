@@ -6,6 +6,7 @@ export interface FieldDef {
   label: string; value_kind: string;
   bbg_ftype: string | null; bbg_datatype: string | null; entitlement_note: string;
   active: boolean;
+  qc_nonpositive: boolean; qc_outlier_pct: number | null; qc_stale_days: number | null;
 }
 export interface View { id: number; name: string; description: string; active: boolean; }
 export interface EstimateOut {
@@ -15,7 +16,8 @@ export type RunOutcome =
   | { Completed: { run_id: number;
                     summary: { inserted: number; superseded: number;
                                unchanged: number; issues: number };
-                    corp_actions?: ViewRefreshCorpActionsSummary | null } }
+                    corp_actions?: ViewRefreshCorpActionsSummary | null;
+                    quality_findings: number } }
   | { NeedsConfirmation: { estimated: number; today_total: number } };
 export interface RunRow {
   id: number; view_id: number; kind: string; trigger_kind: string; status: string;
@@ -32,6 +34,7 @@ export interface ScheduleRow {
   id: number; view_id: number; active: boolean; window_start: string;
   window_end: string; drawn_for: string | null; drawn_at: string | null;
   last_result: string | null;
+  verify_dow: number | null; last_verified_on: string | null;
 }
 export type EntityKind = "asset_class" | "asset" | "field" | "view" | "schedule";
 export type DeleteMode = "retire" | "purge";
@@ -176,7 +179,8 @@ export interface RefreshCorpActionsSummary {
 }
 export interface ObsRow {
   id: number; obs_date: string; value_num: number | null;
-  value_text: string | null; basis_note: string | null; layer: string;
+  value_text: string | null; currency: string | null;
+  basis_note: string | null; layer: string;
   run_id: number; system_from: string; current: boolean;
 }
 export interface CorpActionFull {
@@ -314,9 +318,12 @@ export const api = {
   listFields: () => invoke<FieldDef[]>("list_fields"),
   createField: (assetClassId: number, mnemonic: string, label: string, valueKind: string,
                 bbgFtype: string | null = null, bbgDatatype: string | null = null,
-                entitlementNote: string | null = null) =>
+                entitlementNote: string | null = null,
+                qcNonpositive: boolean = false, qcOutlierPct: number | null = null,
+                qcStaleDays: number | null = null) =>
     invoke<FieldDef>("create_field",
-      { assetClassId, mnemonic, label, valueKind, bbgFtype, bbgDatatype, entitlementNote }),
+      { assetClassId, mnemonic, label, valueKind, bbgFtype, bbgDatatype, entitlementNote,
+        qcNonpositive, qcOutlierPct, qcStaleDays }),
   listViews: () => invoke<View[]>("list_views"),
   createView: (name: string, description: string) =>
     invoke<View>("create_view", { name, description }),
@@ -337,8 +344,9 @@ export const api = {
   listIssues: (runId: number) => invoke<IssueRow[]>("list_issues", { runId }),
   detectViewGaps: (viewId: number) => invoke<GapRow[]>("detect_view_gaps", { viewId }),
   listSchedules: () => invoke<ScheduleRow[]>("list_schedules"),
-  upsertSchedule: (viewId: number, windowStart: string, windowEnd: string, active: boolean) =>
-    invoke<void>("upsert_schedule", { viewId, windowStart, windowEnd, active }),
+  upsertSchedule: (viewId: number, windowStart: string, windowEnd: string, active: boolean,
+                   verifyDow: number | null) =>
+    invoke<void>("upsert_schedule", { viewId, windowStart, windowEnd, active, verifyDow }),
   describeDeletion: (kind: EntityKind, id: number) =>
     invoke<DeletionImpact>("describe_deletion", { kind, id }),
   deleteAsset: (id: number, mode: DeleteMode) => invoke<void>("delete_asset", { id, mode }),

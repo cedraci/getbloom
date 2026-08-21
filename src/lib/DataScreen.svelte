@@ -242,13 +242,14 @@
       <p class="thin">Nothing stored for this instrument &amp; field.</p>
     {:else}
       <table>
-        <thead><tr><th>Date</th><th>Value</th><th>Basis</th><th>Layer</th>
+        <thead><tr><th>Date</th><th>Value</th><th>Ccy</th><th>Basis</th><th>Layer</th>
                    <th>Run</th><th>Recorded at</th><th></th></tr></thead>
         <tbody>
           {#each observations as o}
             <tr class:superseded={!o.current}>
               <td>{o.obs_date}</td>
               <td class="num">{fmtValue(o)}</td>
+              <td class="thin">{o.currency ?? "—"}</td>
               <td title={o.basis_note ?? ""}>{fmtBasis(o)}</td>
               <td>{o.layer}</td>
               <td>{o.run_id}</td>

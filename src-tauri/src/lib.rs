@@ -16,6 +16,7 @@ pub mod instrument;
 pub mod lifecycle;
 pub mod master_fetch;
 pub mod orchestrator;
+pub mod quality;
 pub mod registry;
 pub mod resolution;
 pub mod scheduler;

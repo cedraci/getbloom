@@ -36,6 +36,10 @@ pub enum RunOutcome {
         /// run (user decision 2026-08-21). None when the refresh errored
         /// (reported, never fatal) or on paths that skip it.
         corp_actions: Option<crate::corp_actions::ViewRefreshSummary>,
+        /// P7: ingest_issue rows with severity 'quality' this run produced.
+        /// Anything above zero makes the run 'partial' -- a number that
+        /// arrived cleanly but looks wrong is still a reason to look.
+        quality_findings: u64,
     },
     NeedsConfirmation { estimated: i64, today_total: i64 },
 }
@@ -267,7 +271,18 @@ async fn execute<F: DataFetcher>(
         }
     };
 
-    let status = if summary.issues > 0 { "partial" } else { "ok" };
+    // P7 quality gate: judged against what the database now holds. Advisory
+    // like its siblings -- a gate failure must not fail a run that ingested.
+    let quality_findings = match crate::quality::run_quality_gate(
+        pool, run_id, &req, &outcome).await {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("warning: quality gate failed for run {run_id}: {e}");
+            0
+        }
+    };
+
+    let status = if summary.issues > 0 || quality_findings > 0 { "partial" } else { "ok" };
     let stored = audit.exists().then(|| audit.to_string_lossy().into_owned());
     sqlx::query("UPDATE run SET status=$2, finished_at=now(), payload_path=$3 WHERE id=$1")
         .bind(run_id)
@@ -276,7 +291,7 @@ async fn execute<F: DataFetcher>(
         .execute(pool)
         .await?;
 
-    Ok(RunOutcome::Completed { run_id, summary, corp_actions: None })
+    Ok(RunOutcome::Completed { run_id, summary, corp_actions: None, quality_findings })
 }
 
 // ---------------------------------------------------------------- entry points
@@ -437,6 +452,52 @@ pub async fn run_backfill_with<F: DataFetcher>(
         return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
     }
     execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "manual",
+            start, end, estimated).await
+}
+
+/// P7: the weekly verification re-fetch -- a SCHEDULED multi-day backfill
+/// over the trailing week, so upstream restatements are re-read and ingest's
+/// value_superseded alert has something to bite on. Gated like an EOD run
+/// (HardConfirm blocks it -- a scheduler cannot click a confirm box);
+/// NeedsConfirmation here means "skip this week's verify", never "ask".
+pub async fn run_verify(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    view_id: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> AppResult<RunOutcome> {
+    let mut result = run_verify_with(pool, cfg, &BlpapiFetcher { cfg }, view_id,
+                                     start, end).await;
+    auto_reresolve_after(pool, cfg, &result).await;
+    corp_actions_after(pool, cfg, view_id, &mut result).await;
+    lifecycle_after(pool, cfg, &result).await;
+    result
+}
+
+pub async fn run_verify_with<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    view_id: i64,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> AppResult<RunOutcome> {
+    if start > end {
+        return Err(AppError::Validation("start after end".into()));
+    }
+    if (end - start).num_days() + 1 > BACKFILL_CAP_DAYS {
+        return Err(AppError::Validation(format!(
+            "verify range exceeds {BACKFILL_CAP_DAYS}-day cap")));
+    }
+    let loaded = load_view(pool, view_id, None).await?;
+    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
+        + corp_actions_estimate(pool, view_id).await?;
+    let today_total = budget::today_hits(pool).await?;
+    if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm {
+        return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
+    }
+    execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "scheduled",
             start, end, estimated).await
 }
 
