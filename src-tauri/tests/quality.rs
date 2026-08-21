@@ -237,6 +237,8 @@ async fn a_verify_run_is_recorded_as_kind_verify() {
         script_path: "unused".into(),
         request_timeout_s: 5,
         soft_limit: 1_000_000,
+        blp_host: None,
+        blp_port: None,
     };
     orchestrator::run_verify_with(&pool, &cfg, &EmptyFetcher, vid,
                                   d("2026-08-17"), d("2026-08-21"))

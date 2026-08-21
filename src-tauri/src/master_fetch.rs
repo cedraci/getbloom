@@ -433,16 +433,33 @@ pub struct BlpapiMasterFetcher<'a> {
     pub pool: &'a sqlx::PgPool,
 }
 
+/// The wire shape of a security-master request, typed so host/port can carry
+/// `#[serde(skip_serializing_if = "Option::is_none")]` the same way
+/// `fetch::SidecarPayload` does: absent when unset, so an old config with no
+/// override produces byte-identical wire JSON to before this field existed.
+#[derive(Debug, Serialize)]
+struct MasterFetchPayload {
+    run_id: i64,
+    timeout_s: u32,
+    requests: [serde_json::Value; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+}
+
 impl BlpapiMasterFetcher<'_> {
     async fn call(&self, spec: serde_json::Value) -> AppResult<serde_json::Value> {
         crate::blp_driver::run_raw(
             &self.cfg.python_path,
             &self.cfg.script_path,
-            &serde_json::json!({
-                "run_id": 0,
-                "timeout_s": self.cfg.request_timeout_s,
-                "requests": [spec],
-            }),
+            &MasterFetchPayload {
+                run_id: 0,
+                timeout_s: self.cfg.request_timeout_s,
+                requests: [spec],
+                host: self.cfg.blp_host.clone(),
+                port: self.cfg.blp_port,
+            },
         ).await
     }
 

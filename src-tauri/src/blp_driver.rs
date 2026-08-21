@@ -154,7 +154,7 @@ pub async fn run_fetch(
 pub async fn run_raw(
     python_path: &Path,
     script_path: &Path,
-    payload: &serde_json::Value,
+    payload: &impl serde::Serialize,
 ) -> AppResult<serde_json::Value> {
     let text = run_sidecar_text(python_path, script_path, payload, None).await?;
     last_json_line(&text).ok_or_else(|| AppError::Sidecar(

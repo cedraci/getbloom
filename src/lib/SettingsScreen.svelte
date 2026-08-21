@@ -2,7 +2,12 @@
   import { api, type AppConfig, type AssetClass, type EntityKind, type ScheduleRow, type View } from "./api";
   import DeleteDialog from "./DeleteDialog.svelte";
 
-  let cfg = $state<AppConfig>({ data_dir: "", soft_limit: 0, request_timeout_s: 0, python_path: "" });
+  let cfg = $state<AppConfig>({ data_dir: "", soft_limit: 0, request_timeout_s: 0, python_path: "",
+                                database_url: null, blp_host: null, blp_port: null });
+  // Draft strings for the nullable connection fields, same convention as
+  // qc_stale_days_default below: an emptied input means "unset" (null on the
+  // wire), not the empty string or a coerced 0/NaN.
+  let connDraft = $state({ database_url: "", blp_host: "", blp_port: "" });
   let schedules = $state<ScheduleRow[]>([]);
   let views = $state<View[]>([]);
   let assetClasses = $state<AssetClass[]>([]);
@@ -28,6 +33,11 @@
   async function reload() {
     try {
       cfg = await api.getSettings();
+      connDraft = {
+        database_url: cfg.database_url ?? "",
+        blp_host: cfg.blp_host ?? "",
+        blp_port: cfg.blp_port == null ? "" : String(cfg.blp_port),
+      };
       schedules = await api.listSchedules();
       views = await api.listViews();
       if (views.length && !newSchedule.view_id) newSchedule.view_id = views[0].id;
@@ -49,6 +59,11 @@
     return v === null || v === undefined || v === "" ? null : Number(v);
   }
 
+  function toOptionalString(v: string): string | null {
+    const t = v.trim();
+    return t === "" ? null : t;
+  }
+
   async function saveCapabilities(id: number) {
     const e = classEdits[id];
     if (!e) return;
@@ -60,8 +75,15 @@
   }
 
   async function saveConfig() {
-    try { await api.saveSettings(cfg); await reload(); }
-    catch (e) { error = String(e); }
+    try {
+      await api.saveSettings({
+        ...cfg,
+        database_url: toOptionalString(connDraft.database_url),
+        blp_host: toOptionalString(connDraft.blp_host),
+        blp_port: toOptionalNumber(connDraft.blp_port),
+      });
+      await reload();
+    } catch (e) { error = String(e); }
   }
 
   async function upsert() {
@@ -103,6 +125,21 @@
     <label>
       Python (BLPAPI sidecar)
       <input bind:value={cfg.python_path} placeholder="python" required />
+    </label>
+    <label>
+      Database URL
+      <input bind:value={connDraft.database_url} placeholder="postgres://..." />
+      <small>takes effect after restart; empty = BLOOM_DATABASE_URL env or localhost default</small>
+    </label>
+    <label>
+      Bloomberg host
+      <input bind:value={connDraft.blp_host} placeholder="localhost" />
+      <small>empty = localhost</small>
+    </label>
+    <label>
+      Bloomberg port
+      <input type="number" bind:value={connDraft.blp_port} min="0" placeholder="8194" />
+      <small>empty = 8194</small>
     </label>
     <button type="submit">Save settings</button>
   </form>

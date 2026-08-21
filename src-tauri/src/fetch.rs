@@ -128,6 +128,14 @@ pub struct SidecarPayload {
     pub run_id: i64,
     pub timeout_s: u32,
     pub requests: Vec<RequestSpec>,
+    /// Remote Bloomberg Terminal host/port (P10 task 7). Absent when unset,
+    /// so an old config with no override sends exactly the wire shape it
+    /// always did -- the sidecar's `payload.get("host", DEFAULT_HOST)` /
+    /// `.get("port", DEFAULT_PORT)` fall back to localhost:8194.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,12 +535,34 @@ mod tests {
     fn payload_serializes_without_null_keys() {
         let day = d(2026, 8, 17);
         let plan = plan_requests(&sample(day, day)).unwrap();
-        let payload = SidecarPayload { run_id: 7, timeout_s: 120, requests: plan };
+        let payload = SidecarPayload { run_id: 7, timeout_s: 120, requests: plan,
+                                        host: None, port: None };
         let json = serde_json::to_string(&payload).unwrap();
         // history carries start/end and no obs_date; reference the reverse.
         assert!(json.contains(r#""kind":"history""#));
         assert!(json.contains(r#""obs_date":"2026-08-17""#));
         assert!(!json.contains("null"), "no null keys expected: {json}");
+    }
+
+    /// P10 task 7: host/port ride the wire ONLY when the user set them --
+    /// None must vanish entirely (the sidecar's own localhost:8194 default
+    /// takes over), Some must arrive with the exact values given.
+    #[test]
+    fn sidecar_payload_carries_host_only_when_set() {
+        let day = d(2026, 8, 17);
+        let plan = plan_requests(&sample(day, day)).unwrap();
+
+        let none_payload = SidecarPayload { run_id: 7, timeout_s: 120, requests: plan.clone(),
+                                             host: None, port: None };
+        let json = serde_json::to_value(&none_payload).unwrap();
+        assert!(json.get("host").is_none(), "None host must be absent from the wire: {json}");
+        assert!(json.get("port").is_none(), "None port must be absent from the wire: {json}");
+
+        let some_payload = SidecarPayload { run_id: 7, timeout_s: 120, requests: plan,
+                                             host: Some("10.0.0.5".into()), port: Some(9194) };
+        let json = serde_json::to_value(&some_payload).unwrap();
+        assert_eq!(json["host"], "10.0.0.5");
+        assert_eq!(json["port"], 9194);
     }
 
     fn resp(json: &str) -> SidecarResponse {

@@ -24,6 +24,8 @@ async fn main() {
         script_path: std::path::PathBuf::from("scripts/blp_fetch.py"),
         request_timeout_s: app_cfg.request_timeout_s,
         soft_limit: app_cfg.soft_limit,
+        blp_host: app_cfg.blp_host,
+        blp_port: app_cfg.blp_port,
     };
     let url = std::env::var("BLOOM_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/bloomdata".into());

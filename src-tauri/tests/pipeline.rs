@@ -230,6 +230,8 @@ async fn a_member_with_no_security_today_is_skipped_and_recorded_as_an_issue() {
         script_path: "unused".into(),
         request_timeout_s: 5,
         soft_limit: 1_000_000,
+        blp_host: None,
+        blp_port: None,
     };
     let outcome = orchestrator::run_eod_with(
         &pool, &cfg, &EmptyFetcher, vid, "manual", d("2026-08-18"), true)
@@ -260,6 +262,8 @@ async fn the_pre_run_gate_prices_in_corporate_actions() {
         script_path: "unused".into(),
         request_timeout_s: 5,
         soft_limit: 0, // anything estimated > 0 forces the confirm gate
+        blp_host: None,
+        blp_port: None,
     };
     let out = orchestrator::run_eod_with(
         &pool, &cfg, &EmptyFetcher, vid, "manual", d("2026-08-18"), false)
@@ -464,6 +468,7 @@ async fn a_filtered_backfill_fetches_only_the_target_instrument() {
         data_dir: dir.path().to_path_buf(),
         python_path: "python".into(), script_path: "scripts/blp_fetch.py".into(),
         request_timeout_s: 5, soft_limit: 100_000,
+        blp_host: None, blp_port: None,
     };
     let rec = Recording(std::sync::Mutex::new(Vec::new()));
     let out = orchestrator::run_backfill_with(
@@ -579,7 +584,8 @@ async fn a_bulk_field_on_a_view_is_skipped_with_an_issue_not_stringified() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = PipelineConfig { data_dir: dir.path().to_path_buf(),
         python_path: "python".into(), script_path: "scripts/blp_fetch.py".into(),
-        request_timeout_s: 5, soft_limit: 100_000 };
+        request_timeout_s: 5, soft_limit: 100_000,
+        blp_host: None, blp_port: None };
     orchestrator::run_eod_with(&pool, &cfg, &Silent, vid, "manual",
                                d("2026-08-18"), true).await.unwrap();
     let n: i64 = sqlx::query_scalar(

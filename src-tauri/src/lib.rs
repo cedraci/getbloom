@@ -39,8 +39,13 @@ fn load_config() -> AppConfig {
 pub fn run() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let cfg = load_config();
-    let url = std::env::var("BLOOM_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/bloomdata".into());
+    // Precedence is deliberately UI-first: config.json -> BLOOM_DATABASE_URL env
+    // -> hardcoded default. The user who edits the UI must see an effect, even
+    // with the env var set. Takes effect on restart (config.json is read once,
+    // here, before the pool connects).
+    let url = cfg.database_url.clone()
+        .or_else(|| std::env::var("BLOOM_DATABASE_URL").ok())
+        .unwrap_or_else(|| "postgres://postgres:postgres@localhost/bloomdata".into());
     let pool = rt.block_on(db::connect(&url)).expect("database connection + migrations");
 
     let state = AppState { pool: pool.clone(), cfg: tokio::sync::RwLock::new(cfg.clone()) };
@@ -66,6 +71,8 @@ pub fn run() {
                     script_path: commands::script_path(),
                     request_timeout_s: cfg.request_timeout_s,
                     soft_limit: cfg.soft_limit,
+                    blp_host: cfg.blp_host.clone(),
+                    blp_port: cfg.blp_port,
                 };
                 if let Err(e) = scheduler::tick(&pool, &pc, chrono::Local::now()).await {
                     eprintln!("scheduler tick failed: {e}");

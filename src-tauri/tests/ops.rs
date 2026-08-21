@@ -88,6 +88,8 @@ async fn the_ledger_records_dispatched_hits_not_the_gate_estimate() {
         script_path: "unused".into(),
         request_timeout_s: 5,
         soft_limit: 1_000_000,
+        blp_host: None,
+        blp_port: None,
     };
     let day = d("2026-08-17");
     let out = orchestrator::run_eod_with(
@@ -157,6 +159,8 @@ fn gap_cfg(dir: &Path, soft_limit: i64) -> PipelineConfig {
         script_path: "unused".into(),
         request_timeout_s: 5,
         soft_limit,
+        blp_host: None,
+        blp_port: None,
     }
 }
 

@@ -25,6 +25,11 @@ pub struct PipelineConfig {
     pub script_path: PathBuf,
     pub request_timeout_s: u32,
     pub soft_limit: i64,
+    /// P10 task 7: remote Bloomberg Terminal host/port. None rides every live
+    /// payload as an absent key, so the sidecar's own localhost:8194 default
+    /// takes over -- see fetch::SidecarPayload and master_fetch's wire seam.
+    pub blp_host: Option<String>,
+    pub blp_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +101,8 @@ impl DataFetcher for BlpapiFetcher<'_> {
             run_id: req.run_id,
             timeout_s: self.cfg.request_timeout_s,
             requests: fetch::plan_requests(req)?,
+            host: self.cfg.blp_host.clone(),
+            port: self.cfg.blp_port,
         };
         let resp = blp_driver::run_fetch(
             &self.cfg.python_path,

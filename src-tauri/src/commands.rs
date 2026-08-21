@@ -19,6 +19,19 @@ pub struct AppConfig {
     /// PATH; set an absolute path when several interpreters are installed and
     /// only one has the `blpapi` package.
     pub python_path: String,
+    /// P10 task 7. `#[serde(default)]` so an old config.json (written before
+    /// this field existed) still parses -- None on every new field. Startup
+    /// precedence (lib.rs): config.json -> BLOOM_DATABASE_URL env -> hardcoded
+    /// default; deliberately UI-first, so the user who edits the UI sees an
+    /// effect even with the env var set. Takes effect on restart.
+    #[serde(default)]
+    pub database_url: Option<String>,
+    /// Remote Bloomberg Terminal host/port. None = the sidecar's own
+    /// localhost:8194 default (zero Python changes -- see fetch::SidecarPayload).
+    #[serde(default)]
+    pub blp_host: Option<String>,
+    #[serde(default)]
+    pub blp_port: Option<u16>,
 }
 
 impl Default for AppConfig {
@@ -26,7 +39,10 @@ impl Default for AppConfig {
         Self { data_dir: "C:\\bloomdata".into(),
                soft_limit: budget::DEFAULT_SOFT_LIMIT,
                request_timeout_s: 120,   // BLPAPI answers in seconds, not the minutes Excel needed
-               python_path: "python".into() }
+               python_path: "python".into(),
+               database_url: None,
+               blp_host: None,
+               blp_port: None }
     }
 }
 
@@ -53,6 +69,8 @@ pub async fn pipeline_cfg(state: &AppState) -> PipelineConfig {
         script_path: script_path(),
         request_timeout_s: c.request_timeout_s,
         soft_limit: c.soft_limit,
+        blp_host: c.blp_host,
+        blp_port: c.blp_port,
     }
 }
 
@@ -749,4 +767,22 @@ pub async fn refresh_view_corp_actions(state: State<'_, AppState>, view_id: i64)
     let as_of = chrono::Local::now().date_naive();
     // A click is an explicit retry: do NOT skip not-applicable instruments.
     crate::corp_actions::refresh_view(&state.pool, &fetcher, view_id, as_of, false).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P10 task 7: a config.json written before database_url/blp_host/blp_port
+    /// existed must still parse -- the new fields land as None, never a hard
+    /// error, via `#[serde(default)]`.
+    #[test]
+    fn old_config_json_still_parses() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"data_dir":"C:\\bloomdata","soft_limit":100000,"request_timeout_s":120,"python_path":"python"}"#)
+            .unwrap();
+        assert_eq!(cfg.database_url, None);
+        assert_eq!(cfg.blp_port, None);
+        assert_eq!(cfg.blp_host, None);
+    }
 }

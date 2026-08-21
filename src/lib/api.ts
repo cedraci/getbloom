@@ -56,7 +56,14 @@ export interface DeletionImpact {
   // underlying instrument, its aliases, or its recorded history.
   purge_keeps_history: boolean;
 }
-export interface AppConfig { data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string; }
+export interface AppConfig {
+  data_dir: string; soft_limit: number; request_timeout_s: number; python_path: string;
+  // P10 task 7: connection settings. null means "use the env var / hardcoded
+  // default" (see SettingsScreen's helper text).
+  database_url: string | null;
+  blp_host: string | null;
+  blp_port: number | null;
+}
 
 export interface BookEntry {
   instrument_id: number; asset_class_id: number; label: string; active: boolean;

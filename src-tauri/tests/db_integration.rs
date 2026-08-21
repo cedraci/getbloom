@@ -281,6 +281,8 @@ fn mock_cfg(dir: &std::path::Path) -> orchestrator::PipelineConfig {
         script_path: std::path::PathBuf::from("scripts/blp_fetch.py"),
         request_timeout_s: 60,
         soft_limit: 100_000,
+        blp_host: None,
+        blp_port: None,
     }
 }
 
@@ -455,6 +457,8 @@ async fn smoke_real_bloomberg_end_to_end() {
         script_path: std::path::PathBuf::from("scripts/blp_fetch.py"),
         request_timeout_s: 120,
         soft_limit: 100_000,
+        blp_host: None,
+        blp_port: None,
     };
 
     let instrument_id: i64 = match sqlx::query_scalar::<_, i64>(
