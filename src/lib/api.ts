@@ -16,7 +16,8 @@ export type RunOutcome =
   | { Completed: { run_id: number;
                     summary: { inserted: number; superseded: number;
                                unchanged: number; issues: number };
-                    corp_actions?: ViewRefreshCorpActionsSummary | null } }
+                    corp_actions?: ViewRefreshCorpActionsSummary | null;
+                    quality_findings: number } }
   | { NeedsConfirmation: { estimated: number; today_total: number } };
 export interface RunRow {
   id: number; view_id: number; kind: string; trigger_kind: string; status: string;

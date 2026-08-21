@@ -71,3 +71,98 @@ async fn create_field_persists_qc_config() {
         None, None, "", true, None, None).await;
     assert!(err.is_err(), "QC on a text field is a config mistake, said early");
 }
+
+use chrono::NaiveDate;
+use getbloomdata_lib::fetch::{CellValue, FetchAsset, FetchField, FetchOutcome,
+                              FetchRequest, ObsCell};
+use getbloomdata_lib::{ingest, quality};
+
+fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
+
+/// Instrument + numeric field with QC on + view + run; returns ids.
+async fn qc_scaffold(pool: &sqlx::PgPool, stem: &str) -> (i64, i64, i64) {
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name) VALUES ($1) RETURNING id")
+        .bind(uniq(stem)).fetch_one(pool).await.unwrap();
+    let iid: i64 = sqlx::query_scalar(
+        "INSERT INTO instrument DEFAULT VALUES RETURNING instrument_id")
+        .fetch_one(pool).await.unwrap();
+    let fid: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind,
+                                qc_nonpositive, qc_outlier_pct, qc_stale_days)
+         VALUES ($1,$2,'Last','numeric',true,30,3) RETURNING id")
+        .bind(class).bind(uniq("PXQ")).fetch_one(pool).await.unwrap();
+    let vid: i64 = sqlx::query_scalar(
+        "INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("qgv")).fetch_one(pool).await.unwrap();
+    let rid: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'eod','manual','fetching') RETURNING id")
+        .bind(vid).fetch_one(pool).await.unwrap();
+    (iid, fid, rid)
+}
+
+fn req_for(rid: i64, iid: i64, fid: i64, class: i64,
+           start: NaiveDate, end: NaiveDate) -> FetchRequest {
+    FetchRequest {
+        run_id: rid,
+        assets: vec![FetchAsset { instrument_id: iid, asset_class_id: class,
+                                  class_name: "c".into(), label: "l".into(),
+                                  bdp_security: "X US Equity".into() }],
+        fields: vec![FetchField { field_id: fid, asset_class_id: class,
+                                  mnemonic: "PX_LAST".into(),
+                                  value_kind: "numeric".into() }],
+        start, end,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn the_gate_writes_quality_issues_for_flagged_values() {
+    let pool = common::pool().await;
+    let (iid, fid, rid) = qc_scaffold(&pool, "QGATE").await;
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM field_def WHERE id = $1")
+        .bind(fid).fetch_one(&pool).await.unwrap();
+    // Day 1 at 100, day 2 at 145 (outlier vs 30%), day 3 at -2 (nonpositive).
+    let cells = vec![
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-11"), value: CellValue::Num(100.0) },
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-12"), value: CellValue::Num(145.0) },
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-13"), value: CellValue::Num(-2.0) },
+    ];
+    let outcome = FetchOutcome { cells, problems: vec![] };
+    ingest::ingest_outcome(&pool, rid, &outcome).await.unwrap();
+    let req = req_for(rid, iid, fid, class, d("2026-08-11"), d("2026-08-13"));
+    let n = quality::run_quality_gate(&pool, rid, &req, &outcome).await.unwrap();
+    assert!(n >= 2, "outlier + nonpositive at minimum, got {n}");
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT severity, code FROM ingest_issue
+          WHERE run_id = $1 AND severity = 'quality' ORDER BY code")
+        .bind(rid).fetch_all(&pool).await.unwrap();
+    let codes: Vec<&str> = rows.iter().map(|(_, c)| c.as_str()).collect();
+    assert!(codes.contains(&"quality_outlier"), "codes: {codes:?}");
+    assert!(codes.contains(&"quality_nonpositive"), "codes: {codes:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn unexplained_silence_becomes_quality_no_response() {
+    let pool = common::pool().await;
+    let (iid, fid, rid) = qc_scaffold(&pool, "QSIL").await;
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM field_def WHERE id = $1")
+        .bind(fid).fetch_one(&pool).await.unwrap();
+    // Requested, but the outcome mentions it nowhere.
+    let outcome = FetchOutcome { cells: vec![], problems: vec![] };
+    let req = req_for(rid, iid, fid, class, d("2026-08-13"), d("2026-08-13"));
+    let n = quality::run_quality_gate(&pool, rid, &req, &outcome).await.unwrap();
+    assert_eq!(n, 1);
+    let code: String = sqlx::query_scalar(
+        "SELECT code FROM ingest_issue
+          WHERE run_id = $1 AND instrument_id = $2 AND severity = 'quality'")
+        .bind(rid).bind(iid).fetch_one(&pool).await.unwrap();
+    assert_eq!(code, "quality_no_response");
+}

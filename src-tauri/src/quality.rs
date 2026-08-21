@@ -110,6 +110,86 @@ pub fn unexplained_instruments(
     requested.iter().copied().filter(|id| !explained.contains(id)).collect()
 }
 
+// ---------------------------------------------------------------- DB runner
+
+use crate::error::AppResult;
+use crate::fetch::{FetchOutcome, FetchRequest};
+use sqlx::PgPool;
+
+/// Judge a run AFTER ingest committed, against what the database now holds:
+/// the stored series is the single source the checks read, so a backfill and
+/// an EOD run are judged identically. Findings are ingest_issue rows with
+/// severity 'quality', attached to the run. Advisory by contract -- the
+/// caller logs an error and keeps the run.
+pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
+                              outcome: &FetchOutcome) -> AppResult<u64> {
+    let mut findings = 0u64;
+
+    let requested: Vec<i64> = req.assets.iter().map(|a| a.instrument_id).collect();
+    for iid in unexplained_instruments(&requested, outcome) {
+        sqlx::query(
+            "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
+             VALUES ($1,$2,'quality','quality_no_response',
+                     'requested in this run but Bloomberg returned neither data \
+                      nor a problem for it')")
+            .bind(run_id).bind(iid).execute(pool).await?;
+        findings += 1;
+    }
+
+    // Which fields carry any check at all -- one query, not one per cell.
+    let mut field_ids: Vec<i64> = outcome.cells.iter().map(|c| c.field_id).collect();
+    field_ids.sort_unstable();
+    field_ids.dedup();
+    if field_ids.is_empty() {
+        return Ok(findings);
+    }
+    let cfgs: Vec<(i64, bool, Option<f64>, Option<i32>)> = sqlx::query_as(
+        "SELECT id, qc_nonpositive, qc_outlier_pct, qc_stale_days
+           FROM field_def WHERE id = ANY($1)")
+        .bind(&field_ids).fetch_all(pool).await?;
+    let cfg_of = |fid: i64| cfgs.iter()
+        .find(|(id, ..)| *id == fid)
+        .map(|&(_, n, o, s)| QcConfig { nonpositive: n, outlier_pct: o, stale_days: s })
+        .unwrap_or_default();
+
+    let mut pairs: Vec<(i64, i64)> = outcome.cells.iter()
+        .map(|c| (c.instrument_id, c.field_id)).collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+
+    for (iid, fid) in pairs {
+        let cfg = cfg_of(fid);
+        if !cfg.enabled() {
+            continue;
+        }
+        // Enough history for the stale streak plus the run's own range; the
+        // series is judged ascending, so the DESC page is reversed.
+        let span = (req.end - req.start).num_days().max(0) as i64;
+        let window = (cfg.stale_days.unwrap_or(0) as i64 + span + 10).clamp(10, 200);
+        let mut series: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as(
+            "SELECT obs_date, value_num FROM observation
+              WHERE instrument_id = $1 AND field_id = $2
+                AND layer = 'raw' AND granularity = 'eod'
+                AND system_to = 'infinity' AND value_num IS NOT NULL
+                AND obs_date <= $3
+              ORDER BY obs_date DESC LIMIT $4")
+            .bind(iid).bind(fid).bind(req.end).bind(window)
+            .fetch_all(pool).await?;
+        series.reverse();
+        for f in evaluate_series(&cfg, &series, req.start, req.end) {
+            sqlx::query(
+                "INSERT INTO ingest_issue
+                   (run_id, instrument_id, field_id, obs_date, severity, code, detail)
+                 VALUES ($1,$2,$3,$4,'quality',$5,$6)")
+                .bind(run_id).bind(iid).bind(fid).bind(f.obs_date)
+                .bind(f.code).bind(&f.detail)
+                .execute(pool).await?;
+            findings += 1;
+        }
+    }
+    Ok(findings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

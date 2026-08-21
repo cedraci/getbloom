@@ -25,6 +25,8 @@
   // Corporate actions ride with every run; the completed outcome carries
   // their summary and it deserves its own visible line.
   let caLine = $state("");
+  // P7: quality-gate findings this run produced (severity 'quality' issues).
+  let qualityLine = $state("");
   function noteCorpActions(outcome: RunOutcome) {
     const ca = "Completed" in outcome ? outcome.Completed.corp_actions : null;
     caLine = ca
@@ -35,6 +37,8 @@
         + (ca.not_applicable ? `, ${ca.not_applicable} not applicable` : "")
         + (ca.skipped ? `, ${ca.skipped} skipped (no current security)` : "") + "."
       : "";
+    const q = "Completed" in outcome ? outcome.Completed.quality_findings : 0;
+    qualityLine = q ? `⚠ ${q} quality finding(s) — click the run below to see them.` : "";
   }
 
   // P6: lifecycle findings live outside any run (run_id NULL), so they get
@@ -167,6 +171,7 @@
   <button onclick={runNow} disabled={inFlight || selectedViewId === null}>Run now</button>
 
   {#if caLine}<p class="thin">{caLine}</p>{/if}
+  {#if qualityLine}<p class="amber">{qualityLine}</p>{/if}
 
   {#if pending}
     <div class="confirm">

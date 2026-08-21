@@ -36,6 +36,10 @@ pub enum RunOutcome {
         /// run (user decision 2026-08-21). None when the refresh errored
         /// (reported, never fatal) or on paths that skip it.
         corp_actions: Option<crate::corp_actions::ViewRefreshSummary>,
+        /// P7: ingest_issue rows with severity 'quality' this run produced.
+        /// Anything above zero makes the run 'partial' -- a number that
+        /// arrived cleanly but looks wrong is still a reason to look.
+        quality_findings: u64,
     },
     NeedsConfirmation { estimated: i64, today_total: i64 },
 }
@@ -267,7 +271,18 @@ async fn execute<F: DataFetcher>(
         }
     };
 
-    let status = if summary.issues > 0 { "partial" } else { "ok" };
+    // P7 quality gate: judged against what the database now holds. Advisory
+    // like its siblings -- a gate failure must not fail a run that ingested.
+    let quality_findings = match crate::quality::run_quality_gate(
+        pool, run_id, &req, &outcome).await {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("warning: quality gate failed for run {run_id}: {e}");
+            0
+        }
+    };
+
+    let status = if summary.issues > 0 || quality_findings > 0 { "partial" } else { "ok" };
     let stored = audit.exists().then(|| audit.to_string_lossy().into_owned());
     sqlx::query("UPDATE run SET status=$2, finished_at=now(), payload_path=$3 WHERE id=$1")
         .bind(run_id)
@@ -276,7 +291,7 @@ async fn execute<F: DataFetcher>(
         .execute(pool)
         .await?;
 
-    Ok(RunOutcome::Completed { run_id, summary, corp_actions: None })
+    Ok(RunOutcome::Completed { run_id, summary, corp_actions: None, quality_findings })
 }
 
 // ---------------------------------------------------------------- entry points

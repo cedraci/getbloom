@@ -152,12 +152,16 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
         let obs_date = previous_weekday(today);
         let result = orchestrator::run_eod(pool, cfg, view_id, "scheduled", obs_date, false).await;
         let msg = match &result {
-            Ok(RunOutcome::Completed { run_id, summary, corp_actions }) => {
+            Ok(RunOutcome::Completed { run_id, summary, corp_actions,
+                                       quality_findings }) => {
                 let ca = match corp_actions {
                     Some(c) => format!(" ca_new={} ca_amended={}", c.inserted, c.amended),
                     None => String::new(),
                 };
-                format!("ok run={run_id} inserted={} superseded={} issues={}{ca}",
+                let q = if *quality_findings > 0 {
+                    format!(" quality={quality_findings}")
+                } else { String::new() };
+                format!("ok run={run_id} inserted={} superseded={} issues={}{q}{ca}",
                         summary.inserted, summary.superseded, summary.issues)
             }
             Ok(RunOutcome::NeedsConfirmation { estimated, .. }) =>
