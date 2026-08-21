@@ -477,8 +477,11 @@ pub async fn run_backfill_with<F: DataFetcher>(
             "backfill range exceeds {BACKFILL_CAP_DAYS}-day cap"
         )));
     }
-    let (loaded, estimated) =
+    let (loaded, price) =
         plan_backfill(pool, view_id, instrument_ids, start, end).await?;
+    // Prices per weekday + ONE corp-action leg at the end (Bloomberg returns
+    // the full history on every call; a backfill needs no per-day refresh).
+    let estimated = price + corp_actions_estimate(pool, view_id).await?;
     let today_total = budget::today_hits(pool).await?;
     // Spec §5.3: every backfill shows its cost and requires explicit confirmation.
     if !confirmed {
@@ -488,23 +491,17 @@ pub async fn run_backfill_with<F: DataFetcher>(
             start, end, estimated).await
 }
 
-/// Load a view -- optionally narrowed to one instrument -- and price the
-/// backfill leg over `start..=end`. Shared by the manual backfill and the
-/// scheduler's gap recovery so the two cannot drift apart on what a backfill
-/// costs.
+/// Load a view -- optionally narrowed to one instrument -- and price its PRICE
+/// leg over `start..=end`. Shared by the manual backfill and the scheduler's
+/// gap recovery so the two cannot drift apart on what a day of history costs.
 ///
-/// The corp-action leg is view-wide, so pricing several gaps this way charges
-/// it once per gap. That is the standing over-count-is-safe estimate policy:
-/// the gate may refuse a batch it could have afforded, never the reverse, and
-/// the wire seam still bills exactly what it sends.
+/// The corp-action leg is deliberately NOT included: it is view-wide and
+/// charged once per batch, which is a decision only the caller can make.
 async fn plan_backfill(pool: &PgPool, view_id: i64, only: Option<&[i64]>,
                        start: NaiveDate, end: NaiveDate) -> AppResult<(Loaded, i64)> {
     let loaded = load_view(pool, view_id, only).await?;
-    // Prices per weekday + ONE corp-action leg at the end (Bloomberg returns
-    // the full history on every call; a backfill needs no per-day refresh).
-    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
-        + corp_actions_estimate(pool, view_id).await?;
-    Ok((loaded, estimated))
+    let price = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end);
+    Ok((loaded, price))
 }
 
 /// Fill the weekdays this view missed while the machine was off (P10 task 4).
@@ -587,11 +584,17 @@ async fn gap_backfill<F: DataFetcher>(
     let mut planned = Vec::with_capacity(gaps.len());
     let mut estimated = 0i64;
     for g in &gaps {
-        let (loaded, est) =
+        let (loaded, price) =
             plan_backfill(pool, view_id, Some(&[g.instrument_id]), g.start, g.end).await?;
-        estimated += est;
-        planned.push((g, loaded, est));
+        estimated += price;
+        planned.push((g, loaded, price));
     }
+    // ONE corp-action leg for the batch, matching what actually happens: the
+    // live wrapper runs that hook once, after the last gap. Charging it per
+    // gap made the estimate quadratic -- during real downtime the number of
+    // gaps tracks the number of members, so a 500-member view would price
+    // ~500k phantom hits, land above Ok, and never recover unattended again.
+    estimated += corp_actions_estimate(pool, view_id).await?;
 
     let today_total = budget::today_hits(pool).await?;
     if budget::check_level(estimated, today_total, cfg.soft_limit) != BudgetLevel::Ok {
@@ -602,12 +605,15 @@ async fn gap_backfill<F: DataFetcher>(
     // One run per gap range, scoped to the one instrument that is missing it.
     // An error aborts the batch and propagates: the failed run row is already
     // written, so today's attempt is spent and the caller reports it.
+    // Each run records its own price leg as `estimated_hits`; the batch's
+    // single corp-action leg bills itself at the wire seam, as it does for
+    // every other run kind.
     let mut run_ids = Vec::new();
     let mut days = 0u64;
-    for (g, loaded, est) in planned {
+    for (g, loaded, price) in planned {
         if let RunOutcome::Completed { run_id, .. } =
             execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "scheduled",
-                    g.start, g.end, est).await? {
+                    g.start, g.end, price).await? {
             run_ids.push(run_id);
         }
         days += budget::weekdays_between(g.start, g.end) as u64;

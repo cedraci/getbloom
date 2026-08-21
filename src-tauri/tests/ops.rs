@@ -120,7 +120,7 @@ use getbloomdata_lib::fetch::{CellValue, FetchOutcome, FetchRequest, ObsCell};
 use getbloomdata_lib::orchestrator::{
     self, DataFetcher, GapBackfillOutcome, PipelineConfig,
 };
-use getbloomdata_lib::{fields, registry, views};
+use getbloomdata_lib::{budget, fields, registry, views};
 use std::path::Path;
 
 /// Serves one numeric cell per (asset, class-matching field, weekday) of
@@ -165,29 +165,41 @@ fn gap_cfg(dir: &Path, soft_limit: i64) -> PipelineConfig {
 /// through Thu 08-13 are present; Fri 08-14, Mon 08-17 and Tue 08-18 are not.
 ///
 /// Tue 08-18 is deliberately missing as well: it is the day today's own EOD
-/// run targets, so the gap backfill must leave it alone. Returns
-/// `(view_id, instrument_id)`.
-async fn gap_fixture(pool: &sqlx::PgPool, stem: &str) -> (i64, i64) {
+/// run targets, so the gap backfill must leave it alone.
+///
+/// `n_fields` numeric fields, all of them present on the days that are
+/// present -- a partially-filled day would be a gap of its own. It is a knob
+/// only because the estimate scales with it, and one test needs a batch price
+/// big enough to place precisely against the soft limit.
+///
+/// Returns `(view_id, instrument_id)`.
+async fn gap_fixture(pool: &sqlx::PgPool, stem: &str, n_fields: usize) -> (i64, i64) {
     let class = registry::create_asset_class(pool, &uniq("GapCls"), "t").await.unwrap();
-    let field = fields::create_field(
-        pool, class.id, "PX_LAST", "Last", "numeric",
-        None, None, "", false, None, None).await.unwrap();
+    let mut field_ids = Vec::with_capacity(n_fields);
+    for i in 0..n_fields {
+        let f = fields::create_field(
+            pool, class.id, &format!("PX_LAST_{i}"), "Last", "numeric",
+            None, None, "", false, None, None).await.unwrap();
+        field_ids.push(f.id);
+    }
     let entry = add_book_entry(pool, class.id, stem, &uniq(stem)).await;
     let view = views::create_view(pool, &uniq("gapview"), "").await.unwrap();
     views::set_view_instruments(pool, view.id, &[entry.instrument_id]).await.unwrap();
-    views::set_view_fields(pool, view.id, &[field.id]).await.unwrap();
+    views::set_view_fields(pool, view.id, &field_ids).await.unwrap();
 
     let rid: i64 = sqlx::query_scalar(
         "INSERT INTO run (view_id, kind, trigger_kind, status)
          VALUES ($1,'eod','manual','ok') RETURNING id")
         .bind(view.id).fetch_one(pool).await.unwrap();
     for day in ["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13"] {
-        sqlx::query(
-            "INSERT INTO observation
-               (instrument_id, field_id, obs_date, layer, basis_id, value_num, run_id)
-             VALUES ($1,$2,$3,'raw',1,100.0,$4)")
-            .bind(entry.instrument_id).bind(field.id).bind(d(day)).bind(rid)
-            .execute(pool).await.unwrap();
+        for fid in &field_ids {
+            sqlx::query(
+                "INSERT INTO observation
+                   (instrument_id, field_id, obs_date, layer, basis_id, value_num, run_id)
+                 VALUES ($1,$2,$3,'raw',1,100.0,$4)")
+                .bind(entry.instrument_id).bind(fid).bind(d(day)).bind(rid)
+                .execute(pool).await.unwrap();
+        }
     }
     (view.id, entry.instrument_id)
 }
@@ -206,7 +218,7 @@ async fn scheduled_backfill_runs(pool: &sqlx::PgPool, view_id: i64) -> i64 {
 #[ignore = "requires postgres"]
 async fn gap_backfill_fills_missed_weekdays_and_records_scheduled_backfill_runs() {
     let pool = common::pool().await;
-    let (vid, iid) = gap_fixture(&pool, "GapA").await;
+    let (vid, iid) = gap_fixture(&pool, "GapA", 1).await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = gap_cfg(dir.path(), 1_000_000);
 
@@ -247,20 +259,88 @@ async fn gap_backfill_fills_missed_weekdays_and_records_scheduled_backfill_runs(
 
 /// A scheduler cannot click a confirm box, so anything above `BudgetLevel::Ok`
 /// runs NOTHING and reports. There is no hard cap and no self-confirmation.
+///
+/// The load-bearing case is SoftWarn, not HardConfirm: SoftWarn is the level
+/// an interactive EOD run is allowed to sail straight through, and a gate
+/// written `== HardConfirm` -- the obvious future "alignment" with
+/// `run_eod_with`'s rule -- would let the scheduler spend money with nobody
+/// there to be warned. So this test refuses to pass on a HardConfirm alone.
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn gap_backfill_stops_at_the_soft_limit_instead_of_confirming_itself() {
     let pool = common::pool().await;
-    let (vid, _iid) = gap_fixture(&pool, "GapB").await;
+    // Ten fields: enough batch price to place the soft limit precisely, well
+    // clear of the handful of hits other tests add to today's shared ledger.
+    let (vid, _iid) = gap_fixture(&pool, "GapB", 10).await;
     let dir = tempfile::tempdir().unwrap();
-    let cfg_zero = gap_cfg(dir.path(), 0); // any estimate at all lands past Ok
 
+    // soft_limit 0 is HardConfirm. Nothing runs -- and because nothing ran,
+    // today's single attempt is unspent, so this doubles as a price quote for
+    // building the SoftWarn case exactly.
     let out = orchestrator::run_gap_backfill_with(
-        &pool, &cfg_zero, &DayFetcher, vid, d("2026-08-19")).await.unwrap();
-    assert!(matches!(out, GapBackfillOutcome::NeedsConfirmation { .. }),
-            "expected NeedsConfirmation, got {out:?}");
+        &pool, &gap_cfg(dir.path(), 0), &DayFetcher, vid, d("2026-08-19")).await.unwrap();
+    let (estimated, today_total) = match out {
+        GapBackfillOutcome::NeedsConfirmation { estimated, today_total } =>
+            (estimated, today_total),
+        other => panic!("expected NeedsConfirmation, got {other:?}"),
+    };
     assert_eq!(scheduled_backfill_runs(&pool, vid).await, 0,
                "nothing may run past Ok without a human");
+
+    // One hit above the soft limit, and far below twice it: SoftWarn.
+    let soft = estimated + today_total - 1;
+    let out = orchestrator::run_gap_backfill_with(
+        &pool, &gap_cfg(dir.path(), soft), &DayFetcher, vid, d("2026-08-19")).await.unwrap();
+    match out {
+        GapBackfillOutcome::NeedsConfirmation { estimated, today_total } =>
+            // Asserted from the gate's OWN inputs, so the scenario cannot
+            // quietly decay into a second HardConfirm case and pin nothing.
+            assert_eq!(budget::check_level(estimated, today_total, soft),
+                       budget::BudgetLevel::SoftWarn,
+                       "this case must exercise SoftWarn to pin the doctrine"),
+        other => panic!("expected NeedsConfirmation, got {other:?}"),
+    }
+    assert_eq!(scheduled_backfill_runs(&pool, vid).await, 0,
+               "SoftWarn is still above Ok: the scheduler stops, it does not warn itself");
+}
+
+/// The corp-action leg is view-wide and the batch runs it ONCE, so it must be
+/// priced once -- not once per gap.
+///
+/// Pricing it per gap makes the estimate quadratic in the size of the view,
+/// because during real downtime every member has a gap: a 500-member view
+/// would quote ~500k phantom hits, land above `Ok`, and never recover
+/// unattended again. A single-gap fixture cannot see the difference, so this
+/// one has two members with unequal holes.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn gap_backfill_prices_the_view_wide_corp_action_leg_once_for_the_batch() {
+    let pool = common::pool().await;
+    let (vid, first) = gap_fixture(&pool, "GapD", 1).await;
+
+    // A second member of the same class that has never reported at all, so
+    // its gap spans the whole window while the first member's spans two days.
+    let class: i64 = sqlx::query_scalar(
+        "SELECT asset_class_id FROM book_entry WHERE instrument_id = $1")
+        .bind(first).fetch_one(&pool).await.unwrap();
+    let second = add_book_entry(&pool, class, "GapE", &uniq("GapE")).await;
+    views::set_view_instruments(&pool, vid, &[first, second.instrument_id])
+        .await.unwrap();
+
+    // soft_limit 0 quotes the batch without running it.
+    let dir = tempfile::tempdir().unwrap();
+    let out = orchestrator::run_gap_backfill_with(
+        &pool, &gap_cfg(dir.path(), 0), &DayFetcher, vid, d("2026-08-19")).await.unwrap();
+    let estimated = match out {
+        GapBackfillOutcome::NeedsConfirmation { estimated, .. } => estimated,
+        other => panic!("expected NeedsConfirmation, got {other:?}"),
+    };
+
+    // 1 field x (2 weekdays for the first member + 6 for the second) = 8 price
+    // hits, plus ONE corp-action leg for the 2-member view = 2 x 2 = 4.
+    // Charged per gap instead, the corp term would be 8 and the quote 16.
+    assert_eq!(estimated, 8 + 4,
+               "the batch pays for one corp-action leg, not one per gap");
 }
 
 /// One attempt per day, whatever its status: a gap that cannot be filled must
@@ -269,7 +349,7 @@ async fn gap_backfill_stops_at_the_soft_limit_instead_of_confirming_itself() {
 #[ignore = "requires postgres"]
 async fn gap_backfill_attempts_at_most_once_per_day() {
     let pool = common::pool().await;
-    let (vid, _iid) = gap_fixture(&pool, "GapC").await;
+    let (vid, _iid) = gap_fixture(&pool, "GapC", 1).await;
     let dir = tempfile::tempdir().unwrap();
     let cfg = gap_cfg(dir.path(), 1_000_000);
 
