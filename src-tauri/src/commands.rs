@@ -63,6 +63,12 @@ pub struct EstimateOut {
     pub level: budget::BudgetLevel,
 }
 
+#[derive(Debug, Serialize)]
+pub struct BudgetToday {
+    pub hits: i64,
+    pub soft_limit: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Asset classes
 // ---------------------------------------------------------------------------
@@ -319,6 +325,14 @@ pub async fn estimate_view(state: State<'_, AppState>, view_id: i64)
     let today_total = budget::today_hits(&state.pool).await?;
     let level = budget::check_level(estimated, today_total, cfg.soft_limit);
     Ok(EstimateOut { estimated, today_total, level })
+}
+
+#[tauri::command]
+pub async fn budget_today(state: State<'_, AppState>) -> Result<BudgetToday, AppError> {
+    Ok(BudgetToday {
+        hits: budget::today_hits(&state.pool).await?,
+        soft_limit: state.cfg.read().await.soft_limit,
+    })
 }
 
 // ---------------------------------------------------------------------------

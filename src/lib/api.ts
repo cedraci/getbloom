@@ -16,6 +16,9 @@ export interface View { id: number; name: string; description: string; active: b
 export interface EstimateOut {
   estimated: number; today_total: number; level: "Ok" | "SoftWarn" | "HardConfirm";
 }
+export interface BudgetToday {
+  hits: number; soft_limit: number;
+}
 export type RunOutcome =
   | { Completed: { run_id: number;
                     summary: { inserted: number; superseded: number;
@@ -351,6 +354,7 @@ export const api = {
     invoke<BookEntry[]>("get_view_instruments", { viewId }),
   getViewFields: (viewId: number) => invoke<FieldDef[]>("get_view_fields", { viewId }),
   estimateView: (viewId: number) => invoke<EstimateOut>("estimate_view", { viewId }),
+  budgetToday: () => invoke<BudgetToday>("budget_today"),
   runEodNow: (viewId: number, confirmed: boolean) =>
     invoke<RunOutcome>("run_eod_now", { viewId, confirmed }),
   runBackfillNow: (viewId: number, start: string, end: string, confirmed: boolean,

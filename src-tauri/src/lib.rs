@@ -89,7 +89,7 @@ pub fn run() {
             commands::list_views, commands::create_view,
             commands::set_view_instruments, commands::set_view_fields,
             commands::get_view_instruments, commands::get_view_fields,
-            commands::estimate_view, commands::run_eod_now, commands::run_backfill_now,
+            commands::estimate_view, commands::budget_today, commands::run_eod_now, commands::run_backfill_now,
             commands::list_runs, commands::list_issues, commands::detect_view_gaps,
             commands::list_schedules, commands::upsert_schedule,
             commands::describe_deletion,

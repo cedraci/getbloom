@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, type EstimateOut, type GapRow, type IssueRow,
+  import { api, type BudgetToday, type EstimateOut, type GapRow, type IssueRow,
            type LifecycleSummary, type RunOutcome,
            type RunRow, type View } from "./api";
 
@@ -10,6 +10,7 @@
   let runs = $state<RunRow[]>([]);
   let selectedRun = $state<RunRow | null>(null);
   let issues = $state<IssueRow[]>([]);
+  let budgetData = $state<BudgetToday | null>(null);
   let error = $state("");
   // Prevents a double-click from starting two concurrent pipelines (two Excel
   // instances hitting the same pending path, double Bloomberg hits) while a
@@ -86,12 +87,17 @@
     } catch (e) { error = String(e); }
   }
 
+  async function loadBudgetData() {
+    try { budgetData = await api.budgetToday(); }
+    catch (e) { error = String(e); }
+  }
+
   async function refreshRuns() {
     try { runs = await api.listRuns(50); }
     catch (e) { error = String(e); }
   }
 
-  $effect(() => { loadViews(); loadStandaloneIssues(); });
+  $effect(() => { loadViews(); loadStandaloneIssues(); loadBudgetData(); });
   $effect(() => { selectedViewId; loadViewData(); pending = null; });
   $effect(() => {
     refreshRuns();
@@ -109,7 +115,7 @@
       } else {
         pending = null;
         noteCorpActions(outcome);
-        await Promise.all([loadViewData(), refreshRuns()]);
+        await Promise.all([loadViewData(), refreshRuns(), loadBudgetData()]);
       }
     } catch (e) { error = String(e); }
     finally { inFlight = false; }
@@ -127,7 +133,7 @@
       } else {
         pending = null;
         noteCorpActions(outcome);
-        await Promise.all([loadViewData(), refreshRuns()]);
+        await Promise.all([loadViewData(), refreshRuns(), loadBudgetData()]);
       }
     } catch (e) { error = String(e); }
     finally { inFlight = false; }
@@ -143,7 +149,7 @@
                                    pending.instrument_ids);
       noteCorpActions(outcome);
       pending = null;
-      await Promise.all([loadViewData(), refreshRuns()]);
+      await Promise.all([loadViewData(), refreshRuns(), loadBudgetData()]);
     } catch (e) { error = String(e); }
     finally { inFlight = false; }
   }
@@ -228,6 +234,11 @@
   {/if}
 
   <h2>Run history</h2>
+  {#if budgetData}
+    <p class:amber={budgetData.hits > budgetData.soft_limit}>
+      Bloomberg hits today: {budgetData.hits.toLocaleString()} / soft limit {budgetData.soft_limit.toLocaleString()}
+    </p>
+  {/if}
   <table>
     <thead>
       <tr><th>ID</th><th>Kind</th><th>Trigger</th><th>Status</th><th>Started</th><th>Finished</th><th>Est. hits</th></tr>
