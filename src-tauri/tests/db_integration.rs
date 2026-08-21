@@ -1181,12 +1181,51 @@ async fn apply_import_succeeds_even_when_the_workbook_refresh_is_locked_out() {
 
     let plan = getbloomdata_lib::bulk::preview_import(&pool, &path).await.unwrap();
 
-    // Simulate the workbook being held open elsewhere (Excel's own sharing
-    // violation): mark the file read-only so the refresh's write hits the
-    // same access-denied error a real lock produces.
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).unwrap();
+    // Simulate the workbook being locked/unwritable, portably, WITHOUT
+    // breaking the read `apply_import_with` does of its own accord before
+    // it ever touches the transaction: its very first line re-reads and
+    // re-hashes `path` for an integrity check (`sheet::file_sha256`), and
+    // `preview_import` above already needed a real read too. So whatever
+    // we do here must still let the file be *read*; only the post-commit
+    // re-export's *write* may fail.
+    //
+    // (A first attempt replaced the target file outright with a directory,
+    // matching a literal reading of "make rename fail on every OS" -- but
+    // that also makes `file_sha256`'s read fail, so `apply_import_with`
+    // returns Err from its top-of-function integrity check before the
+    // transaction even runs. That is exactly the outcome this test exists
+    // to rule out: a failed refresh demoting a landed commit to an Err.
+    // Confirmed locally: `outcome.expect(..)` panicked on `Io(PermissionDenied)`
+    // with zero rows committed, never reaching the `workbook_refreshed`
+    // assertion below.)
+    //
+    // The mechanism instead differs by OS because "block only the write"
+    // does too. On Windows, the read-only FILE_ATTRIBUTE on the target
+    // itself blocks `rename`-over-target -- the same sharing violation
+    // Excel's own file lock produces -- while leaving reads of that file
+    // unaffected. On POSIX, `rename(2)` does not consult the destination
+    // file's permission bits at all -- only write permission on the
+    // *directory* the destination lives in controls whether it can be
+    // replaced -- so the readonly-file trick silently no-ops on Linux CI
+    // (the temp-then-rename write goes through, and `workbook_refreshed`
+    // ends up honestly, but wrongly, `true`). Removing write permission
+    // from the containing directory is the real POSIX equivalent: reads
+    // only need read+search on the directory, so `file_sha256` and the
+    // already-computed `plan` are unaffected; only creating the temp file
+    // and renaming over the target are blocked.
+    #[cfg(windows)]
+    {
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(dir.path(), perms).unwrap();
+    }
 
     let fetcher = MockMasterFetcher {
         identity_raw: identity_raw_for("NEW US Equity"), ..Default::default()
@@ -1196,9 +1235,19 @@ async fn apply_import_succeeds_even_when_the_workbook_refresh_is_locked_out() {
 
     // Restore write access unconditionally, before any assertion that might
     // panic, so the tempdir can still clean itself up.
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_readonly(false);
-    std::fs::set_permissions(&path, perms).unwrap();
+    #[cfg(windows)]
+    {
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dir.path(), perms).unwrap();
+    }
 
     let res = outcome.expect("a failed workbook refresh must not demote a committed apply to an error");
     assert!(!res.workbook_refreshed, "the refresh genuinely failed and must say so honestly");
