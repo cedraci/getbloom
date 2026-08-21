@@ -314,6 +314,53 @@ async fn a_ratio_junction_scales_a_deeper_rolls_offset() {
 
 #[tokio::test]
 #[ignore = "requires postgres"]
+async fn a_nearer_ratio_junction_scales_a_deeper_rolls_offset() {
+    // Chain: A --roll(+3.0)--> B --merger(2.0 acquirer sh. per target sh.)--> C.
+    // Walking back from C the MERGER comes first this time (it is nearer the
+    // target), then the roll is deeper -- the mirror image of
+    // `a_ratio_junction_scales_a_deeper_rolls_offset` above, where the roll
+    // was nearer and banked at mul = 1.0. Here the merger's ratio (0.5) is
+    // already in `mul` when the roll is reached, so its offset must be
+    // scaled: add += 3.0 * 0.5 = 1.5, not add += 3.0. A regression to
+    // `add += s` would give A's row 10*0.5 + 3.0 = 8.0 instead of the correct
+    // 10*0.5 + 1.5 = 6.5.
+    let pool = common::pool().await;
+    let (ids, fid) = roll_scaffold(&pool, "RollNearRatio", "PX_LAST", &[
+        ("Old class", &[("2026-03-01", 10.0)]),
+        ("Merged class", &[("2026-03-08", 4.0)]),
+        ("Rolled-into", &[("2026-03-11", 8.0)]),
+    ]).await;
+    let (a, b, c) = (ids[0], ids[1], ids[2]);
+    // Roll is deeper, so it must be dated strictly EARLIER (plan_chain
+    // descends walking backward from the target).
+    roll_link(&pool, a, b, "2026-03-06", Some(3.0)).await;
+    let mid = store::propose_link(&pool, b, c, "merger", d("2026-03-11"),
+                                  serde_json::json!({"test": true}))
+        .await.unwrap();
+    store::set_link_terms(&pool, mid, Some(2.0), None).await.unwrap();
+    store::confirm_link(&pool, mid, "test").await.unwrap();
+
+    let s = stitch::stitched_series(&pool, c, fid, AdjustMode::Raw, 100)
+        .await.unwrap();
+    assert!(s.stopped.is_none(), "stopped: {:?}", s.stopped);
+    let a_row = s.rows.iter().find(|r| r.obs_date == d("2026-03-01")).unwrap();
+    assert!((a_row.value - 6.5).abs() < 1e-9,
+            "10*0.5 + 3.0*0.5 = 6.5, not the unscaled 10*0.5 + 3.0 = 8.0: {}",
+            a_row.value);
+    let b_row = s.rows.iter().find(|r| r.obs_date == d("2026-03-08")).unwrap();
+    assert!((b_row.value - 2.0).abs() < 1e-9, "4.0 * 0.5: {}", b_row.value);
+    let merger_seg = s.segments.iter().find(|g| g.instrument_id == b).unwrap();
+    assert_eq!(merger_seg.ratio, Some(0.5));
+    assert_eq!(merger_seg.offset, None);
+    assert_eq!(merger_seg.link_type.as_deref(), Some("merger"));
+    let roll_seg = s.segments.iter().find(|g| g.instrument_id == a).unwrap();
+    assert_eq!(roll_seg.offset, Some(3.0));
+    assert_eq!(roll_seg.ratio, None);
+    assert_eq!(roll_seg.link_type.as_deref(), Some("roll"));
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
 async fn a_roll_without_asserted_offset_derives_it_from_the_junction() {
     let pool = common::pool().await;
     let (ids, fid) = roll_scaffold(&pool, "RollDerive", "PX_LAST", &[
