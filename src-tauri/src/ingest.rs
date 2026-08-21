@@ -29,6 +29,37 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
             AND adj_split = false AND adj_follow_dpdf = false")
         .fetch_one(pool).await?;
 
+    // The instrument's believed currency, per validity period, loaded once --
+    // stamped on every numeric cell so the observation carries its unit.
+    let ids: Vec<i64> = {
+        let mut v: Vec<i64> = outcome.cells.iter().map(|c| c.instrument_id).collect();
+        v.sort_unstable(); v.dedup(); v
+    };
+    let ccy_periods: Vec<(i64, String, chrono::NaiveDate, chrono::NaiveDate)> =
+        if ids.is_empty() { Vec::new() } else {
+            sqlx::query_as(
+                "SELECT instrument_id, value, valid_from, valid_to
+                   FROM instrument_attr
+                  WHERE attr = 'currency' AND system_to = 'infinity'
+                    AND instrument_id = ANY($1)")
+                .bind(&ids).fetch_all(pool).await?
+        };
+    let currency_at = |iid: i64, d: chrono::NaiveDate| -> Option<&str> {
+        ccy_periods.iter()
+            .find(|(i, _, from, to)| *i == iid && *from <= d && *to > d)
+            .map(|(_, v, _, _)| v.as_str())
+    };
+
+    // A restatement is legitimate -- and invisible unless said. The run stays
+    // ok/partial on its own merits; this row is the audit trail's headline,
+    // not a failure. Shared by the value_superseded and currency_changed arms
+    // below.
+    let describe = |n: &Option<f64>, t: &Option<String>| match (n, t) {
+        (Some(v), _) => v.to_string(),
+        (_, Some(s)) => format!("{s:?}"),
+        _ => "NULL".into(),
+    };
+
     let mut tx = pool.begin().await?;
     let (mut inserted, mut superseded, mut unchanged) = (0u64, 0u64, 0u64);
 
@@ -43,13 +74,14 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
             CellValue::Num(n) => (Some(*n), None, Some(raw_basis)),
             CellValue::Text(t) => (None, Some(t.clone()), None),
         };
+        let ccy = num.is_some().then(|| currency_at(c.instrument_id, c.obs_date)).flatten();
 
         // FOR UPDATE: two concurrent runs racing the same
         // (instrument, field, date, ..., basis) key must serialize here,
         // not both decide "no current row" and collide on
         // observation_current.
-        let current: Option<(i64, Option<f64>, Option<String>)> = sqlx::query_as(
-            "SELECT id, value_num, value_text FROM observation
+        let current: Option<(i64, Option<f64>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, value_num, value_text, currency FROM observation
               WHERE instrument_id = $1 AND field_id = $2 AND obs_date = $3
                 AND granularity = 'eod' AND layer = 'raw'
                 AND basis_id IS NOT DISTINCT FROM $4
@@ -58,28 +90,30 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
             .bind(c.instrument_id).bind(c.field_id).bind(c.obs_date).bind(basis_id)
             .fetch_optional(&mut *tx).await?;
 
-        if let Some((id, old_num, old_text)) = current {
-            if old_num == num && old_text == text {
+        if let Some((id, old_num, old_text, old_ccy)) = current {
+            let same_value = old_num == num && old_text == text;
+            if same_value && old_ccy.as_deref() == ccy {
                 unchanged += 1;
                 continue;
             }
             sqlx::query("UPDATE observation SET system_to = now() WHERE id = $1")
                 .bind(id).execute(&mut *tx).await?;
-            // A restatement is legitimate -- and invisible unless said. The
-            // run stays ok/partial on its own merits; this row is the audit
-            // trail's headline, not a failure.
-            let describe = |n: &Option<f64>, t: &Option<String>| match (n, t) {
-                (Some(v), _) => v.to_string(),
-                (_, Some(s)) => format!("{s:?}"),
-                _ => "NULL".into(),
+            let (code, detail) = if same_value {
+                ("currency_changed", format!(
+                    "currency changed {} -> {} with the value unchanged -- \
+                     redenomination or master-data correction",
+                    old_ccy.as_deref().unwrap_or("(none)"),
+                    ccy.unwrap_or("(none)")))
+            } else {
+                ("value_superseded", format!("stored value {} superseded by {}",
+                    describe(&old_num, &old_text), describe(&num, &text)))
             };
             sqlx::query(
                 "INSERT INTO ingest_issue
                    (run_id, instrument_id, field_id, obs_date, severity, code, detail)
-                 VALUES ($1,$2,$3,$4,'warn','value_superseded',$5)")
+                 VALUES ($1,$2,$3,$4,'warn',$5,$6)")
                 .bind(run_id).bind(c.instrument_id).bind(c.field_id).bind(c.obs_date)
-                .bind(format!("stored value {} superseded by {}",
-                              describe(&old_num, &old_text), describe(&num, &text)))
+                .bind(code).bind(&detail)
                 .execute(&mut *tx).await?;
             superseded += 1;
         }
@@ -87,10 +121,10 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
         sqlx::query(
             "INSERT INTO observation
                (instrument_id, field_id, obs_date, granularity, layer, basis_id,
-                value_num, value_text, run_id)
-             VALUES ($1,$2,$3,'eod','raw',$4,$5,$6,$7)")
+                value_num, value_text, run_id, currency)
+             VALUES ($1,$2,$3,'eod','raw',$4,$5,$6,$7,$8)")
             .bind(c.instrument_id).bind(c.field_id).bind(c.obs_date)
-            .bind(basis_id).bind(num).bind(text).bind(run_id)
+            .bind(basis_id).bind(num).bind(text).bind(run_id).bind(ccy)
             .execute(&mut *tx).await?;
         inserted += 1;
     }

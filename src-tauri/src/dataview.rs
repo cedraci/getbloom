@@ -16,6 +16,9 @@ pub struct ObsRow {
     pub obs_date: NaiveDate,
     pub value_num: Option<f64>,
     pub value_text: Option<String>,
+    /// Verbatim from the instrument's currency attribute at ingest time
+    /// (e.g. "GBp" stays pence); None for text fields and unknown currency.
+    pub currency: Option<String>,
     /// The adjustment_basis note (e.g. "RAW - ..."); None for text fields.
     pub basis_note: Option<String>,
     pub layer: String,
@@ -30,7 +33,7 @@ pub async fn observations(pool: &PgPool, instrument_id: i64, field_id: i64,
                           include_superseded: bool, limit: i64)
     -> AppResult<Vec<ObsRow>> {
     Ok(sqlx::query_as::<_, ObsRow>(
-        "SELECT o.id, o.obs_date, o.value_num, o.value_text,
+        "SELECT o.id, o.obs_date, o.value_num, o.value_text, o.currency,
                 b.note AS basis_note, o.layer, o.run_id, o.system_from,
                 (o.system_to = 'infinity') AS current
            FROM observation o
@@ -106,13 +109,14 @@ pub async fn export_observations_csv(pool: &PgPool, instrument_id: i64,
                                      field_id: i64, path: &Path)
     -> AppResult<u64> {
     let rows = observations(pool, instrument_id, field_id, false, 5000).await?;
-    let mut out = String::from("obs_date,value,basis,run_id,recorded_at\n");
+    let mut out = String::from("obs_date,value,currency,basis,run_id,recorded_at\n");
     for r in &rows {
         let value = r.value_num.map(|n| n.to_string())
             .or_else(|| r.value_text.clone()).unwrap_or_default();
         out.push_str(&csv_line(&[
             r.obs_date.to_string(),
             value,
+            r.currency.clone().unwrap_or_default(),
             r.basis_note.clone().unwrap_or_default(),
             r.run_id.to_string(),
             r.system_from.to_rfc3339(),

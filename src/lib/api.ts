@@ -179,7 +179,8 @@ export interface RefreshCorpActionsSummary {
 }
 export interface ObsRow {
   id: number; obs_date: string; value_num: number | null;
-  value_text: string | null; basis_note: string | null; layer: string;
+  value_text: string | null; currency: string | null;
+  basis_note: string | null; layer: string;
   run_id: number; system_from: string; current: boolean;
 }
 export interface CorpActionFull {

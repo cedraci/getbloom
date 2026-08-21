@@ -120,8 +120,8 @@ async fn csv_exports_write_headers_rows_and_quote_correctly() {
     let text = std::fs::read_to_string(&obs_path).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "header + 2 rows: {text}");
-    assert_eq!(lines[0], "obs_date,value,basis,run_id,recorded_at");
-    assert!(lines[1].starts_with("2026-08-18,101.5,"), "newest first: {}", lines[1]);
+    assert_eq!(lines[0], "obs_date,value,currency,basis,run_id,recorded_at");
+    assert!(lines[1].starts_with("2026-08-18,101.5,,"), "newest first: {}", lines[1]);
 
     let ca_path = dir.path().join("ca.csv");
     let n = dataview::export_corp_actions_csv(&pool, iid, &ca_path).await.unwrap();
