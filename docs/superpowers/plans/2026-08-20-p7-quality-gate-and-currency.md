@@ -1601,7 +1601,7 @@ git commit -m "docs: P7 quality gate and currency dimension shipped"
 These three checks cannot be automated in CI and were NOT performed as part of this plan's execution; they require the GUI plus a live Terminal login. Record results here when run — do not tick from memory.
 
 - [ ] A real run against a view with a deliberately low `qc_outlier_pct` (e.g. 0.1%) produces `severity='quality'` ingest issues, the run lands as `partial`, and the amber quality line shows on the Run screen.
-- [ ] The Friday verify run appears in run history as `kind=backfill` / `trigger=scheduled`, and a genuinely restated close inside the 5-weekday window fires a `value_superseded` warn issue.
+- [x] ~~The Friday verify run appears in run history as `kind=backfill` / `trigger=scheduled`~~ — verified live 2026-08-21 (run 12 on the production db fired at the scheduled window on `verify_dow=5`, stamped `last_verified_on`). P8 then renamed the kind: verify runs now record `kind=verify` / `trigger=scheduled` (migration 0009 retags history). Still pending: a genuinely restated close inside the 5-weekday window firing a `value_superseded` warn issue (nothing was restated on 2026-08-21: `superseded=0`).
 - [ ] An LSE instrument (e.g. `VOD LN Equity`) shows `GBp` verbatim in the Data screen's Ccy column and in the CSV export — never normalized to GBP.
 
 **Note:** the Friday verify run re-fetches and re-judges its trailing 5-weekday window, so findings that week's daily runs already reported are re-attached to the verify run and it lands `partial` again for the same data — by design, not a dedup bug (see the comment on `run_quality_gate` in `quality.rs`).

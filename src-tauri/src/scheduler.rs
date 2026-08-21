@@ -41,14 +41,14 @@ pub async fn ensure_draw(pool: &PgPool, schedule_id: i64, today: NaiveDate)
     Ok(t)
 }
 
-// A scheduled verify backfill IS that day's scheduled run: without widening
-// this past 'eod', a completed verify would not stop the EOD run from firing
-// an hour later and double-charging the day.
+// A scheduled verify IS that day's scheduled run: without widening this past
+// 'eod', a completed verify would not stop the EOD run from firing an hour
+// later and double-charging the day.
 pub async fn already_ran_today(pool: &PgPool, view_id: i64, today: NaiveDate)
     -> AppResult<bool> {
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM run
-         WHERE view_id = $1 AND kind IN ('eod','backfill') AND trigger_kind = 'scheduled'
+         WHERE view_id = $1 AND kind IN ('eod','verify') AND trigger_kind = 'scheduled'
            AND status <> 'failed' AND started_at::date = $2")
         .bind(view_id).bind(today).fetch_one(pool).await?;
     Ok(n > 0)
@@ -66,7 +66,7 @@ pub async fn failed_attempts_today(pool: &PgPool, view_id: i64, today: NaiveDate
     -> AppResult<i64> {
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM run
-         WHERE view_id = $1 AND kind IN ('eod','backfill') AND trigger_kind = 'scheduled'
+         WHERE view_id = $1 AND kind IN ('eod','verify') AND trigger_kind = 'scheduled'
            AND status = 'failed' AND started_at::date = $2")
         .bind(view_id).bind(today).fetch_one(pool).await?;
     Ok(n)
