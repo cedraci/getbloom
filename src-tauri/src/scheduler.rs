@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use crate::orchestrator::{self, PipelineConfig, RunOutcome};
+use crate::orchestrator::{self, GapBackfillOutcome, PipelineConfig, RunOutcome};
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Weekday};
 use rand::Rng;
 use sqlx::PgPool;
@@ -170,6 +170,23 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
             continue;
         }
 
+        // Downtime recovery comes first: fill the weekdays this view missed
+        // while the machine was off, BEFORE the day's own run. It is
+        // budget-gated and capped at one attempt per day inside
+        // `run_gap_backfill`, and it is a backfill, so it never stands in for
+        // the EOD run that follows. Per-schedule isolation as everywhere else
+        // here: a recovery failure is reported and the day proceeds.
+        let mut note = String::new();
+        match orchestrator::run_gap_backfill(pool, cfg, view_id, today).await {
+            Ok(GapBackfillOutcome::Ran { days, .. }) =>
+                note = format!("gap backfill: {days} days; "),
+            Ok(GapBackfillOutcome::NeedsConfirmation { estimated, .. }) =>
+                note = format!("gaps need confirmation ({estimated} est. hits); "),
+            // Nothing to say: no gaps, or today's one attempt is already spent.
+            Ok(GapBackfillOutcome::Nothing | GapBackfillOutcome::AlreadyAttemptedToday) => {}
+            Err(e) => note = format!("gap backfill failed: {e}; "),
+        }
+
         // Amendment A1 stands: the run targets the previous trading day.
         // On the schedule's verify day, the same slot instead re-reads the
         // trailing five weekdays (kind backfill, trigger scheduled) so an
@@ -178,19 +195,20 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
         let obs_date = previous_weekday(today);
         let want_verify = verify_dow == Some(iso_dow(today))
             && last_verified_on.is_none_or(|d| d < today);
-        let mut note = String::new();
         let result = if want_verify {
             match orchestrator::run_verify(pool, cfg, view_id,
                                            verify_window_start(obs_date), obs_date).await {
                 Ok(RunOutcome::NeedsConfirmation { estimated, .. }) => {
-                    note = format!("verify skipped ({estimated} est. hits needs \
-                                    confirmation); ");
+                    // Appended, never assigned: the gap-backfill outcome above
+                    // is part of the same day's report.
+                    note += &format!("verify skipped ({estimated} est. hits needs \
+                                      confirmation); ");
                     orchestrator::run_eod(pool, cfg, view_id, "scheduled",
                                           obs_date, false).await
                 }
                 other => {
                     if matches!(other, Ok(RunOutcome::Completed { .. })) {
-                        note = "verify ".into();
+                        note += "verify ";
                         let _ = sqlx::query(
                             "UPDATE schedule SET last_verified_on = $2 WHERE id = $1")
                             .bind(sid).bind(today).execute(pool).await;
@@ -259,6 +277,14 @@ pub fn group_ranges(dates: &[NaiveDate], cap_days: i64) -> Vec<(NaiveDate, Naive
     }
     out
 }
+
+/// How far back the scheduler's automatic downtime recovery looks, in
+/// CALENDAR days (`detect_gaps` counts them that way): ten, so a machine off
+/// for a long weekend or a week's holiday recovers by itself, while a view
+/// left off for a month does not silently turn into a large unattended bill.
+/// The manual gap report keeps its own 30 -- a human reading the list is not
+/// the same as a scheduler acting on it.
+pub const GAP_LOOKBACK_DAYS: i64 = 10;
 
 /// A stretch of weekdays for which ONE instrument in a view has no
 /// observation. Per-instrument, deliberately: see `detect_gaps`.

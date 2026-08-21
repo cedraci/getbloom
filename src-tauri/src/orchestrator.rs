@@ -44,6 +44,19 @@ pub enum RunOutcome {
     NeedsConfirmation { estimated: i64, today_total: i64 },
 }
 
+/// What the scheduler's downtime recovery did for one view today.
+#[derive(Debug, Serialize)]
+pub enum GapBackfillOutcome {
+    /// No weekday is missing inside the lookback window.
+    Nothing,
+    /// `runs` backfill runs covering `days` missed weekdays in total.
+    Ran { runs: u64, days: u64 },
+    /// The batch would push the day past `BudgetLevel::Ok`, so NOTHING ran.
+    NeedsConfirmation { estimated: i64, today_total: i64 },
+    /// A scheduled gap backfill was already attempted today, whatever it did.
+    AlreadyAttemptedToday,
+}
+
 /// Where a run's raw sidecar response is archived (spec A2 §4.4). Same
 /// convention the workbooks used, so the audit trail keeps its shape.
 pub fn payload_path(data_dir: &Path, run_id: i64, view_name: &str, date: NaiveDate) -> PathBuf {
@@ -314,25 +327,41 @@ pub async fn run_eod(
 ) -> AppResult<RunOutcome> {
     let mut result = run_eod_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, trigger,
                                   obs_date, confirmed).await;
-    auto_reresolve_after(pool, cfg, &result).await;
-    corp_actions_after(pool, cfg, view_id, &mut result).await;
-    lifecycle_after(pool, cfg, &result).await;
+    hooks_after(pool, cfg, view_id, &mut result).await;
     result
+}
+
+/// The live tail every wrapper shares, run only for a run that completed.
+/// The `_with` variants never call it, so every mock-fetcher test is untouched.
+async fn hooks_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
+                     result: &mut AppResult<RunOutcome>) {
+    if let Ok(RunOutcome::Completed { run_id, corp_actions, .. }) = result {
+        *corp_actions = post_run_hooks(pool, cfg, view_id, *run_id).await;
+    }
+}
+
+/// Re-resolve, corporate actions, lifecycle -- in that order, all advisory.
+/// Returns the corp-action summary to fold into the outcome (None when the
+/// refresh errored). Taking a plain `run_id` rather than the outcome is what
+/// lets the gap backfill, whose result is a batch and not one `RunOutcome`,
+/// run exactly the same tail.
+async fn post_run_hooks(pool: &PgPool, cfg: &PipelineConfig, view_id: i64, run_id: i64)
+    -> Option<crate::corp_actions::ViewRefreshSummary> {
+    auto_reresolve_after(pool, cfg, run_id).await;
+    let ca = corp_actions_after(pool, cfg, view_id, run_id).await;
+    lifecycle_after(pool, cfg, run_id).await;
+    ca
 }
 
 /// Live wrappers only: after a completed run, try to re-point instruments
 /// whose security came back invalid_security (a rename discovered the hard
 /// way). Advisory -- a recovery failure must not fail a run that already
-/// ingested its data. The `_with` variants never call this, so every
-/// mock-fetcher test is untouched.
-async fn auto_reresolve_after(pool: &PgPool, cfg: &PipelineConfig,
-                              result: &AppResult<RunOutcome>) {
-    if let Ok(RunOutcome::Completed { run_id, .. }) = result {
-        let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
-        if let Err(e) = crate::resolution::engine::auto_reresolve_invalid(
-            pool, &mf, *run_id, chrono::Local::now().date_naive()).await {
-            eprintln!("auto re-resolve after run {run_id} failed: {e}");
-        }
+/// ingested its data.
+async fn auto_reresolve_after(pool: &PgPool, cfg: &PipelineConfig, run_id: i64) {
+    let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+    if let Err(e) = crate::resolution::engine::auto_reresolve_invalid(
+        pool, &mf, run_id, chrono::Local::now().date_naive()).await {
+        eprintln!("auto re-resolve after run {run_id} failed: {e}");
     }
 }
 
@@ -341,14 +370,15 @@ async fn auto_reresolve_after(pool: &PgPool, cfg: &PipelineConfig,
 /// prices they explain. skip_na = true -- instruments Bloomberg declared
 /// not-applicable are not re-charged; the manual button is the retry. A
 /// failure here is reported on stderr and the run stays Completed.
-async fn corp_actions_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
-                            result: &mut AppResult<RunOutcome>) {
-    if let Ok(RunOutcome::Completed { run_id, corp_actions, .. }) = result {
-        let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
-        match crate::corp_actions::refresh_view(
-            pool, &mf, view_id, chrono::Local::now().date_naive(), true).await {
-            Ok(sum) => *corp_actions = Some(sum),
-            Err(e) => eprintln!("corp-actions refresh after run {run_id} failed: {e}"),
+async fn corp_actions_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64, run_id: i64)
+    -> Option<crate::corp_actions::ViewRefreshSummary> {
+    let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+    match crate::corp_actions::refresh_view(
+        pool, &mf, view_id, chrono::Local::now().date_naive(), true).await {
+        Ok(sum) => Some(sum),
+        Err(e) => {
+            eprintln!("corp-actions refresh after run {run_id} failed: {e}");
+            None
         }
     }
 }
@@ -358,19 +388,16 @@ async fn corp_actions_after(pool: &PgPool, cfg: &PipelineConfig, view_id: i64,
 /// On a healthy book `stale_candidates` is empty and this costs nothing.
 /// Advisory like its two siblings: a lifecycle failure is reported on
 /// stderr and durable issues, never by failing a run that already ingested.
-async fn lifecycle_after(pool: &PgPool, cfg: &PipelineConfig,
-                         result: &AppResult<RunOutcome>) {
-    if let Ok(RunOutcome::Completed { run_id, .. }) = result {
-        let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
-        match crate::lifecycle::run_check(
-            pool, &mf, chrono::Local::now().date_naive()).await {
-            Ok(s) if s.checked > 0 => eprintln!(
-                "lifecycle after run {run_id}: {} checked, {} dead, \
-                 {} links proposed, {} auto-confirmed, {} issues",
-                s.checked, s.dead, s.links_proposed, s.links_confirmed, s.issues),
-            Ok(_) => {}
-            Err(e) => eprintln!("lifecycle check after run {run_id} failed: {e}"),
-        }
+async fn lifecycle_after(pool: &PgPool, cfg: &PipelineConfig, run_id: i64) {
+    let mf = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+    match crate::lifecycle::run_check(
+        pool, &mf, chrono::Local::now().date_naive()).await {
+        Ok(s) if s.checked > 0 => eprintln!(
+            "lifecycle after run {run_id}: {} checked, {} dead, \
+             {} links proposed, {} auto-confirmed, {} issues",
+            s.checked, s.dead, s.links_proposed, s.links_confirmed, s.issues),
+        Ok(_) => {}
+        Err(e) => eprintln!("lifecycle check after run {run_id} failed: {e}"),
     }
 }
 
@@ -427,9 +454,7 @@ pub async fn run_backfill(
 ) -> AppResult<RunOutcome> {
     let mut result = run_backfill_with(pool, cfg, &BlpapiFetcher { cfg }, view_id, start, end,
                                        instrument_ids, confirmed).await;
-    auto_reresolve_after(pool, cfg, &result).await;
-    corp_actions_after(pool, cfg, view_id, &mut result).await;
-    lifecycle_after(pool, cfg, &result).await;
+    hooks_after(pool, cfg, view_id, &mut result).await;
     result
 }
 
@@ -452,11 +477,8 @@ pub async fn run_backfill_with<F: DataFetcher>(
             "backfill range exceeds {BACKFILL_CAP_DAYS}-day cap"
         )));
     }
-    let loaded = load_view(pool, view_id, instrument_ids).await?;
-    // Prices per weekday + ONE corp-action leg at the end (Bloomberg returns
-    // the full history on every call; a backfill needs no per-day refresh).
-    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
-        + corp_actions_estimate(pool, view_id).await?;
+    let (loaded, estimated) =
+        plan_backfill(pool, view_id, instrument_ids, start, end).await?;
     let today_total = budget::today_hits(pool).await?;
     // Spec §5.3: every backfill shows its cost and requires explicit confirmation.
     if !confirmed {
@@ -464,6 +486,133 @@ pub async fn run_backfill_with<F: DataFetcher>(
     }
     execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "manual",
             start, end, estimated).await
+}
+
+/// Load a view -- optionally narrowed to one instrument -- and price the
+/// backfill leg over `start..=end`. Shared by the manual backfill and the
+/// scheduler's gap recovery so the two cannot drift apart on what a backfill
+/// costs.
+///
+/// The corp-action leg is view-wide, so pricing several gaps this way charges
+/// it once per gap. That is the standing over-count-is-safe estimate policy:
+/// the gate may refuse a batch it could have afforded, never the reverse, and
+/// the wire seam still bills exactly what it sends.
+async fn plan_backfill(pool: &PgPool, view_id: i64, only: Option<&[i64]>,
+                       start: NaiveDate, end: NaiveDate) -> AppResult<(Loaded, i64)> {
+    let loaded = load_view(pool, view_id, only).await?;
+    // Prices per weekday + ONE corp-action leg at the end (Bloomberg returns
+    // the full history on every call; a backfill needs no per-day refresh).
+    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
+        + corp_actions_estimate(pool, view_id).await?;
+    Ok((loaded, estimated))
+}
+
+/// Fill the weekdays this view missed while the machine was off (P10 task 4).
+/// The scheduler calls this before the day's own run.
+///
+/// Three rules make it safe to run unattended:
+/// * **Never self-confirming.** The whole batch is priced and gated ONCE; any
+///   level above `BudgetLevel::Ok` runs nothing and reports. A scheduler
+///   cannot click a confirm box, and there is no hard cap that would let it
+///   decide on the user's behalf.
+/// * **One attempt per day, whatever its status.** A gap that cannot be filled
+///   must not be retried on every heartbeat for the rest of the day.
+/// * **Never a substitute for the day's EOD.** These runs are backfills;
+///   `scheduler::already_ran_today` counts eod/verify only, so the normal run
+///   still fires afterwards.
+pub async fn run_gap_backfill_with<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    view_id: i64,
+    today: NaiveDate,
+) -> AppResult<GapBackfillOutcome> {
+    Ok(gap_backfill(pool, cfg, fetcher, view_id, today).await?.0)
+}
+
+/// The live twin: a real Bloomberg fetcher plus the post-run tail the `_with`
+/// variant skips. Those hooks are view-wide, not per-run, so they run ONCE for
+/// the batch -- against its last run -- rather than re-charging corporate
+/// actions and the lifecycle probe once per gap.
+pub async fn run_gap_backfill(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    view_id: i64,
+    today: NaiveDate,
+) -> AppResult<GapBackfillOutcome> {
+    let (outcome, run_ids) =
+        gap_backfill(pool, cfg, &BlpapiFetcher { cfg }, view_id, today).await?;
+    if let Some(&run_id) = run_ids.last() {
+        post_run_hooks(pool, cfg, view_id, run_id).await;
+    }
+    Ok(outcome)
+}
+
+/// Shared body of the two entry points above; also yields the ids of the runs
+/// it completed, which is what the live wrapper needs to run its tail.
+async fn gap_backfill<F: DataFetcher>(
+    pool: &PgPool,
+    cfg: &PipelineConfig,
+    fetcher: &F,
+    view_id: i64,
+    today: NaiveDate,
+) -> AppResult<(GapBackfillOutcome, Vec<i64>)> {
+    // Once per day, counting ANY status: a run that failed still used its
+    // attempt, or a permanently unfillable gap would retry in a loop. Checked
+    // before detection so the short-circuit costs one query.
+    let attempted: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM run
+          WHERE view_id = $1 AND kind = 'backfill' AND trigger_kind = 'scheduled'
+            AND started_at::date = CURRENT_DATE")
+        .bind(view_id).fetch_one(pool).await?;
+    if attempted > 0 {
+        return Ok((GapBackfillOutcome::AlreadyAttemptedToday, Vec::new()));
+    }
+
+    // `detect_gaps` scans [arg - lookback, arg - 1 day], so handing it the day
+    // today's EOD targets makes the newest weekday it can report
+    // `previous_weekday(that day)` -- strictly older than what the day's own
+    // run is about to fetch. Without that horizon, yesterday looks like a gap
+    // every single morning and every morning pays to fill it twice.
+    let eod_target = crate::scheduler::previous_weekday(today);
+    let gaps = crate::scheduler::detect_gaps(
+        pool, view_id, crate::scheduler::GAP_LOOKBACK_DAYS, eod_target).await?;
+    if gaps.is_empty() {
+        return Ok((GapBackfillOutcome::Nothing, Vec::new()));
+    }
+
+    // Price the whole batch before running any of it: the user is owed one
+    // decision about the day's cost, not one per gap. `group_ranges` already
+    // capped every range at BACKFILL_CAP_DAYS, so no range needs re-checking.
+    let mut planned = Vec::with_capacity(gaps.len());
+    let mut estimated = 0i64;
+    for g in &gaps {
+        let (loaded, est) =
+            plan_backfill(pool, view_id, Some(&[g.instrument_id]), g.start, g.end).await?;
+        estimated += est;
+        planned.push((g, loaded, est));
+    }
+
+    let today_total = budget::today_hits(pool).await?;
+    if budget::check_level(estimated, today_total, cfg.soft_limit) != BudgetLevel::Ok {
+        return Ok((GapBackfillOutcome::NeedsConfirmation { estimated, today_total },
+                   Vec::new()));
+    }
+
+    // One run per gap range, scoped to the one instrument that is missing it.
+    // An error aborts the batch and propagates: the failed run row is already
+    // written, so today's attempt is spent and the caller reports it.
+    let mut run_ids = Vec::new();
+    let mut days = 0u64;
+    for (g, loaded, est) in planned {
+        if let RunOutcome::Completed { run_id, .. } =
+            execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "scheduled",
+                    g.start, g.end, est).await? {
+            run_ids.push(run_id);
+        }
+        days += budget::weekdays_between(g.start, g.end) as u64;
+    }
+    Ok((GapBackfillOutcome::Ran { runs: run_ids.len() as u64, days }, run_ids))
 }
 
 /// P7: the weekly verification re-fetch -- a SCHEDULED multi-day backfill
@@ -480,9 +629,7 @@ pub async fn run_verify(
 ) -> AppResult<RunOutcome> {
     let mut result = run_verify_with(pool, cfg, &BlpapiFetcher { cfg }, view_id,
                                      start, end).await;
-    auto_reresolve_after(pool, cfg, &result).await;
-    corp_actions_after(pool, cfg, view_id, &mut result).await;
-    lifecycle_after(pool, cfg, &result).await;
+    hooks_after(pool, cfg, view_id, &mut result).await;
     result
 }
 
