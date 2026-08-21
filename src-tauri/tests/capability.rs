@@ -5,6 +5,10 @@ mod common;
 use common::uniq;
 use getbloomdata_lib::registry;
 use chrono::NaiveDate;
+use getbloomdata_lib::adjust::{self, AdjustMode};
+use getbloomdata_lib::fetch::{CellValue, FetchOutcome, ObsCell};
+use getbloomdata_lib::ingest;
+use getbloomdata_lib::instrument::store::{self, NewAlias};
 
 fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
 
@@ -128,4 +132,70 @@ async fn refresh_view_never_requests_an_incapable_member() {
     assert_eq!(summary.instruments, 1);
     assert_eq!(summary.skipped, 0,
                "excluded by capability, not counted as a no-security skip");
+}
+
+// ---------------------------------------------------------------------------
+// adjustment_style = 'none' short-circuits the factor engine
+// ---------------------------------------------------------------------------
+
+/// Like tests/adjust.rs::scaffold, but the class is `adjustment_style='none'`
+/// and there is a single raw observation.
+async fn none_style_scaffold(pool: &sqlx::PgPool, stem: &str) -> (i64, i64) {
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, adjustment_style) VALUES ($1, 'none') RETURNING id")
+        .bind(uniq(stem)).fetch_one(pool).await.unwrap();
+    let inst = store::create(pool).await.unwrap();
+    let iid = inst.instrument_id;
+    let sec = format!("{} US Equity", uniq(stem));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, iid, &NewAlias {
+        id_type: "bdp_security".into(), value: sec.clone(),
+        exch_code: Some("US".into()), valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(iid).bind(class).bind(&sec).execute(pool).await.unwrap();
+    let fid: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind)
+         VALUES ($1,'PX_LAST','Last price','numeric') RETURNING id")
+        .bind(class).fetch_one(pool).await.unwrap();
+    let vid: i64 = sqlx::query_scalar(
+        "INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("noneadjview")).fetch_one(pool).await.unwrap();
+    let rid: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'eod','manual','ok') RETURNING id")
+        .bind(vid).fetch_one(pool).await.unwrap();
+
+    let cells = vec![
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-14"), value: CellValue::Num(100.0) },
+    ];
+    ingest::ingest_outcome(pool, rid, &FetchOutcome { cells, problems: vec![] })
+        .await.unwrap();
+    (iid, fid)
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_none_style_class_never_adjusts() {
+    let pool = common::pool().await;
+    let (iid, fid) = none_style_scaffold(&pool, "CapNone").await;
+    // A flag-3 factor that WOULD halve raw history if the engine ran.
+    sqlx::query(
+        "INSERT INTO corp_action
+           (instrument_id, source_field, natural_key, event_date, amount,
+            operator, flag, payload)
+         VALUES ($1,'EQY_DVD_ADJUST_FACT',$2,$3,$4,$5,$6,'{}'::jsonb)")
+        .bind(iid).bind("2026-08-17|1|3").bind(d("2026-08-17"))
+        .bind(0.5).bind(1i16).bind(3i16)
+        .execute(&pool).await.unwrap();
+
+    let s = adjust::adjusted_series(&pool, iid, fid, AdjustMode::All, 100).await.unwrap();
+    assert_eq!(s.rows.len(), 1);
+    assert_eq!(s.rows[0].raw, s.rows[0].adjusted, "'none' style must bypass the factor chain");
+    assert_eq!(s.factors_used, 0);
+    assert_eq!(s.unusable_factors, 0);
 }

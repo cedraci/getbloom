@@ -120,6 +120,20 @@ pub async fn adjusted_series(pool: &sqlx::PgPool, instrument_id: i64,
         .bind(instrument_id).bind(field_id).bind(limit.clamp(1, 5000))
         .fetch_all(pool).await?;
 
+    // A class can opt out of adjustment entirely (yields, indices, futures):
+    // the factor chain is dividend/split arithmetic and is meaningless there.
+    let style: Option<String> = sqlx::query_scalar(
+        "SELECT ac.adjustment_style FROM book_entry be
+         JOIN asset_class ac ON ac.id = be.asset_class_id
+         WHERE be.instrument_id = $1")
+        .bind(instrument_id).fetch_optional(pool).await?;
+    if style.as_deref() == Some("none") {
+        let rows = obs.into_iter()
+            .map(|(obs_date, v)| AdjRow { obs_date, raw: v, adjusted: v })
+            .collect();
+        return Ok(AdjSeries { rows, factors_used: 0, unusable_factors: 0 });
+    }
+
     let factor_rows: Vec<(Option<NaiveDate>, Option<f64>, Option<i16>, Option<i16>)> =
         sqlx::query_as(
             "SELECT event_date, amount, operator, flag FROM corp_action
