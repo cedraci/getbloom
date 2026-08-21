@@ -124,3 +124,63 @@ async fn a_currency_change_supersedes_and_raises_currency_changed() {
         .bind(iid).bind(fid).fetch_one(&pool).await.unwrap();
     assert_eq!(current.as_deref(), Some("USD"));
 }
+
+use getbloomdata_lib::adjust::AdjustMode;
+use getbloomdata_lib::stitch;
+
+/// Two instruments with one observation each and a confirmed merger link.
+async fn linked_pair(pool: &sqlx::PgPool, stem: &str,
+                     pred_ccy: &str, succ_ccy: &str) -> (i64, i64, i64) {
+    let (pred, fid, rid) = ccy_scaffold(pool, stem, pred_ccy).await;
+    let succ: i64 = sqlx::query_scalar(
+        "INSERT INTO instrument DEFAULT VALUES RETURNING instrument_id")
+        .fetch_one(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO instrument_attr (instrument_id, attr, value, valid_from, source)
+         VALUES ($1,'currency',$2,'2000-01-01','user')")
+        .bind(succ).bind(succ_ccy).execute(pool).await.unwrap();
+    // predecessor priced before the junction, successor at/after it
+    let basis: i16 = sqlx::query_scalar(
+        "SELECT id FROM adjustment_basis WHERE adj_normal = false")
+        .fetch_one(pool).await.unwrap();
+    for (iid, date, px) in [(pred, "2026-06-30", 50.0), (succ, "2026-07-01", 100.0)] {
+        sqlx::query(
+            "INSERT INTO observation (instrument_id, field_id, obs_date, layer,
+                                      basis_id, value_num, run_id)
+             VALUES ($1,$2,$3::date,'raw',$4,$5,$6)")
+            .bind(iid).bind(fid).bind(date).bind(basis).bind(px).bind(rid)
+            .execute(pool).await.unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO instrument_link (predecessor_id, successor_id, link_type,
+                                      effective_date, evidence, exchange_ratio,
+                                      confirmed_by, confirmed_at)
+         VALUES ($1,$2,'merger','2026-07-01','{}'::jsonb,2.0,'test',now())")
+        .bind(pred).bind(succ).execute(pool).await.unwrap();
+    (pred, succ, fid)
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn stitching_refuses_a_cross_currency_junction() {
+    let pool = common::pool().await;
+    let (_pred, succ, fid) = linked_pair(&pool, "XCCY", "EUR", "USD").await;
+    let s = stitch::stitched_series(&pool, succ, fid, AdjustMode::Raw, 100)
+        .await.unwrap();
+    assert!(s.stopped.as_deref().unwrap_or("").contains("cross-currency"),
+            "stopped: {:?}", s.stopped);
+    assert!(s.rows.iter().all(|r| r.source_instrument_id == succ),
+            "no predecessor rows may be spliced in a foreign currency");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn stitching_still_works_when_currencies_match() {
+    let pool = common::pool().await;
+    let (pred, succ, fid) = linked_pair(&pool, "SCCY", "USD", "USD").await;
+    let s = stitch::stitched_series(&pool, succ, fid, AdjustMode::Raw, 100)
+        .await.unwrap();
+    assert!(s.stopped.is_none(), "stopped: {:?}", s.stopped);
+    assert!(s.rows.iter().any(|r| r.source_instrument_id == pred),
+            "the predecessor segment must be spliced");
+}
