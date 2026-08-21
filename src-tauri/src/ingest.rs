@@ -47,6 +47,13 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
     let currency_at = |iid: i64, d: chrono::NaiveDate| -> Option<&str> {
         ccy_periods.iter()
             .find(|(i, _, from, to)| *i == iid && *from <= d && *to > d)
+            // An instrument resolved without a listing date starts its belief
+            // at the add date; the first EOD run observes YESTERDAY. The
+            // earliest belief extends backward -- but never forward past a
+            // death-capped valid_to.
+            .or_else(|| ccy_periods.iter()
+                .filter(|(i, _, from, _)| *i == iid && d < *from)
+                .min_by_key(|(_, _, from, _)| *from))
             .map(|(_, v, _, _)| v.as_str())
     };
 

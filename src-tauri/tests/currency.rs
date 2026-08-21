@@ -83,6 +83,35 @@ fn one_cell(iid: i64, fid: i64, v: f64) -> FetchOutcome {
     }
 }
 
+/// A freshly resolved instrument's currency belief starts at its add date
+/// when Bloomberg supplies no listing date -- but the first EOD run observes
+/// YESTERDAY, and a backfill reaches further back still. The earliest belief
+/// extends backward: knowing it trades in USD today is the best statement we
+/// have about last week too.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn ingest_extends_the_earliest_currency_belief_backward() {
+    let pool = common::pool().await;
+    let (iid, fid, rid) = ccy_scaffold(&pool, "CBK", "USD").await;
+    // Rewrite the belief so it starts AFTER the observation date, the way
+    // resolution records it for an instrument added today.
+    sqlx::query(
+        "UPDATE instrument_attr SET system_to = now()
+          WHERE instrument_id = $1 AND attr = 'currency' AND system_to = 'infinity'")
+        .bind(iid).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO instrument_attr (instrument_id, attr, value, valid_from, source)
+         VALUES ($1,'currency','USD','2026-08-21','user')")
+        .bind(iid).execute(&pool).await.unwrap();
+    ingest::ingest_outcome(&pool, rid, &one_cell(iid, fid, 311.3)).await.unwrap();
+    let ccy: Option<String> = sqlx::query_scalar(
+        "SELECT currency FROM observation
+          WHERE instrument_id = $1 AND field_id = $2 AND system_to = 'infinity'")
+        .bind(iid).bind(fid).fetch_one(&pool).await.unwrap();
+    assert_eq!(ccy.as_deref(), Some("USD"),
+               "an observation before the earliest belief inherits it");
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn ingest_stamps_the_instruments_currency_verbatim() {
