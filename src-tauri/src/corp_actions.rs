@@ -309,12 +309,48 @@ pub struct ViewRefreshSummary {
     pub unparsed: u64,
 }
 
-/// Refresh corporate actions for every active, resolved member of a view --
-/// batched at `fetch::MAX_SECURITIES_PER_REQUEST` securities per Bloomberg
-/// call (cost: 2 hits per security, charged at the seam per request), then
-/// diffed per instrument. Members without a security valid today are skipped
-/// and reported (`corp_actions_skipped`), mirroring the run pipeline's
-/// `no_security_today`.
+/// Same shape as `views::view_instruments`, restricted to members whose
+/// asset class is `corp_actions_capable` (P9). A separate query rather than
+/// a filter on `views::view_instruments`'s result: that function also backs
+/// the price leg, which has no capability gate -- narrowing it here would
+/// silently narrow price fetching too.
+async fn capable_view_instruments(pool: &PgPool, view_id: i64)
+    -> AppResult<Vec<crate::book::BookEntry>>
+{
+    let today = chrono::Local::now().date_naive();
+    Ok(sqlx::query_as::<_, crate::book::BookEntry>(
+        "SELECT b.instrument_id, b.asset_class_id, b.label, b.active, b.note,
+                sec.value AS security
+           FROM view_instrument vi
+           JOIN book_entry b ON b.instrument_id = vi.instrument_id
+           JOIN asset_class ac ON ac.id = b.asset_class_id
+           LEFT JOIN LATERAL (
+             SELECT value FROM instrument_alias
+              WHERE instrument_id = b.instrument_id AND id_type = 'bdp_security'
+                AND valid_from <= $2 AND valid_to > $2
+                AND system_to = 'infinity'
+              ORDER BY valid_from DESC LIMIT 1
+           ) sec ON true
+          WHERE vi.view_id = $1 AND b.active
+            AND ac.corp_actions_capable
+            AND NOT EXISTS (
+              SELECT 1 FROM resolution_review r
+                JOIN resolution_decision d ON d.id = r.decision_id
+               WHERE r.status = 'pending' AND d.chosen_instrument_id = vi.instrument_id)
+          ORDER BY b.label")
+        .bind(view_id).bind(today)
+        .fetch_all(pool).await?)
+}
+
+/// Refresh corporate actions for every active, resolved, corp-actions-capable
+/// member of a view -- batched at `fetch::MAX_SECURITIES_PER_REQUEST`
+/// securities per Bloomberg call (cost: 2 hits per security, charged at the
+/// seam per request), then diffed per instrument. Members without a security
+/// valid today are skipped and reported (`corp_actions_skipped`), mirroring
+/// the run pipeline's `no_security_today`; members in an incapable asset
+/// class (P9) are excluded from the batch entirely and never counted at all
+/// -- not even as skipped, which keeps that field meaning "no security
+/// today".
 ///
 /// `skip_na`: the automatic per-run path passes true so instruments Bloomberg
 /// already declared not-applicable are not re-charged every day; a manual
@@ -323,7 +359,7 @@ pub async fn refresh_view<F: crate::master_fetch::MasterFetcher>(
     pool: &PgPool, fetcher: &F, view_id: i64, as_of: NaiveDate, skip_na: bool)
     -> AppResult<ViewRefreshSummary>
 {
-    let members = crate::views::view_instruments(pool, view_id).await?;
+    let members = capable_view_instruments(pool, view_id).await?;
     let na_flagged: std::collections::HashSet<i64> = if skip_na {
         sqlx::query_scalar::<_, i64>("SELECT instrument_id FROM corp_actions_na")
             .fetch_all(pool).await?.into_iter().collect()

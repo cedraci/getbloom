@@ -4,6 +4,9 @@ mod common;
 
 use common::uniq;
 use getbloomdata_lib::registry;
+use chrono::NaiveDate;
+
+fn d(s: &str) -> NaiveDate { s.parse().unwrap() }
 
 #[tokio::test]
 #[ignore = "requires postgres"]
@@ -49,4 +52,80 @@ async fn capabilities_can_be_updated_and_read_back() {
     assert!(!got.ma_capable);
     assert_eq!(got.adjustment_style, "none");
     assert_eq!(got.qc_stale_days_default, Some(8));
+}
+
+// ---------------------------------------------------------------------------
+// corp_actions_capable gates both the pre-run estimate and the refresh seam
+// ---------------------------------------------------------------------------
+
+/// One instrument in a corp-actions-capable class, one in an incapable class,
+/// same view. Returns (view_id, capable_iid, incapable_iid).
+async fn two_class_view(pool: &sqlx::PgPool, stem: &str) -> (i64, i64, i64) {
+    let cap: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name) VALUES ($1) RETURNING id")
+        .bind(uniq(&format!("{stem}Eq"))).fetch_one(pool).await.unwrap();
+    let nocap: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, corp_actions_capable) VALUES ($1, FALSE) RETURNING id")
+        .bind(uniq(&format!("{stem}Bond"))).fetch_one(pool).await.unwrap();
+    let mut ids = Vec::new();
+    for class in [cap, nocap] {
+        let inst = getbloomdata_lib::instrument::store::create(pool).await.unwrap();
+        sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label) VALUES ($1,$2,$3)")
+            .bind(inst.instrument_id).bind(class).bind(uniq(stem))
+            .execute(pool).await.unwrap();
+        ids.push(inst.instrument_id);
+    }
+    let view: i64 = sqlx::query_scalar(
+        "INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq(&format!("{stem}V"))).fetch_one(pool).await.unwrap();
+    for iid in &ids {
+        sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+            .bind(view).bind(iid).execute(pool).await.unwrap();
+    }
+    (view, ids[0], ids[1])
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn corp_action_estimate_skips_incapable_classes() {
+    let pool = common::pool().await;
+    let (view, _cap, _nocap) = two_class_view(&pool, "CaEst").await;
+    let est = getbloomdata_lib::orchestrator::corp_actions_estimate(&pool, view).await.unwrap();
+    assert_eq!(est, 2, "1 capable member x 2 corp-action fields; the bond must not be counted");
+}
+
+/// Both members get a current `bdp_security` alias, so absent the capability
+/// filter BOTH would be requested. Only the capable one may reach the wire --
+/// and the excluded bond must not be counted as a no-security skip either
+/// (Produces, task-3 brief): it never entered the batch at all.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn refresh_view_never_requests_an_incapable_member() {
+    let pool = common::pool().await;
+    let (view, cap, nocap) = two_class_view(&pool, "CaRef").await;
+    let sec_cap = format!("{} US Equity", uniq("CaRefEq"));
+    let sec_nocap = format!("{} US Corp", uniq("CaRefBond"));
+    let mut tx = pool.begin().await.unwrap();
+    for (iid, sec) in [(cap, &sec_cap), (nocap, &sec_nocap)] {
+        getbloomdata_lib::instrument::store::insert_alias(&mut tx, iid,
+            &getbloomdata_lib::instrument::store::NewAlias {
+                id_type: "bdp_security".into(), value: sec.clone(),
+                exch_code: Some("US".into()), valid_from: d("2000-01-03"), valid_to: None,
+                source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+            }).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let mock = getbloomdata_lib::master_fetch::MockMasterFetcher::default();
+    let summary = getbloomdata_lib::corp_actions::refresh_view(
+        &pool, &mock, view, d("2026-08-21"), false).await.unwrap();
+
+    let calls = mock.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "one batched call: {calls:?}");
+    assert!(calls[0].contains(&sec_cap), "capable security must be requested: {calls:?}");
+    assert!(!calls[0].contains(&sec_nocap),
+            "the incapable member must never be requested: {calls:?}");
+    assert_eq!(summary.instruments, 1);
+    assert_eq!(summary.skipped, 0,
+               "excluded by capability, not counted as a no-security skip");
 }

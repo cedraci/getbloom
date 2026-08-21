@@ -371,10 +371,13 @@ async fn lifecycle_after(pool: &PgPool, cfg: &PipelineConfig,
 /// pre-run gate; the wire seam still charges exactly what is sent. Members
 /// without a security today are still priced -- over-count-is-safe, the
 /// standing estimate policy.
-async fn corp_actions_estimate(pool: &PgPool, view_id: i64) -> AppResult<i64> {
+pub async fn corp_actions_estimate(pool: &PgPool, view_id: i64) -> AppResult<i64> {
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM view_instrument vi
+          JOIN book_entry be ON be.instrument_id = vi.instrument_id
+          JOIN asset_class ac ON ac.id = be.asset_class_id
           WHERE vi.view_id = $1
+            AND ac.corp_actions_capable
             AND NOT EXISTS (SELECT 1 FROM corp_actions_na na
                              WHERE na.instrument_id = vi.instrument_id)")
         .bind(view_id).fetch_one(pool).await?;
