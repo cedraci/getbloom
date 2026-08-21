@@ -199,3 +199,103 @@ async fn a_none_style_class_never_adjusts() {
     assert_eq!(s.factors_used, 0);
     assert_eq!(s.unusable_factors, 0);
 }
+
+// ---------------------------------------------------------------------------
+// qc_stale_days_default backstops the quality gate when field_def leaves the
+// per-field threshold NULL; an explicit field-level value still wins.
+// ---------------------------------------------------------------------------
+
+use getbloomdata_lib::fetch::{FetchAsset, FetchField, FetchRequest};
+use getbloomdata_lib::quality;
+
+/// Instrument + numeric field (qc_stale_days = `field_stale`) in a class whose
+/// `qc_stale_days_default` = `class_default`, plus a view + run. Returns ids.
+async fn stale_scaffold(pool: &sqlx::PgPool, stem: &str,
+                         field_stale: Option<i32>, class_default: Option<i32>)
+                         -> (i64, i64, i64, i64) {
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, qc_stale_days_default) VALUES ($1,$2) RETURNING id")
+        .bind(uniq(stem)).bind(class_default).fetch_one(pool).await.unwrap();
+    let iid: i64 = sqlx::query_scalar(
+        "INSERT INTO instrument DEFAULT VALUES RETURNING instrument_id")
+        .fetch_one(pool).await.unwrap();
+    let fid: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind, qc_stale_days)
+         VALUES ($1,$2,'Last','numeric',$3) RETURNING id")
+        .bind(class).bind(uniq("STF")).bind(field_stale).fetch_one(pool).await.unwrap();
+    let vid: i64 = sqlx::query_scalar(
+        "INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("stalev")).fetch_one(pool).await.unwrap();
+    let rid: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status)
+         VALUES ($1,'eod','manual','fetching') RETURNING id")
+        .bind(vid).fetch_one(pool).await.unwrap();
+    (iid, fid, rid, class)
+}
+
+fn stale_req(rid: i64, iid: i64, fid: i64, class: i64,
+             start: NaiveDate, end: NaiveDate) -> FetchRequest {
+    FetchRequest {
+        run_id: rid,
+        assets: vec![FetchAsset { instrument_id: iid, asset_class_id: class,
+                                  class_name: "c".into(), label: "l".into(),
+                                  bdp_security: "X US Equity".into() }],
+        fields: vec![FetchField { field_id: fid, asset_class_id: class,
+                                  mnemonic: "PX_LAST".into(),
+                                  value_kind: "numeric".into() }],
+        start, end,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn class_default_stale_window_fires_when_field_level_is_null() {
+    let pool = common::pool().await;
+    // field_def.qc_stale_days NULL, class default = 3.
+    let (iid, fid, rid, class) =
+        stale_scaffold(&pool, "StaleDflt", None, Some(3)).await;
+    let cells = vec![
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-11"), value: CellValue::Num(7.0) },
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-12"), value: CellValue::Num(7.0) },
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-13"), value: CellValue::Num(7.0) },
+    ];
+    let outcome = FetchOutcome { cells, problems: vec![] };
+    ingest::ingest_outcome(&pool, rid, &outcome).await.unwrap();
+    let req = stale_req(rid, iid, fid, class, d("2026-08-11"), d("2026-08-13"));
+    quality::run_quality_gate(&pool, rid, &req, &outcome).await.unwrap();
+    let codes: Vec<String> = sqlx::query_scalar(
+        "SELECT code FROM ingest_issue
+          WHERE run_id = $1 AND severity = 'quality' AND code = 'quality_stale'")
+        .bind(rid).fetch_all(&pool).await.unwrap();
+    assert!(!codes.is_empty(),
+            "class default (3) must backstop a NULL field-level threshold");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn field_level_stale_days_wins_over_class_default() {
+    let pool = common::pool().await;
+    // field_def.qc_stale_days = 2, class default = 5 -- field wins, so two
+    // identical values already fire (5 never would, over just two points).
+    let (iid, fid, rid, class) =
+        stale_scaffold(&pool, "StalePrec", Some(2), Some(5)).await;
+    let cells = vec![
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-12"), value: CellValue::Num(9.0) },
+        ObsCell { instrument_id: iid, field_id: fid,
+                  obs_date: d("2026-08-13"), value: CellValue::Num(9.0) },
+    ];
+    let outcome = FetchOutcome { cells, problems: vec![] };
+    ingest::ingest_outcome(&pool, rid, &outcome).await.unwrap();
+    let req = stale_req(rid, iid, fid, class, d("2026-08-12"), d("2026-08-13"));
+    quality::run_quality_gate(&pool, rid, &req, &outcome).await.unwrap();
+    let codes: Vec<String> = sqlx::query_scalar(
+        "SELECT code FROM ingest_issue
+          WHERE run_id = $1 AND severity = 'quality' AND code = 'quality_stale'")
+        .bind(rid).fetch_all(&pool).await.unwrap();
+    assert!(!codes.is_empty(),
+            "field-level threshold (2) must win over the class default (5)");
+}

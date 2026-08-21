@@ -162,8 +162,11 @@ pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
         return Ok(findings);
     }
     let cfgs: Vec<(i64, bool, Option<f64>, Option<i32>)> = sqlx::query_as(
-        "SELECT id, qc_nonpositive, qc_outlier_pct, qc_stale_days
-           FROM field_def WHERE id = ANY($1)")
+        "SELECT f.id, f.qc_nonpositive, f.qc_outlier_pct,
+                COALESCE(f.qc_stale_days, ac.qc_stale_days_default) AS qc_stale_days
+           FROM field_def f
+           JOIN asset_class ac ON ac.id = f.asset_class_id
+          WHERE f.id = ANY($1)")
         .bind(&field_ids).fetch_all(pool).await?;
     let cfg_of = |fid: i64| cfgs.iter()
         .find(|(id, ..)| *id == fid)
