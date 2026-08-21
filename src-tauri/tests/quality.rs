@@ -196,16 +196,53 @@ async fn a_superseded_value_leaves_a_visible_issue_and_unchanged_does_not() {
 
 #[tokio::test]
 #[ignore = "requires postgres"]
-async fn a_scheduled_verify_backfill_counts_as_todays_run() {
+async fn a_scheduled_verify_run_counts_as_todays_run() {
     let pool = common::pool().await;
     let vid: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
         .bind(uniq("vfyv")).fetch_one(&pool).await.unwrap();
     let today = chrono::Local::now().date_naive();
     sqlx::query(
         "INSERT INTO run (view_id, kind, trigger_kind, status)
-         VALUES ($1,'backfill','scheduled','ok')")
+         VALUES ($1,'verify','scheduled','ok')")
         .bind(vid).execute(&pool).await.unwrap();
     assert!(getbloomdata_lib::scheduler::already_ran_today(&pool, vid, today)
         .await.unwrap(),
         "a completed scheduled verify must stop the EOD run from double-firing");
+}
+
+/// The run history is read by a person: 'backfill' for the weekly verification
+/// pass reads as a manual catch-up, so verify runs carry their own kind.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_verify_run_is_recorded_as_kind_verify() {
+    use getbloomdata_lib::error::AppResult;
+    use getbloomdata_lib::fetch::FetchRequest;
+    use getbloomdata_lib::orchestrator::{self, DataFetcher, PipelineConfig};
+    use std::path::Path;
+
+    struct EmptyFetcher;
+    impl DataFetcher for EmptyFetcher {
+        async fn fetch(&self, _req: &FetchRequest, _audit: Option<&Path>)
+            -> AppResult<FetchOutcome> {
+            Ok(FetchOutcome::default())
+        }
+    }
+
+    let pool = common::pool().await;
+    let vid: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("vfyk")).fetch_one(&pool).await.unwrap();
+    let cfg = PipelineConfig {
+        data_dir: std::env::temp_dir(),
+        python_path: "python".into(),
+        script_path: "unused".into(),
+        request_timeout_s: 5,
+        soft_limit: 1_000_000,
+    };
+    orchestrator::run_verify_with(&pool, &cfg, &EmptyFetcher, vid,
+                                  d("2026-08-17"), d("2026-08-21"))
+        .await.unwrap();
+    let (kind, trigger): (String, String) = sqlx::query_as(
+        "SELECT kind, trigger_kind FROM run WHERE view_id = $1")
+        .bind(vid).fetch_one(&pool).await.unwrap();
+    assert_eq!((kind.as_str(), trigger.as_str()), ("verify", "scheduled"));
 }

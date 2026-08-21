@@ -497,7 +497,7 @@ pub async fn run_verify_with<F: DataFetcher>(
     if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm {
         return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
     }
-    execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "scheduled",
+    execute(pool, cfg, fetcher, &loaded, view_id, "verify", "scheduled",
             start, end, estimated).await
 }
 
