@@ -7,7 +7,7 @@ Recommended capability flags and field configuration for each asset class. Adjus
 | Class | `corp_actions` | `ma_capable` | `adjustment_style` | `qc_stale_days_default` | Typical Fields |
 |---|---|---|---|---|---|
 | Equity | TRUE | TRUE | factors | NULL | PX_LAST, PX_VOLUME |
-| Fund (weekly NAV) | FALSE | TRUE | factors | 8 | FUND_NET_ASSET_VAL |
+| Fund (weekly NAV) | FALSE | TRUE (fund path) | factors | 8 | FUND_NET_ASSET_VAL |
 | Index | FALSE | FALSE | none | NULL | PX_LAST |
 | FX | FALSE | FALSE | none | NULL | PX_LAST |
 | Future | FALSE | FALSE | none | NULL | PX_LAST, PX_VOLUME; rolls via manual links |
@@ -29,10 +29,10 @@ Recommended capability flags and field configuration for each asset class. Adjus
 
 ## Must-State Caveats
 
-1. **Yield fields stay QC-permissive:** YLD_YTM_MID and similar keep `qc_nonpositive = FALSE`. Negative yields are real (rare, but real); do not flag them as stale data.
+1. **Yield fields stay QC-permissive:** YLD_YTM_MID and similar keep `qc_nonpositive = FALSE`. Negative yields are real, so `qc_nonpositive` must stay FALSE on yield fields — otherwise every negative yield is flagged as a non-positive-value quality violation.
 
 2. **GBp prices stored verbatim:** Per P7 decision, prices in pence (GBp) are stored and displayed as-is. No conversion to GBX; pence stay pence.
 
 3. **Called bonds need no link:** A bond series with `ma_capable = FALSE` + Bloomberg's `INACTIVE_DATE` field auto-cap the series without a manual M&A link (see spec 9.3). Do not create a link for redemption or call events.
 
-4. **Funds inherit the absorption path:** Funds stay `ma_capable = TRUE` because fund absorption (scheme merger, unitisation change) is detected by the same investigation logic as equity M&A. The entry point is shared; the payoff is fund holders identify with the new series automatically.
+4. **Funds inherit the absorption path:** Funds stay `ma_capable = TRUE` because fund absorption (scheme merger, unitisation change) is detected by the same investigation logic as equity M&A. The entry point is shared; the fund path then handles absorption and dead-fund scenarios.
