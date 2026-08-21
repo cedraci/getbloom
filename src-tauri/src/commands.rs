@@ -79,6 +79,15 @@ pub async fn create_asset_class(state: State<'_, AppState>, name: String, descri
     registry::create_asset_class(&state.pool, &name, &description).await
 }
 
+#[tauri::command]
+pub async fn update_asset_class_capabilities(state: State<'_, AppState>, id: i64,
+    corp_actions_capable: bool, ma_capable: bool, adjustment_style: String,
+    qc_stale_days_default: Option<i32>) -> Result<(), AppError>
+{
+    registry::update_asset_class_capabilities(&state.pool, id, corp_actions_capable,
+        ma_capable, &adjustment_style, qc_stale_days_default).await
+}
+
 // ---------------------------------------------------------------------------
 // Book
 // ---------------------------------------------------------------------------

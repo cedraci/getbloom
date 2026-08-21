@@ -7,6 +7,10 @@ pub struct AssetClass {
     pub id: i64,
     pub name: String,
     pub description: String,
+    pub corp_actions_capable: bool,
+    pub ma_capable: bool,
+    pub adjustment_style: String,
+    pub qc_stale_days_default: Option<i32>,
 }
 
 // Asset (the row), NewAsset, create_asset, list_assets and set_asset_active are
@@ -32,4 +36,21 @@ pub async fn create_asset_class(pool: &PgPool, name: &str, description: &str) ->
 pub async fn list_asset_classes(pool: &PgPool) -> AppResult<Vec<AssetClass>> {
     Ok(sqlx::query_as::<_, AssetClass>("SELECT * FROM asset_class ORDER BY name")
         .fetch_all(pool).await?)
+}
+
+/// The CHECK constraints (style whitelist, stale >= 2) surface as AppError --
+/// the UI relays them verbatim rather than pre-validating.
+pub async fn update_asset_class_capabilities(
+    pool: &PgPool, id: i64, corp_actions_capable: bool, ma_capable: bool,
+    adjustment_style: &str, qc_stale_days_default: Option<i32>) -> AppResult<()>
+{
+    sqlx::query(
+        "UPDATE asset_class
+         SET corp_actions_capable = $2, ma_capable = $3,
+             adjustment_style = $4, qc_stale_days_default = $5
+         WHERE id = $1")
+        .bind(id).bind(corp_actions_capable).bind(ma_capable)
+        .bind(adjustment_style).bind(qc_stale_days_default)
+        .execute(pool).await?;
+    Ok(())
 }

@@ -3,6 +3,7 @@
 mod common;
 
 use common::uniq;
+use getbloomdata_lib::registry;
 
 #[tokio::test]
 #[ignore = "requires postgres"]
@@ -33,4 +34,19 @@ async fn stale_default_below_two_is_rejected() {
         "INSERT INTO asset_class (name, qc_stale_days_default) VALUES ($1, 1)")
         .bind(uniq("CapOne")).execute(&pool).await;
     assert!(err.is_err(), "a 1-day staleness window is meaningless (matches field_def CHECK)");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn capabilities_can_be_updated_and_read_back() {
+    let pool = common::pool().await;
+    let ac = registry::create_asset_class(&pool, &uniq("CapBond"), "").await.unwrap();
+    registry::update_asset_class_capabilities(&pool, ac.id, false, false, "none", Some(8))
+        .await.unwrap();
+    let all = registry::list_asset_classes(&pool).await.unwrap();
+    let got = all.iter().find(|c| c.id == ac.id).unwrap();
+    assert!(!got.corp_actions_capable);
+    assert!(!got.ma_capable);
+    assert_eq!(got.adjustment_style, "none");
+    assert_eq!(got.qc_stale_days_default, Some(8));
 }

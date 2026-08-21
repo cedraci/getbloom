@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export interface AssetClass { id: number; name: string; description: string; }
+export interface AssetClass {
+  id: number; name: string; description: string;
+  corp_actions_capable: boolean; ma_capable: boolean; adjustment_style: string;
+  qc_stale_days_default: number | null;
+}
 export interface FieldDef {
   id: number; asset_class_id: number; mnemonic: string;
   label: string; value_kind: string;
@@ -253,6 +257,10 @@ export const api = {
   listAssetClasses: () => invoke<AssetClass[]>("list_asset_classes"),
   createAssetClass: (name: string, description: string) =>
     invoke<AssetClass>("create_asset_class", { name, description }),
+  updateAssetClassCapabilities: (id: number, corpActionsCapable: boolean, maCapable: boolean,
+                                  adjustmentStyle: string, qcStaleDaysDefault: number | null) =>
+    invoke<void>("update_asset_class_capabilities",
+      { id, corpActionsCapable, maCapable, adjustmentStyle, qcStaleDaysDefault }),
   listBook: () => invoke<BookEntry[]>("list_book"),
   addToBook: (req: AddToBook) => invoke<AddOutcome>("add_to_book", { req }),
   setBookActive: (instrumentId: number, active: boolean) =>

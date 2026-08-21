@@ -1,10 +1,19 @@
 <script lang="ts">
-  import { api, type AppConfig, type EntityKind, type ScheduleRow, type View } from "./api";
+  import { api, type AppConfig, type AssetClass, type EntityKind, type ScheduleRow, type View } from "./api";
   import DeleteDialog from "./DeleteDialog.svelte";
 
   let cfg = $state<AppConfig>({ data_dir: "", soft_limit: 0, request_timeout_s: 0, python_path: "" });
   let schedules = $state<ScheduleRow[]>([]);
   let views = $state<View[]>([]);
+  let assetClasses = $state<AssetClass[]>([]);
+  // Per-row draft so a checkbox/select/number edit doesn't write until Save
+  // is clicked -- qc_stale_days_default is kept as a string so an emptied
+  // input means "off" rather than the CHECK-tripping 0 (same convention as
+  // ViewsScreen's field quality-gate inputs).
+  let classEdits = $state<Record<number, {
+    corp_actions_capable: boolean; ma_capable: boolean;
+    adjustment_style: string; qc_stale_days_default: string;
+  }>>({});
   let error = $state("");
   let pending = $state<{ kind: EntityKind; id: number } | null>(null);
 
@@ -22,9 +31,33 @@
       schedules = await api.listSchedules();
       views = await api.listViews();
       if (views.length && !newSchedule.view_id) newSchedule.view_id = views[0].id;
+      assetClasses = await api.listAssetClasses();
+      classEdits = Object.fromEntries(assetClasses.map((c) => [c.id, {
+        corp_actions_capable: c.corp_actions_capable,
+        ma_capable: c.ma_capable,
+        adjustment_style: c.adjustment_style,
+        qc_stale_days_default: c.qc_stale_days_default === null ? "" : String(c.qc_stale_days_default),
+      }]));
     } catch (e) { error = String(e); }
   }
   $effect(() => { reload(); });
+
+  // Svelte 5 binds an emptied type="number" input to null, not "" -- coerce
+  // both the same way (blank/cleared -> off) rather than letting Number(null)
+  // silently become 0 and trip the DB's CHECK constraint as a raw error.
+  function toOptionalNumber(v: unknown): number | null {
+    return v === null || v === undefined || v === "" ? null : Number(v);
+  }
+
+  async function saveCapabilities(id: number) {
+    const e = classEdits[id];
+    if (!e) return;
+    try {
+      await api.updateAssetClassCapabilities(id, e.corp_actions_capable, e.ma_capable,
+        e.adjustment_style, toOptionalNumber(e.qc_stale_days_default));
+      await reload();
+    } catch (err) { error = String(err); }
+  }
 
   async function saveConfig() {
     try { await api.saveSettings(cfg); await reload(); }
@@ -118,6 +151,33 @@
     <label><input type="checkbox" bind:checked={newSchedule.active} /> Active</label>
     <button type="submit">Save schedule</button>
   </form>
+
+  <h2>Asset classes</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Corp actions</th><th>M&amp;A lifecycle</th><th>Adjustment style</th><th>Stale after (days)</th><th></th></tr>
+    </thead>
+    <tbody>
+      {#each assetClasses as c}
+        {@const e = classEdits[c.id]}
+        {#if e}
+          <tr>
+            <td>{c.name}</td>
+            <td><input type="checkbox" bind:checked={e.corp_actions_capable} /></td>
+            <td><input type="checkbox" bind:checked={e.ma_capable} /></td>
+            <td>
+              <select bind:value={e.adjustment_style}>
+                <option value="factors">factors</option>
+                <option value="none">none</option>
+              </select>
+            </td>
+            <td><input type="number" bind:value={e.qc_stale_days_default} min="2" placeholder="off" /></td>
+            <td><button onclick={() => saveCapabilities(c.id)}>Save</button></td>
+          </tr>
+        {/if}
+      {/each}
+    </tbody>
+  </table>
 </section>
 
 {#if pending}
