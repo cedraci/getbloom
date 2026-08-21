@@ -58,6 +58,29 @@
     } catch (e) { error = String(e); }
     finally { histBusy = false; }
   }
+
+  // P9 Task 9: this instrument is the roll's SUCCESSOR (the contract we are
+  // looking at); the user supplies the predecessor. Typing this in IS the
+  // confirmation gate -- no review-queue step follows.
+  let rollPredecessorId = $state<number | null>(null);
+  let rollEffectiveDate = $state("");
+  let rollOffset = $state<number | null>(null);
+  let rollBusy = $state(false);
+  let rollNotice = $state("");
+
+  async function addRollLink() {
+    error = ""; rollNotice = "";
+    if (rollPredecessorId == null) { error = "A predecessor instrument id is required."; return; }
+    if (!rollEffectiveDate) { error = "An effective date is required."; return; }
+    rollBusy = true;
+    try {
+      await api.createRollLink(rollPredecessorId, instrumentId, rollEffectiveDate, rollOffset);
+      rollNotice = `Roll link ${rollPredecessorId} → ${instrumentId} confirmed.`;
+      rollPredecessorId = null; rollEffectiveDate = ""; rollOffset = null;
+      await load();
+    } catch (e) { error = String(e); }
+    finally { rollBusy = false; }
+  }
 </script>
 
 <div class="backdrop">
@@ -133,6 +156,30 @@
     {:else}
       <p class="thin">Nothing stored yet.</p>
     {/if}
+
+    <h4>Links</h4>
+    <details>
+      <summary>Add roll link</summary>
+      <p class="thin">Records this instrument as the successor of a predecessor
+         contract, confirmed immediately — the human typing it is the
+         confirmation gate. Successor = predecessor + offset; leave the
+         offset empty to derive it from prices at the junction.</p>
+      <div class="hist">
+        <label>Predecessor instrument id
+          <input type="number" bind:value={rollPredecessorId} placeholder="123" />
+        </label>
+        <label>Effective date
+          <input type="date" bind:value={rollEffectiveDate} />
+        </label>
+        <label>Offset
+          <input type="number" step="any" bind:value={rollOffset}
+                 placeholder="leave empty to derive" />
+        </label>
+        <button onclick={addRollLink} disabled={rollBusy}>
+          {rollBusy ? "Confirming…" : "Add roll link"}</button>
+      </div>
+      {#if rollNotice}<p class="thin">{rollNotice}</p>{/if}
+    </details>
 
     <h4>Attributes</h4>
     <table>

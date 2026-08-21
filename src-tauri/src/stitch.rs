@@ -122,6 +122,26 @@ pub struct StitchedSeries {
     pub stopped: Option<String>,
 }
 
+/// P9 Task 9: a human types a roll link directly -- no lifecycle inference,
+/// no review queue. The typing IS the confirmation gate, so this proposes
+/// and confirms in the same call, `by = "user"`.
+pub async fn create_roll_link(pool: &sqlx::PgPool, predecessor_id: i64,
+                              successor_id: i64, effective_date: NaiveDate,
+                              roll_offset: Option<f64>) -> crate::error::AppResult<i64>
+{
+    if predecessor_id == successor_id {
+        return Err(crate::error::AppError::Validation(
+            "a roll link cannot join an instrument to itself".into()));
+    }
+    let link_id = crate::instrument::store::propose_link(
+        pool, predecessor_id, successor_id, "roll", effective_date,
+        serde_json::json!({"source": "user"})).await?;
+    sqlx::query("UPDATE instrument_link SET roll_offset = $2 WHERE id = $1")
+        .bind(link_id).bind(roll_offset).execute(pool).await?;
+    crate::instrument::store::confirm_link(pool, link_id, "user").await?;
+    Ok(link_id)
+}
+
 pub async fn has_confirmed_predecessors(pool: &sqlx::PgPool, instrument_id: i64)
     -> crate::error::AppResult<bool>
 {

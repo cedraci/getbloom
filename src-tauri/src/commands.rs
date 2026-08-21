@@ -220,6 +220,19 @@ pub async fn confirm_link(state: State<'_, AppState>, link_id: i64)
     crate::instrument::store::confirm_link(&state.pool, link_id, "user").await
 }
 
+/// P9 Task 9: manual roll-link creation -- a human typing the junction IS the
+/// confirmation gate (P0 7.2's human-agrees rule, satisfied at entry time
+/// rather than via the review queue).
+#[tauri::command]
+pub async fn create_roll_link(state: State<'_, AppState>, predecessor_id: i64,
+                              successor_id: i64, effective_date: String,
+                              roll_offset: Option<f64>) -> Result<i64, AppError> {
+    let d = chrono::NaiveDate::parse_from_str(&effective_date, "%Y-%m-%d")
+        .map_err(|e| AppError::Validation(format!("bad effective_date: {e}")))?;
+    crate::stitch::create_roll_link(&state.pool, predecessor_id, successor_id, d,
+                                    roll_offset).await
+}
+
 // ---------------------------------------------------------------------------
 // Fields
 // ---------------------------------------------------------------------------

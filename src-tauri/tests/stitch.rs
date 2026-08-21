@@ -336,6 +336,40 @@ async fn a_roll_without_asserted_offset_derives_it_from_the_junction() {
     assert_eq!(b_seg.offset, Some(3.0));
 }
 
+// ------------------------------------------------ P9 Task 9: manual roll link
+
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn create_roll_link_confirms_immediately_and_stitching_follows_it() {
+    let pool = common::pool().await;
+    let (ids, fid) = roll_scaffold(&pool, "RollManual", "PX_LAST", &[
+        ("Front contract", &[("2026-03-09", 90.0), ("2026-03-10", 98.0)]),
+        ("Back contract", &[("2026-03-11", 100.5), ("2026-03-12", 101.25)]),
+    ]).await;
+    let (b, c) = (ids[0], ids[1]);
+
+    let link_id = stitch::create_roll_link(&pool, b, c, d("2026-03-11"), Some(2.5))
+        .await.unwrap();
+
+    let row: (i64, i64, String, Option<f64>, Option<String>) = sqlx::query_as(
+        "SELECT predecessor_id, successor_id, link_type, roll_offset, confirmed_by
+           FROM instrument_link WHERE id = $1")
+        .bind(link_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(row, (b, c, "roll".into(), Some(2.5), Some("user".into())));
+
+    let s = stitch::stitched_series(&pool, c, fid, AdjustMode::Raw, 100)
+        .await.unwrap();
+    assert!(s.stopped.is_none(), "stopped: {:?}", s.stopped);
+    let b_row = s.rows.iter().find(|r| r.obs_date == d("2026-03-10")).unwrap();
+    assert!((b_row.value - 100.5).abs() < 1e-9,
+            "a roll adds, it does not scale: {}", b_row.value);
+    assert_eq!(b_row.source_instrument_id, b);
+    let b_seg = s.segments.iter().find(|g| g.instrument_id == b).unwrap();
+    assert_eq!(b_seg.offset, Some(2.5));
+    assert_eq!(b_seg.ratio, None);
+    assert_eq!(b_seg.link_type.as_deref(), Some("roll"));
+}
+
 #[tokio::test]
 #[ignore = "requires postgres"]
 async fn volumes_cross_a_roll_unscaled() {

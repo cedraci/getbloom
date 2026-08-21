@@ -323,6 +323,12 @@ export const api = {
   exportStitchedCsv: (instrumentId: number, fieldId: number, mode: AdjustModeStr,
                       path: string) =>
     invoke<number>("export_stitched_csv", { instrumentId, fieldId, mode, path }),
+  /// P9 Task 9: a human typing this link IS the confirmation gate -- it comes
+  /// back already confirmed, no review-queue step.
+  createRollLink: (predecessorId: number, successorId: number, effectiveDate: string,
+                   rollOffset: number | null) =>
+    invoke<number>("create_roll_link",
+                   { predecessorId, successorId, effectiveDate, rollOffset }),
   listCorpActions: (instrumentId: number) =>
     invoke<CorpActionRow[]>("list_corp_actions", { instrumentId }),
   listFields: () => invoke<FieldDef[]>("list_fields"),

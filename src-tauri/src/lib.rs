@@ -107,7 +107,7 @@ pub fn run() {
             commands::export_observations_csv, commands::export_corp_actions_csv,
             commands::list_adjusted, commands::export_adjusted_csv,
             commands::list_stitched, commands::has_confirmed_predecessors,
-            commands::export_stitched_csv,
+            commands::export_stitched_csv, commands::create_roll_link,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
