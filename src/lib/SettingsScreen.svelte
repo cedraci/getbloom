@@ -69,13 +69,27 @@
     return t === "" ? null : t;
   }
 
+  // cadence_grace_days has no "off" state (the column is NOT NULL, DB default
+  // 10) -- unlike qc_stale_days_default there is nothing to coerce a blank
+  // input TO except a number. The Save button here is a plain onclick, not
+  // inside a <form>, so an input's `required` is purely decorative and would
+  // not stop a cleared field from sending `null` straight to a Rust param
+  // typed `i32`, which fails ugly at Tauri's IPC layer rather than cleanly.
+  // Falling back to the class's last known-good value (or the DB default)
+  // keeps a cleared/invalid input from ever reaching the wire as null.
+  function toGraceDays(v: unknown, fallback: number): number {
+    const n = toOptionalNumber(v);
+    return n === null || Number.isNaN(n) ? fallback : n;
+  }
+
   async function saveCapabilities(id: number) {
     const e = classEdits[id];
     if (!e) return;
+    const fallbackGraceDays = assetClasses.find((c) => c.id === id)?.cadence_grace_days ?? 10;
     try {
       await api.updateAssetClassCapabilities(id, e.corp_actions_capable, e.ma_capable,
         e.adjustment_style, toOptionalNumber(e.qc_stale_days_default),
-        e.default_cadence, e.cadence_grace_days, e.identity_sweep);
+        e.default_cadence, toGraceDays(e.cadence_grace_days, fallbackGraceDays), e.identity_sweep);
       await reload();
     } catch (err) { error = String(err); }
   }
@@ -242,8 +256,8 @@
                 <option value="irregular">irregular</option>
               </select>
             </td>
-            <td><input type="number" bind:value={e.cadence_grace_days} min="0" required
-                       title="Calendar days after a period ends before a missing print is flagged." /></td>
+            <td><input type="number" bind:value={e.cadence_grace_days} min="0"
+                       title="Calendar days after a period ends before a missing print is flagged. Blank reverts to the current value on Save." /></td>
             <td>
               <select bind:value={e.identity_sweep}
                       title="What the weekly identity sweep checks for this class's instruments, and what retires one. Off = never swept.">
