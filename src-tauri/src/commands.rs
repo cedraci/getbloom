@@ -104,12 +104,15 @@ pub async fn create_asset_class(state: State<'_, AppState>, name: String, descri
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_asset_class_capabilities(state: State<'_, AppState>, id: i64,
     corp_actions_capable: bool, ma_capable: bool, adjustment_style: String,
-    qc_stale_days_default: Option<i32>) -> Result<(), AppError>
+    qc_stale_days_default: Option<i32>, default_cadence: String,
+    cadence_grace_days: i32, identity_sweep: String) -> Result<(), AppError>
 {
     registry::update_asset_class_capabilities(&state.pool, id, corp_actions_capable,
-        ma_capable, &adjustment_style, qc_stale_days_default).await
+        ma_capable, &adjustment_style, qc_stale_days_default,
+        &default_cadence, cadence_grace_days, &identity_sweep).await
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +282,13 @@ pub async fn create_field(state: State<'_, AppState>, asset_class_id: i64,
                          bbg_ftype.as_deref(), bbg_datatype.as_deref(),
                          entitlement_note.as_deref().unwrap_or(""),
                          qc_nonpositive.unwrap_or(false), qc_outlier_pct, qc_stale_days).await
+}
+
+#[tauri::command]
+pub async fn update_field_cadence(state: State<'_, AppState>, id: i64,
+    cadence: Option<String>, fetch_via: String) -> Result<(), AppError>
+{
+    fields::update_field_cadence(&state.pool, id, cadence.as_deref(), &fetch_via).await
 }
 
 // ---------------------------------------------------------------------------

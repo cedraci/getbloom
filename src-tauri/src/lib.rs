@@ -92,7 +92,7 @@ pub fn run() {
             commands::resolve_review_local, commands::reject_review,
             commands::ingest_identifier_history,
             commands::list_link_proposals, commands::confirm_link,
-            commands::list_fields, commands::create_field,
+            commands::list_fields, commands::create_field, commands::update_field_cadence,
             commands::list_views, commands::create_view,
             commands::set_view_instruments, commands::set_view_fields,
             commands::get_view_instruments, commands::get_view_fields,

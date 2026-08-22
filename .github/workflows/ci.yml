@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [master, 'p10-**']
+    branches: [master, 'p1*-**']
   pull_request:
 
 jobs:

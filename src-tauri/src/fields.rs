@@ -21,6 +21,14 @@ pub struct FieldDef {
     pub qc_nonpositive: bool,
     pub qc_outlier_pct: Option<f64>,
     pub qc_stale_days: Option<i32>,
+    /// P11 11.1: overrides `asset_class.default_cadence` for this field (a
+    /// RE fund's daily market price vs its monthly NAV). NULL defers to the
+    /// class default -- effective cadence = COALESCE(cadence, class default).
+    pub cadence: Option<String>,
+    /// P11 11.2: which wire path collects this field -- ranged
+    /// HistoricalDataRequest ('history', today's behaviour) or a
+    /// ReferenceDataRequest snapshot dated obs_date ('reference').
+    pub fetch_via: String,
 }
 
 pub fn normalize_mnemonic(m: &str) -> String {
@@ -94,6 +102,22 @@ pub async fn list_fields(pool: &PgPool) -> AppResult<Vec<FieldDef>> {
     )
     .fetch_all(pool)
     .await?)
+}
+
+/// P11 11.1/11.2 field-level overrides, mirrored on
+/// `registry::update_asset_class_capabilities`'s CRUD shape: created fields
+/// stay in the class-default/history shape (`create_field` unchanged), this
+/// is the opt-out-per-field editing seam. The CHECK constraints (cadence
+/// whitelist, fetch_via whitelist) surface as AppError -- the UI relays them
+/// verbatim rather than pre-validating.
+pub async fn update_field_cadence(
+    pool: &PgPool, id: i64, cadence: Option<&str>, fetch_via: &str) -> AppResult<()>
+{
+    sqlx::query(
+        "UPDATE field_def SET cadence = $2, fetch_via = $3 WHERE id = $1")
+        .bind(id).bind(cadence).bind(fetch_via)
+        .execute(pool).await?;
+    Ok(())
 }
 
 #[cfg(test)]

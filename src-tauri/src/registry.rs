@@ -11,6 +11,16 @@ pub struct AssetClass {
     pub ma_capable: bool,
     pub adjustment_style: String,
     pub qc_stale_days_default: Option<i32>,
+    /// P11 11.1: expected publication frequency for the class's fields;
+    /// `field_def.cadence` overrides it per field. Effective cadence =
+    /// COALESCE(field_def.cadence, asset_class.default_cadence).
+    pub default_cadence: String,
+    /// P11 11.1: calendar days after a period ends before a missing
+    /// periodic print is anomalous.
+    pub cadence_grace_days: i32,
+    /// P11 11.8: which identity fields the weekly sweep fetches for this
+    /// class, and what retires an instrument. 'none' until a class opts in.
+    pub identity_sweep: String,
 }
 
 // Asset (the row), NewAsset, create_asset, list_assets and set_asset_active are
@@ -38,19 +48,24 @@ pub async fn list_asset_classes(pool: &PgPool) -> AppResult<Vec<AssetClass>> {
         .fetch_all(pool).await?)
 }
 
-/// The CHECK constraints (style whitelist, stale >= 2) surface as AppError --
-/// the UI relays them verbatim rather than pre-validating.
+/// The CHECK constraints (style whitelist, stale >= 2, cadence whitelist,
+/// grace >= 0, sweep whitelist) surface as AppError -- the UI relays them
+/// verbatim rather than pre-validating.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_asset_class_capabilities(
     pool: &PgPool, id: i64, corp_actions_capable: bool, ma_capable: bool,
-    adjustment_style: &str, qc_stale_days_default: Option<i32>) -> AppResult<()>
+    adjustment_style: &str, qc_stale_days_default: Option<i32>,
+    default_cadence: &str, cadence_grace_days: i32, identity_sweep: &str) -> AppResult<()>
 {
     sqlx::query(
         "UPDATE asset_class
          SET corp_actions_capable = $2, ma_capable = $3,
-             adjustment_style = $4, qc_stale_days_default = $5
+             adjustment_style = $4, qc_stale_days_default = $5,
+             default_cadence = $6, cadence_grace_days = $7, identity_sweep = $8
          WHERE id = $1")
         .bind(id).bind(corp_actions_capable).bind(ma_capable)
         .bind(adjustment_style).bind(qc_stale_days_default)
+        .bind(default_cadence).bind(cadence_grace_days).bind(identity_sweep)
         .execute(pool).await?;
     Ok(())
 }

@@ -55,8 +55,8 @@ async fn stale_default_below_two_is_rejected() {
 async fn capabilities_can_be_updated_and_read_back() {
     let pool = common::pool().await;
     let ac = registry::create_asset_class(&pool, &uniq("CapBond"), "").await.unwrap();
-    registry::update_asset_class_capabilities(&pool, ac.id, false, false, "none", Some(8))
-        .await.unwrap();
+    registry::update_asset_class_capabilities(&pool, ac.id, false, false, "none", Some(8),
+        "daily", 10, "none").await.unwrap();
     let all = registry::list_asset_classes(&pool).await.unwrap();
     let got = all.iter().find(|c| c.id == ac.id).unwrap();
     assert!(!got.corp_actions_capable);
