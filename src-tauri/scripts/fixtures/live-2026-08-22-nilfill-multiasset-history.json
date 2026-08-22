@@ -1,0 +1,291 @@
+{
+ "run_id": null,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "SPX Index",
+     "AAPL UW Equity",
+     "USGG10YR Index",
+     "T 2 3/8 05/15/31 Govt",
+     "EUR Curncy",
+     "CL1 Comdty",
+     "XAU BGN Curncy"
+    ],
+    "fields": [
+     "PX_LAST"
+    ],
+    "start": "20260701",
+    "end": "20260710"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "SPX Index",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01",
+        "PX_LAST": 7483.23
+       },
+       {
+        "date": "2026-07-02",
+        "PX_LAST": 7483.24
+       },
+       {
+        "date": "2026-07-03"
+       },
+       {
+        "date": "2026-07-06",
+        "PX_LAST": 7537.43
+       },
+       {
+        "date": "2026-07-07",
+        "PX_LAST": 7503.85
+       },
+       {
+        "date": "2026-07-08",
+        "PX_LAST": 7482.71
+       },
+       {
+        "date": "2026-07-09",
+        "PX_LAST": 7543.64
+       },
+       {
+        "date": "2026-07-10",
+        "PX_LAST": 7575.39
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "AAPL UW Equity",
+      "eidData": [],
+      "sequenceNumber": 1,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01",
+        "PX_LAST": 294.38
+       },
+       {
+        "date": "2026-07-02",
+        "PX_LAST": 308.63
+       },
+       {
+        "date": "2026-07-03"
+       },
+       {
+        "date": "2026-07-06",
+        "PX_LAST": 312.66
+       },
+       {
+        "date": "2026-07-07",
+        "PX_LAST": 310.66
+       },
+       {
+        "date": "2026-07-08",
+        "PX_LAST": 313.39
+       },
+       {
+        "date": "2026-07-09",
+        "PX_LAST": 316.22
+       },
+       {
+        "date": "2026-07-10",
+        "PX_LAST": 315.32
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "USGG10YR Index",
+      "eidData": [],
+      "sequenceNumber": 2,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01",
+        "PX_LAST": 4.4791
+       },
+       {
+        "date": "2026-07-02",
+        "PX_LAST": 4.4832
+       },
+       {
+        "date": "2026-07-03",
+        "PX_LAST": 4.4832
+       },
+       {
+        "date": "2026-07-06",
+        "PX_LAST": 4.4693
+       },
+       {
+        "date": "2026-07-07",
+        "PX_LAST": 4.5511
+       },
+       {
+        "date": "2026-07-08",
+        "PX_LAST": 4.5792
+       },
+       {
+        "date": "2026-07-09",
+        "PX_LAST": 4.5511
+       },
+       {
+        "date": "2026-07-10",
+        "PX_LAST": 4.5612
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "T 2 3/8 05/15/31 Govt",
+      "eidData": [],
+      "sequenceNumber": 3,
+      "securityError": {
+       "source": "53356:rsfhdsvc3",
+       "code": 15,
+       "category": "BAD_SEC",
+       "message": "Unknown/Invalid securityInvalid Security [nid:53356]",
+       "subcategory": "INVALID_SECURITY"
+      },
+      "fieldExceptions": [],
+      "fieldData": []
+     }
+    },
+    {
+     "securityData": {
+      "security": "EUR Curncy",
+      "eidData": [],
+      "sequenceNumber": 4,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01",
+        "PX_LAST": 1.1377
+       },
+       {
+        "date": "2026-07-02",
+        "PX_LAST": 1.1432
+       },
+       {
+        "date": "2026-07-03",
+        "PX_LAST": 1.1437
+       },
+       {
+        "date": "2026-07-06",
+        "PX_LAST": 1.1441
+       },
+       {
+        "date": "2026-07-07",
+        "PX_LAST": 1.1412
+       },
+       {
+        "date": "2026-07-08",
+        "PX_LAST": 1.1417
+       },
+       {
+        "date": "2026-07-09",
+        "PX_LAST": 1.143
+       },
+       {
+        "date": "2026-07-10",
+        "PX_LAST": 1.1416
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "CL1 Comdty",
+      "eidData": [],
+      "sequenceNumber": 5,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01",
+        "PX_LAST": 68.58
+       },
+       {
+        "date": "2026-07-02",
+        "PX_LAST": 68.69
+       },
+       {
+        "date": "2026-07-03"
+       },
+       {
+        "date": "2026-07-06",
+        "PX_LAST": 68.55
+       },
+       {
+        "date": "2026-07-07",
+        "PX_LAST": 70.44
+       },
+       {
+        "date": "2026-07-08",
+        "PX_LAST": 73.52
+       },
+       {
+        "date": "2026-07-09",
+        "PX_LAST": 72.08
+       },
+       {
+        "date": "2026-07-10",
+        "PX_LAST": 71.41
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "XAU BGN Curncy",
+      "eidData": [],
+      "sequenceNumber": 6,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01",
+        "PX_LAST": 4030.65
+       },
+       {
+        "date": "2026-07-02",
+        "PX_LAST": 4122.35
+       },
+       {
+        "date": "2026-07-03",
+        "PX_LAST": 4176.94
+       },
+       {
+        "date": "2026-07-06",
+        "PX_LAST": 4165.23
+       },
+       {
+        "date": "2026-07-07",
+        "PX_LAST": 4106.24
+       },
+       {
+        "date": "2026-07-08",
+        "PX_LAST": 4077.43
+       },
+       {
+        "date": "2026-07-09",
+        "PX_LAST": 4123.64
+       },
+       {
+        "date": "2026-07-10",
+        "PX_LAST": 4119.93
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

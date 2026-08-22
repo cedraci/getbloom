@@ -1,0 +1,141 @@
+{
+ "run_id": null,
+ "captured": [
+  {
+   "request": {
+    "kind": "history",
+    "securities": [
+     "CT10 @BGN Govt",
+     "/isin/US91282CRF04",
+     "/isin/US91282CRF04@BGN",
+     "T 4 5/8 08/15/36 Govt"
+    ],
+    "fields": [
+     "PX_LAST"
+    ],
+    "start": "20260701",
+    "end": "20260710"
+   },
+   "messages": [
+    {
+     "securityData": {
+      "security": "CT10 @BGN Govt",
+      "eidData": [],
+      "sequenceNumber": 0,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01"
+       },
+       {
+        "date": "2026-07-02"
+       },
+       {
+        "date": "2026-07-03"
+       },
+       {
+        "date": "2026-07-06"
+       },
+       {
+        "date": "2026-07-07"
+       },
+       {
+        "date": "2026-07-08"
+       },
+       {
+        "date": "2026-07-09"
+       },
+       {
+        "date": "2026-07-10"
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "/isin/US91282CRF04",
+      "eidData": [],
+      "sequenceNumber": 1,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01"
+       },
+       {
+        "date": "2026-07-02"
+       },
+       {
+        "date": "2026-07-03"
+       },
+       {
+        "date": "2026-07-06"
+       },
+       {
+        "date": "2026-07-07"
+       },
+       {
+        "date": "2026-07-08"
+       },
+       {
+        "date": "2026-07-09"
+       },
+       {
+        "date": "2026-07-10"
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "/isin/US91282CRF04@BGN",
+      "eidData": [],
+      "sequenceNumber": 2,
+      "fieldExceptions": [],
+      "fieldData": [
+       {
+        "date": "2026-07-01"
+       },
+       {
+        "date": "2026-07-02"
+       },
+       {
+        "date": "2026-07-03"
+       },
+       {
+        "date": "2026-07-06"
+       },
+       {
+        "date": "2026-07-07"
+       },
+       {
+        "date": "2026-07-08"
+       },
+       {
+        "date": "2026-07-09"
+       },
+       {
+        "date": "2026-07-10"
+       }
+      ]
+     }
+    },
+    {
+     "securityData": {
+      "security": "T 4 5/8 08/15/36 Govt",
+      "eidData": [],
+      "sequenceNumber": 3,
+      "securityError": {
+       "source": "53670:rsfhdsvc4",
+       "code": 15,
+       "category": "BAD_SEC",
+       "message": "Unknown/Invalid securityInvalid Security [nid:53670]",
+       "subcategory": "INVALID_SECURITY"
+      },
+      "fieldExceptions": [],
+      "fieldData": []
+     }
+    }
+   ]
+  }
+ ]
+}
