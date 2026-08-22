@@ -349,7 +349,7 @@ async fn execute<F: DataFetcher>(
     // "requested in this run and Bloomberg answered neither way", and nothing
     // was requested. Raising it would turn every quiet mid-period day into a
     // 'partial' run with one finding per member (R6).
-    let quality_findings = if nothing_to_fetch {
+    let mut quality_findings = if nothing_to_fetch {
         0
     } else {
         match crate::quality::run_quality_gate(pool, run_id, &req, &outcome).await {
@@ -360,6 +360,22 @@ async fn execute<F: DataFetcher>(
             }
         }
     };
+
+    // P11 11.6: periods late past grace, as findings on this run. Deliberately
+    // NOT skipped on a quiet day -- "the June NAV never arrived" is exactly
+    // what a view with nothing to fetch has to say, and it is the alert that
+    // replaces a month of day-shaped gap noise.
+    //
+    // Asked of the real calendar, not of `end`: lateness is about NOW, the
+    // same reason `run_eod_with` reads the clock for due-ness rather than the
+    // day the run targets. Run AFTER ingest, so a period this run just bought
+    // is not reported late. Advisory like its siblings.
+    match crate::quality::record_publication_overdue(
+        pool, run_id, view_id, chrono::Local::now().date_naive()).await
+    {
+        Ok(n) => quality_findings += n,
+        Err(e) => eprintln!("warning: publication_overdue check failed for run {run_id}: {e}"),
+    }
 
     let status = if summary.issues > 0 || quality_findings > 0 { "partial" } else { "ok" };
     let stored = audit.exists().then(|| audit.to_string_lossy().into_owned());

@@ -97,6 +97,48 @@ pub fn evaluate_series(
     out
 }
 
+/// P11 11.6: how many consecutive all-NIL weekdays stop looking like a
+/// calendar and start looking like a hole in the licence.
+///
+/// Five, because no probed market closes for a whole trading week. A genuine
+/// suspension does reach five and DESERVES the flag; a missing entitlement
+/// always reaches it, and is otherwise perfectly silent -- probe F6 caught an
+/// individual govvie returning NIL for 8/8 weekdays, every addressing form,
+/// which today's rules would have filed as eight holidays and never mentioned
+/// again.
+pub const NIL_STREAK_WEEKDAYS: usize = 5;
+
+/// How far back the streak walk reads evidence. A cap is needed because an
+/// unentitled series never stops being NIL; it bounds the query and, with it,
+/// the span the finding can report (the alarm fires at 5, so a truncated span
+/// is a floor, never a miss).
+const NIL_LOOKBACK_DAYS: i64 = 120;
+
+/// The trailing run of consecutive WEEKDAYS ending at `anchor`, every one of
+/// which is marked non-trading. Ascending; empty when `anchor` itself is not
+/// marked.
+///
+/// Weekends are stepped over without breaking the run and without counting
+/// toward it -- a market being shut on Saturday is not evidence of anything.
+pub fn trailing_nil_weekdays(
+    marked: &std::collections::HashSet<NaiveDate>,
+    anchor: NaiveDate,
+) -> Vec<NaiveDate> {
+    let mut span = Vec::new();
+    let mut day = anchor;
+    while marked.contains(&day) {
+        span.push(day);
+        loop {
+            day -= chrono::Duration::days(1);
+            if !crate::scheduler::is_weekend(day) {
+                break;
+            }
+        }
+    }
+    span.reverse();
+    span
+}
+
 /// Instruments the run REQUESTED and Bloomberg answered with silence -- no
 /// cell, no problem. A holiday is not silence (it arrives as no_data); this
 /// is the partial-response case where a name simply vanished from the reply.
@@ -154,6 +196,8 @@ pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
         findings += 1;
     }
 
+    findings += nil_streak_findings(pool, run_id, req).await?;
+
     // Which fields carry any check at all -- one query, not one per cell.
     let mut field_ids: Vec<i64> = outcome.cells.iter().map(|c| c.field_id).collect();
     field_ids.sort_unstable();
@@ -207,6 +251,116 @@ pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
                 .execute(pool).await?;
             findings += 1;
         }
+    }
+    Ok(findings)
+}
+
+/// P11 11.6, the NIL-streak alarm. Run as part of the quality gate, which the
+/// orchestrator calls AFTER `ingest::record_non_trading_days` -- so "the
+/// current fetch plus stored evidence" is simply the evidence table, with this
+/// run's own marks already in it, and there is no second copy of Rules A/B
+/// here to drift out of step with the first.
+///
+/// Scope, in the order the conditions have to be read:
+/// * only a request carrying a daily x history field -- the only fetch whose
+///   silence is evidence about trading sessions at all (11.6 gating);
+/// * only instruments this run actually asked about (`req.assets`);
+/// * only instruments with a mark inside the run's own window, which is what
+///   makes this a statement about what THIS run saw rather than a nightly
+///   re-reading of dormant history.
+///
+/// One finding per instrument per run: the evidence table is per instrument,
+/// so the streak is too, and the detail names the span rather than the run
+/// emitting one row per silent day.
+///
+/// The marks are NOT deleted or suppressed. That is the doctrine, not an
+/// oversight: the evidence keeps the auto-backfill from re-buying an
+/// unentitled series every night, and this finding is how a human hears about
+/// it anyway.
+async fn nil_streak_findings(pool: &PgPool, run_id: i64, req: &FetchRequest)
+    -> AppResult<u64>
+{
+    use std::collections::{HashMap, HashSet};
+
+    let daily_history = req.fields.iter().any(|f|
+        crate::fetch::is_daily_history_parts(&f.value_kind, &f.fetch_via, &f.cadence));
+    if !daily_history || req.assets.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<i64> = req.assets.iter().map(|a| a.instrument_id).collect();
+    let from = req.end - chrono::Duration::days(NIL_LOOKBACK_DAYS);
+    let rows: Vec<(i64, NaiveDate)> = sqlx::query_as(
+        "SELECT instrument_id, obs_date FROM non_trading_day
+          WHERE instrument_id = ANY($1) AND obs_date BETWEEN $2 AND $3")
+        .bind(&ids).bind(from).bind(req.end).fetch_all(pool).await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut marks: HashMap<i64, HashSet<NaiveDate>> = HashMap::new();
+    for (iid, d) in rows {
+        marks.entry(iid).or_default().insert(d);
+    }
+
+    let mut findings = 0u64;
+    for a in &req.assets {
+        let Some(seen) = marks.get(&a.instrument_id) else { continue };
+        // The newest weekday this run covered that came back with no session.
+        let Some(anchor) = seen.iter().copied()
+            .filter(|d| *d >= req.start && !crate::scheduler::is_weekend(*d))
+            .max() else { continue };
+        let span = trailing_nil_weekdays(seen, anchor);
+        if span.len() < NIL_STREAK_WEEKDAYS {
+            continue;
+        }
+        let detail = format!(
+            "{} consecutive weekdays with no session ({} .. {}), threshold {} -- \
+             no market closes for a whole trading week, so this is a suspension or, \
+             more likely, a missing historical entitlement for {} (probe F6). \
+             The evidence rows stand; they are what stops the backfill re-buying it.",
+            span.len(), span[0], anchor, NIL_STREAK_WEEKDAYS, a.bdp_security);
+        sqlx::query(
+            "INSERT INTO ingest_issue (run_id, instrument_id, obs_date, severity, code, detail)
+             VALUES ($1,$2,$3,'quality','nil_streak',$4)")
+            .bind(run_id).bind(a.instrument_id).bind(anchor).bind(&detail)
+            .execute(pool).await?;
+        findings += 1;
+    }
+    Ok(findings)
+}
+
+/// P11 11.6: a periodic series whose period ended, passed its grace, and still
+/// has no print -- "the June NAV never arrived", said once per period instead
+/// of as a month of day-shaped gap noise.
+///
+/// Detection is NOT re-derived here: `scheduler::missing_periods` is the single
+/// primitive behind the due-logic, the period-shaped gap and this finding
+/// (controller ruling R2), and its `overdue` flag is the grace decision. This
+/// only turns the overdue ones into P7 findings.
+///
+/// Called after ingest, so a period this very run just bought is not reported
+/// late -- the print is already in `observation` when the misses are computed.
+/// A finding is a per-run statement, like every other one in this module: the
+/// July NAV stays overdue on every run until it arrives, and each of those runs
+/// lands 'partial' by the standing `quality_findings > 0` rule. That is the
+/// alert doing its job, and it is the ONLY status effect it has.
+pub async fn record_publication_overdue(pool: &PgPool, run_id: i64, view_id: i64,
+                                        today: NaiveDate) -> AppResult<u64> {
+    let misses = crate::scheduler::missing_periods(
+        pool, view_id, today, crate::scheduler::PERIOD_LOOKBACK).await?;
+    let mut findings = 0u64;
+    for m in misses.iter().filter(|m| m.overdue) {
+        let detail = format!(
+            "the {} period {} ({} .. {}) has no {} print for {} and is past its \
+             publication grace -- the print is late, not the days inside it",
+            m.cadence, m.period, m.start, m.end, m.mnemonic, m.label);
+        sqlx::query(
+            "INSERT INTO ingest_issue
+               (run_id, instrument_id, field_id, obs_date, severity, code, detail)
+             VALUES ($1,$2,$3,$4,'quality','publication_overdue',$5)")
+            .bind(run_id).bind(m.instrument_id).bind(m.field_id).bind(m.end)
+            .bind(&detail)
+            .execute(pool).await?;
+        findings += 1;
     }
     Ok(findings)
 }
@@ -299,6 +453,26 @@ mod tests {
         };
         assert_eq!(unexplained_instruments(&[1, 2, 3], &out), vec![3]);
         assert!(unexplained_instruments(&[1, 2], &out).is_empty());
+    }
+
+    /// 11.6: the walk counts WEEKDAYS. A Monday anchor reaches back through
+    /// the weekend to the previous Friday without the weekend breaking the run
+    /// or padding it -- Saturday is not evidence that a market is shut.
+    #[test]
+    fn the_nil_walk_steps_over_weekends_and_stops_at_the_first_traded_day() {
+        let marked: std::collections::HashSet<NaiveDate> = [
+            "2026-08-13", "2026-08-14", "2026-08-17", "2026-08-18",
+        ].iter().map(|s| d(s)).collect();
+        // Tue 08-18 back to Thu 08-13: four weekdays, the weekend stepped over.
+        let span = trailing_nil_weekdays(&marked, d("2026-08-18"));
+        assert_eq!(span, vec![d("2026-08-13"), d("2026-08-14"),
+                              d("2026-08-17"), d("2026-08-18")]);
+        assert!(span.len() < NIL_STREAK_WEEKDAYS, "four is under the alarm");
+
+        // 08-12 traded, so it is the wall the walk stops at.
+        assert!(!marked.contains(&d("2026-08-12")));
+        // An unmarked anchor has no trailing run at all.
+        assert!(trailing_nil_weekdays(&marked, d("2026-08-19")).is_empty());
     }
 
     /// A request/session-level problem (no instrument_id, e.g. a sidecar

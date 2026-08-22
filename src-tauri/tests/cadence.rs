@@ -6,10 +6,13 @@ mod common;
 use chrono::NaiveDate;
 use common::uniq;
 use getbloomdata_lib::error::AppResult;
-use getbloomdata_lib::fetch::{FetchOutcome, FetchRequest, RequestSpec};
+use getbloomdata_lib::fetch::{
+    CellProblem, CellValue, FetchAsset, FetchField, FetchOutcome, FetchRequest, ObsCell,
+    PeriodicLeg, RequestSpec,
+};
 use getbloomdata_lib::instrument::store::{self, NewAlias};
 use getbloomdata_lib::orchestrator::{self, DataFetcher, PipelineConfig, RunOutcome};
-use getbloomdata_lib::{fetch, fields, registry, scheduler, views};
+use getbloomdata_lib::{fetch, fields, ingest, quality, registry, scheduler, views};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -724,4 +727,311 @@ async fn a_second_run_the_same_day_does_not_re_buy_the_periodic_leg() {
         .bind(fx.view).execute(&pool).await.unwrap();
     assert!(orchestrator::periodic_attempted_today(&pool, fx.view, today).await.unwrap(),
             "a FAILED attempt still spends the day -- the gap-backfill doctrine");
+}
+
+// ===========================================================================
+// 11.6 Evidence honesty: gating, the NIL-streak alarm, publication_overdue.
+//
+// All three exist because of probe finding F6: an unentitled bond returned NIL
+// for every weekday of the capture, and the pre-P11 rules would have written
+// eight `non_trading_day` rows -- an entitlement hole permanently disguised as
+// a run of holidays, with zero alerts.
+// ===========================================================================
+
+/// A second instrument in the fixture's class, view and book -- so a test can
+/// say "this security is inside the periodic leg and that one is not" about
+/// the SAME date.
+async fn add_instrument(pool: &sqlx::PgPool, fx: &Fx, stem: &str) -> i64 {
+    let inst = store::create(pool).await.unwrap();
+    let security = format!("{} Equity", uniq(stem));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
+        id_type: "bdp_security".into(), value: security.clone(),
+        exch_code: Some("US".into()), valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(inst.instrument_id).bind(fx.class).bind(&security)
+        .execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(fx.view).bind(inst.instrument_id).execute(pool).await.unwrap();
+    inst.instrument_id
+}
+
+/// A fresh run row to hang one leg of a multi-run scenario off. Backdated for
+/// the same reason `fixture` backdates its own (the periodic once-a-day cap).
+async fn new_run(pool: &sqlx::PgPool, fx: &Fx) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, started_at)
+         VALUES ($1,'eod','manual','ok','2000-01-03') RETURNING id")
+        .bind(fx.view).fetch_one(pool).await.unwrap()
+}
+
+fn asset_of(fx: &Fx, instrument: i64) -> FetchAsset {
+    FetchAsset {
+        instrument_id: instrument,
+        asset_class_id: fx.class,
+        class_name: "Fixture".into(),
+        label: fx.security.clone(),
+        bdp_security: fx.security.clone(),
+    }
+}
+
+/// Bloomberg answering "nothing here" for each of `days` -- Rule A's exact
+/// input, and what an unentitled series returns on every single weekday (F6).
+fn nil_outcome(instrument: i64, field: i64, days: &[NaiveDate]) -> FetchOutcome {
+    FetchOutcome {
+        cells: vec![],
+        problems: days.iter().map(|&on| CellProblem {
+            instrument_id: Some(instrument), field_id: Some(field),
+            obs_date: Some(on), code: "no_data".into(), detail: "NIL".into(),
+        }).collect(),
+    }
+}
+
+async fn issues_of(pool: &sqlx::PgPool, run: i64, code: &str) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT severity, detail FROM ingest_issue
+                     WHERE run_id = $1 AND code = $2 ORDER BY id")
+        .bind(run).bind(code).fetch_all(pool).await.unwrap()
+}
+
+async fn marks_of(pool: &sqlx::PgPool, instrument: i64) -> Vec<NaiveDate> {
+    sqlx::query_scalar("SELECT obs_date FROM non_trading_day
+                         WHERE instrument_id = $1 ORDER BY obs_date")
+        .bind(instrument).fetch_all(pool).await.unwrap()
+}
+
+/// (a) A periodic leg's absent days are not holiday evidence. A monthly series
+/// prints once; the other twenty weekdays of the month are silent BY DESIGN,
+/// and recording them would both fabricate ~240 fake holidays a year and
+/// permanently suppress the period's real gap.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_periodic_legs_absent_days_are_never_non_trading_evidence() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "PerShadow", "monthly", 10).await;
+    let nav = add_field(&pool, &fx, "FUND_NET_ASSET_VAL", None, "history", "numeric").await;
+    let (ps, pe) = (d("2026-07-01"), d("2026-07-31"));
+
+    let req = FetchRequest {
+        run_id: fx.run,
+        assets: vec![asset_of(&fx, fx.instrument)],
+        fields: vec![FetchField {
+            field_id: nav, asset_class_id: fx.class,
+            mnemonic: "FUND_NET_ASSET_VAL".into(), value_kind: "numeric".into(),
+            cadence: "monthly".into(), fetch_via: "history".into() }],
+        start: d("2026-08-18"), end: d("2026-08-18"),
+        periodic: vec![PeriodicLeg {
+            cadence: "monthly".into(), start: ps, end: pe,
+            instrument_ids: vec![fx.instrument], field_ids: vec![nav] }],
+    };
+    // The month came back with a dated NIL on three of its weekdays.
+    let out = nil_outcome(fx.instrument, nav,
+                          &[d("2026-07-15"), d("2026-07-30"), pe]);
+
+    let n = ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+    assert_eq!(n, 0, "silence inside a period is expected, not a holiday");
+    assert!(marks_of(&pool, fx.instrument).await.is_empty());
+}
+
+/// The binding mixed-view case: one request carries a daily leg AND a periodic
+/// leg. The gate is per (instrument, date), derived from the legs themselves --
+/// the daily leg's own silence is still recorded, and a date inside a periodic
+/// leg's range is still recorded for an instrument that leg does not cover.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_mixed_request_gates_evidence_per_instrument_and_date() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "MixEvid", "daily", 10).await;
+    let px = add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+    let nav = add_field(&pool, &fx, "FUND_NET_ASSET_VAL", Some("monthly"),
+                        "history", "numeric").await;
+    // A second name in the same view that the periodic leg does NOT cover.
+    let daily_only = add_instrument(&pool, &fx, "MixDaily").await;
+    let (ps, pe) = (d("2026-07-01"), d("2026-07-31"));
+    let day = d("2026-08-18"); // Tuesday, the run's own target
+
+    let req = FetchRequest {
+        run_id: fx.run,
+        assets: vec![asset_of(&fx, fx.instrument), asset_of(&fx, daily_only)],
+        fields: vec![
+            FetchField::daily_history(px, fx.class, "PX_LAST", "numeric"),
+            FetchField {
+                field_id: nav, asset_class_id: fx.class,
+                mnemonic: "FUND_NET_ASSET_VAL".into(), value_kind: "numeric".into(),
+                cadence: "monthly".into(), fetch_via: "history".into() },
+        ],
+        start: day, end: day,
+        periodic: vec![PeriodicLeg {
+            cadence: "monthly".into(), start: ps, end: pe,
+            instrument_ids: vec![fx.instrument], field_ids: vec![nav] }],
+    };
+    let mut out = nil_outcome(fx.instrument, nav, &[pe]);               // inside the leg
+    out.problems.extend(nil_outcome(daily_only, nav, &[pe]).problems);  // same date, no leg
+    out.problems.extend(nil_outcome(fx.instrument, px, &[day]).problems);
+    out.problems.extend(nil_outcome(daily_only, px, &[day]).problems);
+
+    ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+
+    assert_eq!(marks_of(&pool, fx.instrument).await, vec![day],
+               "the periodic leg's date is shadowed for the instrument it covers; \
+                the daily leg's own silence is still evidence");
+    assert_eq!(marks_of(&pool, daily_only).await, vec![pe, day],
+               "an instrument outside the leg is not shadowed by someone else's period");
+}
+
+/// (b) Five consecutive all-NIL weekdays -- assembled across two runs, exactly
+/// as an entitlement hole assembles it in production -- raise ONE `nil_streak`
+/// quality finding, and the evidence rows stay (spec 11.6: the alarm is the
+/// human's signal, the evidence is what stops the machine re-buying junk).
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn five_all_nil_weekdays_across_two_runs_raise_exactly_one_nil_streak() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "NilStreak", "daily", 10).await;
+    let px = add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+    let (mon, tue, wed, thu, fri) = (d("2026-08-17"), d("2026-08-18"), d("2026-08-19"),
+                                     d("2026-08-20"), d("2026-08-21"));
+    let req_of = |run: i64, start: NaiveDate, end: NaiveDate| FetchRequest {
+        run_id: run,
+        assets: vec![asset_of(&fx, fx.instrument)],
+        fields: vec![FetchField::daily_history(px, fx.class, "PX_LAST", "numeric")],
+        start, end, periodic: vec![],
+    };
+
+    // Run 1: a four-weekday range, NIL on every day of it.
+    let r1 = new_run(&pool, &fx).await;
+    let req1 = req_of(r1, mon, thu);
+    let out1 = nil_outcome(fx.instrument, px, &[mon, tue, wed, thu]);
+    ingest::record_non_trading_days(&pool, &req1, &out1).await.unwrap();
+    quality::run_quality_gate(&pool, r1, &req1, &out1).await.unwrap();
+    assert!(issues_of(&pool, r1, "nil_streak").await.is_empty(),
+            "four weekdays is under the threshold -- a long weekend is real");
+
+    // Run 2: Friday is the fifth.
+    let r2 = new_run(&pool, &fx).await;
+    let req2 = req_of(r2, fri, fri);
+    let out2 = nil_outcome(fx.instrument, px, &[fri]);
+    ingest::record_non_trading_days(&pool, &req2, &out2).await.unwrap();
+    let n = quality::run_quality_gate(&pool, r2, &req2, &out2).await.unwrap();
+    assert!(n >= 1, "the streak finding counts toward the run's quality findings");
+
+    let found = issues_of(&pool, r2, "nil_streak").await;
+    assert_eq!(found.len(), 1, "once per run, per instrument: {found:?}");
+    assert_eq!(found[0].0, "quality", "P7 severity, not a warn");
+    assert!(found[0].1.contains("2026-08-17") && found[0].1.contains("2026-08-21"),
+            "the detail names the span: {}", found[0].1);
+
+    assert_eq!(marks_of(&pool, fx.instrument).await, vec![mon, tue, wed, thu, fri],
+               "the evidence is STILL recorded -- it is what stops the auto-backfill \
+                re-buying an unentitled series every day");
+}
+
+/// (c) Four is not five, and five weekdays with a hole in the middle are not a
+/// streak either: the run has to be CONSECUTIVE, or a fortnight of scattered
+/// real holidays would cry wolf.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn four_consecutive_nil_weekdays_stay_quiet() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "NilShort", "daily", 10).await;
+    let px = add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+    // Tue..Fri NIL (four), plus the PREVIOUS Friday -- five marks, but Monday
+    // in between traded, so the trailing run is four.
+    let days = [d("2026-08-14"), d("2026-08-18"), d("2026-08-19"),
+                d("2026-08-20"), d("2026-08-21")];
+    let run = new_run(&pool, &fx).await;
+    let req = FetchRequest {
+        run_id: run,
+        assets: vec![asset_of(&fx, fx.instrument)],
+        fields: vec![FetchField::daily_history(px, fx.class, "PX_LAST", "numeric")],
+        start: d("2026-08-21"), end: d("2026-08-21"), periodic: vec![],
+    };
+    let out = nil_outcome(fx.instrument, px, &days);
+    ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+    quality::run_quality_gate(&pool, run, &req, &out).await.unwrap();
+
+    assert!(issues_of(&pool, run, "nil_streak").await.is_empty(),
+            "2026-08-17 traded, so the trailing run is four weekdays, not five");
+    assert_eq!(marks_of(&pool, fx.instrument).await.len(), 5);
+}
+
+/// (d) A period late past grace is a `publication_overdue` quality finding
+/// naming the period -- "the June NAV never arrived", instead of a month of
+/// day-shaped gap noise.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn an_overdue_period_is_a_publication_overdue_finding_naming_the_period() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "PubOverdue", "monthly", 10).await;
+    let nav = add_field(&pool, &fx, "FUND_NET_ASSET_VAL", None, "history", "numeric").await;
+    add_obs(&pool, &fx, nav, d("2026-06-30"), 101.0).await; // June printed; July never did
+
+    // Inside grace (July ended 07-31, grace 10 -> 08-10) nothing is anomalous.
+    let quiet = new_run(&pool, &fx).await;
+    let n = quality::record_publication_overdue(&pool, quiet, fx.view, d("2026-08-09"))
+        .await.unwrap();
+    assert_eq!(n, 0, "a late print inside grace is not yet late enough to alarm");
+
+    let run = new_run(&pool, &fx).await;
+    let n = quality::record_publication_overdue(&pool, run, fx.view, d("2026-08-12"))
+        .await.unwrap();
+    assert_eq!(n, 1, "exactly the one period that is past grace and unprinted");
+
+    let found = issues_of(&pool, run, "publication_overdue").await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "quality");
+    assert!(found[0].1.contains("2026-07"),
+            "the finding names the period, not a fake day range: {}", found[0].1);
+    assert!(found[0].1.contains("FUND_NET_ASSET_VAL"),
+            "and the field that failed to print: {}", found[0].1);
+}
+
+/// ... and it is wired into every run, AFTER ingest: the period this run
+/// actually bought is not reported late, and the one it could not buy is.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_run_flags_the_period_it_could_not_buy_and_not_the_one_it_just_did() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "PubWire", "monthly", 0).await;
+    let nav = add_field(&pool, &fx, "FUND_NET_ASSET_VAL", None, "history", "numeric").await;
+    let today = chrono::Local::now().date_naive();
+    let periods = scheduler::completed_periods(today, "monthly", 2);
+    let (newest, older) = (periods[0], periods[1]);
+
+    // The newest period prints in this very run; the older one stays missing.
+    struct OneMonth(i64, i64, NaiveDate);
+    impl DataFetcher for OneMonth {
+        async fn fetch(&self, _req: &FetchRequest, _audit: Option<&Path>)
+            -> AppResult<FetchOutcome> {
+            Ok(FetchOutcome {
+                cells: vec![ObsCell { instrument_id: self.0, field_id: self.1,
+                                      obs_date: self.2, value: CellValue::Num(103.5) }],
+                problems: vec![],
+            })
+        }
+    }
+    let out = orchestrator::run_eod_with(
+        &pool, &cfg(1_000_000), &OneMonth(fx.instrument, nav, newest.1),
+        fx.view, "manual", d("2026-08-18"), true).await.unwrap();
+    let RunOutcome::Completed { run_id, quality_findings, .. } = out else {
+        panic!("{out:?}");
+    };
+    assert_eq!(quality_findings, 1,
+               "one overdue period, and nothing else to say about this run");
+
+    let found = issues_of(&pool, run_id, "publication_overdue").await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    let label = scheduler::period_label(older.0, "monthly");
+    assert!(found[0].1.contains(&label), "expected {label} in: {}", found[0].1);
+    assert!(!found[0].1.contains(&scheduler::period_label(newest.0, "monthly")),
+            "the period this run just bought is not late: {}", found[0].1);
+
+    let status: String = sqlx::query_scalar("SELECT status FROM run WHERE id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "partial",
+               "a quality finding makes the run partial -- the standing P7 rule, \
+                and publication_overdue does nothing beyond it");
 }

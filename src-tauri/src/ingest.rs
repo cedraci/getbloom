@@ -160,13 +160,44 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
 ///   instrument that returned cells elsewhere in the range, is non-trading
 ///   by inference (this also covers per-security suspensions, which equally
 ///   have no price to backfill).
+///
+/// P11 11.6, gating: both rules are about a DAILY history fetch, and only
+/// about one. A monthly NAV prints once and is silent on the other twenty
+/// weekdays BY DESIGN; reading that silence as evidence would fabricate ~240
+/// fake holidays a year per fund AND permanently suppress the period's real
+/// gap -- the table would stop meaning "Bloomberg said this instrument had no
+/// session that day". Two gates, coarse and fine:
+///
+/// * the orchestrator does not call this at all when the run planned no daily
+///   history spec (R3: a history spec with no `periodicity`);
+/// * here, per (instrument, date): anything a periodic leg of THIS request
+///   covers is that leg's business, not the daily leg's. The exclusion is
+///   derived from `req.periodic` -- the legs already carry their own
+///   securities and period range -- so no second flag exists to drift out of
+///   step with what was actually asked (controller ruling R3).
 pub async fn record_non_trading_days(pool: &PgPool, req: &crate::fetch::FetchRequest,
                                      outcome: &FetchOutcome) -> AppResult<u64> {
     use chrono::NaiveDate;
     use std::collections::{HashMap, HashSet};
 
+    // Is this (instrument, date) inside a periodic leg's range for that very
+    // instrument? A neighbour's period says nothing about a name the leg does
+    // not carry, so the instrument list is part of the test, not just the
+    // dates.
+    let shadowed = |iid: i64, d: NaiveDate| -> bool {
+        req.periodic.iter().any(|l|
+            d >= l.start && d <= l.end && l.instrument_ids.contains(&iid))
+    };
+
+    // Periodic cells are excluded here too, and for the same reason they are
+    // excluded from the marks: a monthly print is not proof that the
+    // instrument "answered" for the daily range, which is exactly what rule B
+    // would otherwise take it for.
     let mut cells: HashMap<i64, HashSet<NaiveDate>> = HashMap::new();
     for c in &outcome.cells {
+        if shadowed(c.instrument_id, c.obs_date) {
+            continue;
+        }
         cells.entry(c.instrument_id).or_default().insert(c.obs_date);
     }
     let mut no_data: HashSet<(i64, NaiveDate)> = HashSet::new();
@@ -181,7 +212,7 @@ pub async fn record_non_trading_days(pool: &PgPool, req: &crate::fetch::FetchReq
     let mut marks: Vec<(i64, NaiveDate, &'static str)> = Vec::new();
     for &(iid, d) in &no_data {
         let has_cell = cells.get(&iid).is_some_and(|s| s.contains(&d));
-        if !has_cell && !other.contains(&(iid, d)) {
+        if !has_cell && !other.contains(&(iid, d)) && !shadowed(iid, d) {
             marks.push((iid, d, "no_data"));
         }
     }
@@ -192,7 +223,8 @@ pub async fn record_non_trading_days(pool: &PgPool, req: &crate::fetch::FetchReq
                 if !crate::scheduler::is_weekend(day)
                     && !have.contains(&day)
                     && !no_data.contains(&(iid, day))
-                    && !other.contains(&(iid, day)) {
+                    && !other.contains(&(iid, day))
+                    && !shadowed(iid, day) {
                     marks.push((iid, day, "range_inference"));
                 }
                 day += chrono::Duration::days(1);
