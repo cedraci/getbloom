@@ -179,7 +179,8 @@ async fn load_view(pool: &PgPool, view_id: i64, only: Option<&[i64]>) -> AppResu
         });
     }
     let mut fields = Vec::with_capacity(fields_db.len());
-    for f in &fields_db {
+    for vf in &fields_db {
+        let f = &vf.def;
         if f.bbg_ftype.as_deref() == Some("BulkFormat") {
             // plan_requests would coerce a table into one meaningless string
             // (the sidecar docstring's exact warning). Skipped and said out
@@ -198,6 +199,12 @@ async fn load_view(pool: &PgPool, view_id: i64, only: Option<&[i64]>) -> AppResu
             asset_class_id: f.asset_class_id,
             mnemonic: f.mnemonic.clone(),
             value_kind: f.value_kind.clone(),
+            // P11 11.1/11.2: the planner partitions on these two, and this is
+            // the only place they enter the pipeline. Under migration 0014's
+            // defaults every field arrives daily/history -- today's behaviour,
+            // unchanged.
+            cadence: vf.effective_cadence.clone(),
+            fetch_via: f.fetch_via.clone(),
         });
     }
     Ok(Loaded { view_name: view.name, assets, fields })

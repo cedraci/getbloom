@@ -24,6 +24,45 @@ pub fn weekdays_between(start: NaiveDate, end: NaiveDate) -> i64 {
     n
 }
 
+/// Is `d` the last calendar day of its month?
+fn is_month_end(d: NaiveDate) -> bool {
+    d.succ_opt().map(|next| next.month() != d.month()).unwrap_or(true)
+}
+
+/// Inclusive count of *period ends* in `[start, end]` for a cadence -- how many
+/// prints a ranged periodic HistoricalDataRequest can return (probe F3: one row
+/// per ended period, and only after the period ends).
+///
+/// Period ends are the calendar's, not the exchange's: Fridays for `weekly`,
+/// the last calendar day of the month for `monthly`, the last day of
+/// March/June/September/December for `quarterly`. The print itself is dated the
+/// period's last *trading* day, which is on or before the calendar end and
+/// therefore inside the same range -- counting calendar ends neither
+/// double-counts nor drops a period.
+///
+/// Cadences with no period structure (`daily`, `irregular`) fall back to
+/// `weekdays_between`, so a caller that hands this an unstructured cadence
+/// charges exactly what it always charged rather than silently under-counting.
+/// The match is case-insensitive: the database says `monthly`, the sidecar wire
+/// says `MONTHLY`, and `dispatched_hits` passes the wire spelling straight in.
+pub fn periods_between(start: NaiveDate, end: NaiveDate, cadence: &str) -> i64 {
+    let is_period_end: fn(NaiveDate) -> bool = match cadence.to_ascii_lowercase().as_str() {
+        "weekly" => |d: NaiveDate| d.weekday() == Weekday::Fri,
+        "monthly" => is_month_end,
+        "quarterly" => |d: NaiveDate| is_month_end(d) && d.month().is_multiple_of(3),
+        _ => return weekdays_between(start, end),
+    };
+    let mut d = start;
+    let mut n = 0;
+    while d <= end {
+        if is_period_end(d) {
+            n += 1;
+        }
+        d += chrono::Duration::days(1);
+    }
+    n
+}
+
 pub fn estimate_eod_hits(assets: &[FetchAsset], fields: &[FetchField]) -> i64 {
     assets.iter().map(|a|
         fields.iter().filter(|f| f.asset_class_id == a.asset_class_id).count() as i64
@@ -84,9 +123,7 @@ mod tests {
         let mk_a = |id, class| FetchAsset {
             instrument_id: id, asset_class_id: class, class_name: format!("C{class}"),
             label: format!("A{id}"), bdp_security: format!("S{id} Equity") };
-        let mk_f = |id, class, m: &str| FetchField {
-            field_id: id, asset_class_id: class,
-            mnemonic: m.into(), value_kind: "numeric".into() };
+        let mk_f = |id, class, m: &str| FetchField::daily_history(id, class, m, "numeric");
         // 2 equity assets x 3 equity fields + 1 index asset x 1 index field = 7
         (vec![mk_a(1, 10), mk_a(2, 10), mk_a(3, 20)],
          vec![mk_f(1, 10, "PX_LAST"), mk_f(2, 10, "PX_BID"), mk_f(3, 10, "PX_ASK"),
@@ -117,6 +154,56 @@ mod tests {
         let s = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
         let e = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
         assert_eq!(estimate_backfill_hits(&a, &f, s, e), 70);
+    }
+
+    /// P11 11.4: a periodic range is charged per *period end* inside it, not
+    /// per weekday. Fridays for weekly, last calendar day of the month for
+    /// monthly, last day of Mar/Jun/Sep/Dec for quarterly.
+    #[test]
+    fn periods_between_counts_period_ends_inclusive() {
+        let (jun1, aug31) = (NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+                             NaiveDate::from_ymd_opt(2026, 8, 31).unwrap());
+        assert_eq!(periods_between(jun1, aug31, "monthly"), 3, "Jun/Jul/Aug ends");
+        assert_eq!(periods_between(jun1, aug31, "quarterly"), 1, "only Jun 30 is a quarter end");
+
+        // Fridays in August 2026: 7, 14, 21, 28.
+        let (aug1, aug31b) = (NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(), aug31);
+        assert_eq!(periods_between(aug1, aug31b, "weekly"), 4);
+
+        // A range that ends the day before a month end contains none of it.
+        assert_eq!(periods_between(NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+                                   NaiveDate::from_ymd_opt(2026, 6, 29).unwrap(),
+                                   "monthly"), 0);
+        // A year of quarter ends, and the leap-February edge.
+        assert_eq!(periods_between(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                                   NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+                                   "quarterly"), 4);
+        assert_eq!(periods_between(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                                   NaiveDate::from_ymd_opt(2024, 2, 29).unwrap(),
+                                   "monthly"), 1);
+    }
+
+    /// Cadences with no period structure keep the weekday count the budget has
+    /// always charged -- `periods_between` is a superset of `weekdays_between`,
+    /// so no caller can accidentally under-charge a daily range.
+    #[test]
+    fn periods_between_falls_back_to_weekdays_for_structureless_cadences() {
+        let s = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+        let e = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        assert_eq!(periods_between(s, e, "daily"), weekdays_between(s, e));
+        assert_eq!(periods_between(s, e, "irregular"), weekdays_between(s, e));
+    }
+
+    /// The sidecar speaks `MONTHLY`; the database speaks `monthly`.
+    /// `dispatched_hits` hands the wire spelling straight through, so the
+    /// match must not care which arrives.
+    #[test]
+    fn periods_between_accepts_the_sidecar_spelling() {
+        let s = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let e = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        assert_eq!(periods_between(s, e, "MONTHLY"), 3);
+        assert_eq!(periods_between(s, e, "WEEKLY"), periods_between(s, e, "weekly"));
+        assert_eq!(periods_between(s, e, "QUARTERLY"), 1);
     }
 
     #[test]

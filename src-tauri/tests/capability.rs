@@ -247,9 +247,7 @@ fn stale_req(rid: i64, iid: i64, fid: i64, class: i64,
         assets: vec![FetchAsset { instrument_id: iid, asset_class_id: class,
                                   class_name: "c".into(), label: "l".into(),
                                   bdp_security: "X US Equity".into() }],
-        fields: vec![FetchField { field_id: fid, asset_class_id: class,
-                                  mnemonic: "PX_LAST".into(),
-                                  value_kind: "numeric".into() }],
+        fields: vec![FetchField::daily_history(fid, class, "PX_LAST", "numeric")],
         start, end,
     }
 }

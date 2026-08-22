@@ -112,10 +112,28 @@ pub async fn view_instruments(pool: &PgPool, view_id: i64) -> AppResult<Vec<Book
         .fetch_all(pool).await?)
 }
 
-pub async fn view_fields(pool: &PgPool, view_id: i64) -> AppResult<Vec<FieldDef>> {
-    let explicit = sqlx::query_as::<_, FieldDef>(
-        "SELECT f.* FROM field_def f
-         JOIN view_field vf ON vf.field_id = f.id
+/// A field as the planner sees it: its definition plus the one attribute that
+/// is not on the row -- the **effective** cadence,
+/// `COALESCE(field_def.cadence, asset_class.default_cadence)` (P11 11.1, the
+/// same COALESCE idiom `quality.rs` uses for `qc_stale_days`).
+///
+/// `fetch_via` needs no resolution: it lives on `field_def` and rides along
+/// inside `def`. Both are flattened on the wire, so the shape the UI already
+/// consumes gains a key and loses none.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ViewField {
+    #[sqlx(flatten)]
+    #[serde(flatten)]
+    pub def: FieldDef,
+    pub effective_cadence: String,
+}
+
+pub async fn view_fields(pool: &PgPool, view_id: i64) -> AppResult<Vec<ViewField>> {
+    let explicit = sqlx::query_as::<_, ViewField>(
+        "SELECT f.*, COALESCE(f.cadence, ac.default_cadence) AS effective_cadence
+           FROM field_def f
+           JOIN asset_class ac ON ac.id = f.asset_class_id
+           JOIN view_field vf ON vf.field_id = f.id
          WHERE vf.view_id = $1 AND f.active ORDER BY f.asset_class_id, f.mnemonic",
     )
     .bind(view_id)
@@ -125,10 +143,12 @@ pub async fn view_fields(pool: &PgPool, view_id: i64) -> AppResult<Vec<FieldDef>
         return Ok(explicit);
     }
     // Spec default: all active fields of the classes present in the view's instruments.
-    Ok(sqlx::query_as::<_, FieldDef>(
-        "SELECT DISTINCT f.* FROM field_def f
-         JOIN book_entry b ON b.asset_class_id = f.asset_class_id
-         JOIN view_instrument vi ON vi.instrument_id = b.instrument_id
+    Ok(sqlx::query_as::<_, ViewField>(
+        "SELECT DISTINCT f.*, COALESCE(f.cadence, ac.default_cadence) AS effective_cadence
+           FROM field_def f
+           JOIN asset_class ac ON ac.id = f.asset_class_id
+           JOIN book_entry b ON b.asset_class_id = f.asset_class_id
+           JOIN view_instrument vi ON vi.instrument_id = b.instrument_id
          WHERE vi.view_id = $1 AND f.active AND b.active
          ORDER BY f.asset_class_id, f.mnemonic",
     )

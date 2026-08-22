@@ -4,23 +4,26 @@
 mod common;
 
 use common::uniq;
-use getbloomdata_lib::{fields, registry};
+use getbloomdata_lib::{fields, registry, views};
 
 // ---------------------------------------------------------------------------
 // 11.1 Effective cadence = COALESCE(field_def.cadence, asset_class.default_cadence)
 // -- the same COALESCE idiom quality.rs uses for qc_stale_days.
 // ---------------------------------------------------------------------------
 
-/// The query path production uses to resolve effective cadence (mirrors
-/// quality.rs::run_quality_gate's `COALESCE(f.qc_stale_days, ac.qc_stale_days_default)`
-/// join, one column over).
+/// Resolve a field's effective cadence *through production*: `views::view_fields`
+/// is the planner's field-metadata source, and its `effective_cadence` column
+/// is the only COALESCE the pipeline actually consults. Asserting against a
+/// second, test-local copy of the SQL would pin the copy, not the behaviour.
 async fn effective_cadence(pool: &sqlx::PgPool, field_id: i64) -> String {
-    sqlx::query_scalar(
-        "SELECT COALESCE(f.cadence, ac.default_cadence)
-           FROM field_def f
-           JOIN asset_class ac ON ac.id = f.asset_class_id
-          WHERE f.id = $1")
-        .bind(field_id).fetch_one(pool).await.unwrap()
+    let view: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("CadEffView")).fetch_one(pool).await.unwrap();
+    sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
+        .bind(view).bind(field_id).execute(pool).await.unwrap();
+    let fields = views::view_fields(pool, view).await.unwrap();
+    fields.iter().find(|f| f.def.id == field_id)
+        .expect("the view's own field must come back from view_fields")
+        .effective_cadence.clone()
 }
 
 #[tokio::test]
@@ -53,6 +56,40 @@ async fn effective_cadence_falls_back_to_class_default_when_field_cadence_is_nul
 
     assert_eq!(effective_cadence(&pool, field).await, "monthly",
         "a NULL field-level cadence must defer to the class default");
+}
+
+/// `view_fields` has TWO query paths -- the explicit `view_field` rows above,
+/// and this one: the spec default of "every active field of the classes the
+/// view's instruments belong to". The planner reads whichever fires, so the
+/// COALESCE has to live in both.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn view_fields_resolves_cadence_and_fetch_via_on_the_class_default_branch() {
+    let pool = common::pool().await;
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, default_cadence) VALUES ($1, 'quarterly') RETURNING id")
+        .bind(uniq("CadDfltBranch")).fetch_one(&pool).await.unwrap();
+    let field: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind, fetch_via)
+         VALUES ($1, $2, 'Yield', 'numeric', 'reference') RETURNING id")
+        .bind(class).bind(uniq("CADFB2")).fetch_one(&pool).await.unwrap();
+    let instrument: i64 = sqlx::query_scalar(
+        "INSERT INTO instrument DEFAULT VALUES RETURNING instrument_id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label) VALUES ($1,$2,$3)")
+        .bind(instrument).bind(class).bind(uniq("CadBook")).execute(&pool).await.unwrap();
+    let view: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("CadDfltView")).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(view).bind(instrument).execute(&pool).await.unwrap();
+
+    let got = views::view_fields(&pool, view).await.unwrap();
+    let f = got.iter().find(|f| f.def.id == field)
+        .expect("the class-default branch must return the class's active fields");
+    assert_eq!(f.effective_cadence, "quarterly",
+        "the default branch resolves the class cadence too, not just the explicit one");
+    assert_eq!(f.def.fetch_via, "reference",
+        "fetch_via rides along on the field row the planner partitions by");
 }
 
 // ---------------------------------------------------------------------------

@@ -160,7 +160,7 @@ async fn view_fields_falls_back_to_class_fields() {
     let v = views::create_view(&pool, &uniq("luxt4"), "").await.unwrap();
     views::set_view_instruments(&pool, v.id, &[entry.instrument_id]).await.unwrap();
     let fs = views::view_fields(&pool, v.id).await.unwrap(); // no explicit fields
-    assert!(fs.iter().any(|x| x.id == f.id));
+    assert!(fs.iter().any(|x| x.def.id == f.id));
 }
 
 /// Rewritten for Task 13B: `ingest.rs` documents that it deliberately replaced

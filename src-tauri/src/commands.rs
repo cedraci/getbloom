@@ -327,7 +327,7 @@ pub async fn get_view_instruments(state: State<'_, AppState>, view_id: i64)
 
 #[tauri::command]
 pub async fn get_view_fields(state: State<'_, AppState>, view_id: i64)
-    -> Result<Vec<fields::FieldDef>, AppError> {
+    -> Result<Vec<views::ViewField>, AppError> {
     views::view_fields(&state.pool, view_id).await
 }
 
@@ -346,9 +346,11 @@ pub async fn estimate_view(state: State<'_, AppState>, view_id: i64)
             class_name: String::new(), label: m.label.clone(),
             bdp_security: security })
     }).collect();
-    let specs: Vec<_> = fields_db.iter().map(|f| crate::fetch::FetchField {
-        field_id: f.id, asset_class_id: f.asset_class_id,
-        mnemonic: f.mnemonic.clone(), value_kind: f.value_kind.clone() }).collect();
+    let specs: Vec<_> = fields_db.iter().map(|vf| crate::fetch::FetchField {
+        field_id: vf.def.id, asset_class_id: vf.def.asset_class_id,
+        mnemonic: vf.def.mnemonic.clone(), value_kind: vf.def.value_kind.clone(),
+        cadence: vf.effective_cadence.clone(), fetch_via: vf.def.fetch_via.clone() })
+        .collect();
     let estimated = budget::estimate_eod_hits(&gen, &specs);
     let today_total = budget::today_hits(&state.pool).await?;
     let level = budget::check_level(estimated, today_total, cfg.soft_limit);

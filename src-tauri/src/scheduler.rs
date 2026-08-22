@@ -323,7 +323,9 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
     // an unfixable gap is noise that buries the fixable ones.
     let fields = crate::views::view_fields(pool, view_id).await?;
     let mut expected: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    for f in fields.iter().filter(|f| f.value_kind != "text") {
+    // (Task 4 makes this cadence-dispatching; today it reads `def` where it
+    // used to read the row directly -- same fields, same behaviour.)
+    for f in fields.iter().map(|vf| &vf.def).filter(|f| f.value_kind != "text") {
         *expected.entry(f.asset_class_id).or_insert(0) += 1;
     }
 

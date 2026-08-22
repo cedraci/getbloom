@@ -74,6 +74,50 @@ pub struct FetchField {
     pub asset_class_id: i64,
     pub mnemonic: String,
     pub value_kind: String,
+    /// P11 11.1: the field's **effective** cadence --
+    /// `COALESCE(field_def.cadence, asset_class.default_cadence)`, resolved by
+    /// `views::view_fields`. One of daily/weekly/monthly/quarterly/irregular.
+    pub cadence: String,
+    /// P11 11.2: which wire path collects this field, `history` (ranged
+    /// HistoricalDataRequest, today's behaviour) or `reference` (a snapshot
+    /// dated `obs_date`).
+    pub fetch_via: String,
+}
+
+impl FetchField {
+    /// The pre-P11 shape -- daily cadence on the history wire path -- which is
+    /// also what migration 0014's defaults produce for every existing field.
+    /// Constructing test and fixture fields through this keeps "unchanged"
+    /// literally unchanged.
+    pub fn daily_history(
+        field_id: i64, asset_class_id: i64, mnemonic: &str, value_kind: &str,
+    ) -> Self {
+        Self {
+            field_id,
+            asset_class_id,
+            mnemonic: mnemonic.to_string(),
+            value_kind: value_kind.to_string(),
+            cadence: "daily".into(),
+            fetch_via: "history".into(),
+        }
+    }
+}
+
+/// The sidecar's `periodicitySelection` value for an effective cadence, or
+/// `None` for the cadences that carry no period structure and ride the daily
+/// partition (`daily`, `irregular`).
+///
+/// Controller ruling R3 makes this the ONLY thing that marks a request
+/// periodic: downstream, "a history spec with no `periodicity`" *is* the
+/// daily-history predicate. No second flag exists, so no second flag can drift
+/// out of step with this mapping.
+pub fn periodicity_for(cadence: &str) -> Option<&'static str> {
+    match cadence {
+        "weekly" => Some("WEEKLY"),
+        "monthly" => Some("MONTHLY"),
+        "quarterly" => Some("QUARTERLY"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +165,16 @@ pub struct RequestSpec {
     /// sidecar contract.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub overrides: Vec<Override>,
+    /// P11 11.3: `periodicitySelection` for a history request --
+    /// WEEKLY/MONTHLY/QUARTERLY. Absent means DAILY (the sidecar's own
+    /// `spec.get("periodicity") or "DAILY"`), so the P10 host/port discipline
+    /// applies: skipped when None, and every existing daily request keeps
+    /// byte-identical wire bytes.
+    ///
+    /// R3: on a history spec, `None` is the daily-history predicate the rest
+    /// of the pipeline gates evidence on. Never set it on a reference spec.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub periodicity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +252,11 @@ fn compact(d: NaiveDate) -> String {
 /// reference value across a 30-day range would fabricate a history that was
 /// never observed. Daily runs fill them in. This also fixes the Excel path's
 /// bug of pushing text mnemonics through BDH, where they always failed.
+///
+/// P11 11.4 widens both legs without changing either: a numeric field marked
+/// `fetch_via = 'reference'` travels with the text fields (same request, more
+/// fields), and a periodic (weekly/monthly/quarterly) history field is planned
+/// by nothing here -- see the partition comment inside.
 pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
     if req.assets.is_empty() {
         return Err(AppError::Validation("view has no active assets".into()));
@@ -229,14 +288,30 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
             )));
         }
 
+        // P11 11.4 partition, in the order the predicates have to be read:
+        //
+        //   reference leg -- a text field (no history exists for it, today's
+        //     behaviour) or a field the licence only serves as a snapshot
+        //     (`fetch_via = 'reference'`, probe F6). Both are dated `obs_date`
+        //     and both are dropped from a ranged backfill below, for the same
+        //     reason: a snapshot cannot recover the past.
+        //   nothing -- a periodic (weekly/monthly/quarterly) history field.
+        //     `plan_requests` plans ONE run's work; a periodic print is fetched
+        //     when its period has ended and is still missing, which is the
+        //     due-logic planner's business, not every run's. Excluding it here
+        //     is what turns ~21 fetch-days per monthly print into 1-3.
+        //   history leg -- everything else: daily, and `irregular` (no period
+        //     structure, so it is collected opportunistically alongside daily).
+        let via_reference =
+            |f: &FetchField| f.value_kind == "text" || f.fetch_via == "reference";
         let hist: Vec<String> = class_fields
             .iter()
-            .filter(|f| f.value_kind != "text")
+            .filter(|f| !via_reference(f) && periodicity_for(&f.cadence).is_none())
             .map(|f| f.mnemonic.clone())
             .collect();
-        let text: Vec<String> = class_fields
+        let snapshot: Vec<String> = class_fields
             .iter()
-            .filter(|f| f.value_kind == "text")
+            .filter(|f| via_reference(f))
             .map(|f| f.mnemonic.clone())
             .collect();
         let securities: Vec<String> =
@@ -252,19 +327,23 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
                     end: Some(compact(req.end)),
                     obs_date: None,
                     overrides: Vec::new(),
+                    // R3: everything this planner emits is a DAILY history
+                    // request, and its absent periodicity is what says so.
+                    periodicity: None,
                 });
             }
         }
-        if !text.is_empty() && single_day {
+        if !snapshot.is_empty() && single_day {
             for chunk in securities.chunks(MAX_SECURITIES_PER_REQUEST) {
                 out.push(RequestSpec {
                     kind: "reference",
                     securities: chunk.to_vec(),
-                    fields: text.clone(),
+                    fields: snapshot.clone(),
                     start: None,
                     end: None,
                     obs_date: Some(req.start.to_string()),
                     overrides: Vec::new(),
+                    periodicity: None,
                 });
             }
         }
@@ -276,11 +355,22 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
 /// requests -- NOT the pre-flight gate estimate. The two differ: text fields
 /// are dropped from multi-day ranges, and the gate estimate also folds in the
 /// corp-action leg, which charges itself at the wire seam.
+///
+/// P11 11.4: a history request carrying a `periodicity` returns one row per
+/// *period*, not per weekday, so it is charged per period. A reference leg is
+/// one snapshot and stays x1.
 pub fn dispatched_hits(specs: &[RequestSpec], start: NaiveDate, end: NaiveDate) -> i64 {
     specs.iter().map(|s| {
-        let per_day = (s.securities.len() * s.fields.len()) as i64;
-        let days = if s.kind == "history" { crate::budget::weekdays_between(start, end) } else { 1 };
-        per_day * days
+        let per_period = (s.securities.len() * s.fields.len()) as i64;
+        let periods = if s.kind == "history" {
+            match s.periodicity.as_deref() {
+                Some(p) => crate::budget::periods_between(start, end, p),
+                None => crate::budget::weekdays_between(start, end),
+            }
+        } else {
+            1
+        };
+        per_period * periods
     }).sum()
 }
 
@@ -451,14 +541,10 @@ mod tests {
                              label: "EuroStoxx".into(), bdp_security: "SX5E Index".into() },
             ],
             fields: vec![
-                FetchField { field_id: 100, asset_class_id: 10, mnemonic: "PX_LAST".into(),
-                             value_kind: "numeric".into() },
-                FetchField { field_id: 101, asset_class_id: 10, mnemonic: "PX_VOLUME".into(),
-                             value_kind: "numeric".into() },
-                FetchField { field_id: 102, asset_class_id: 10, mnemonic: "NAME".into(),
-                             value_kind: "text".into() },
-                FetchField { field_id: 200, asset_class_id: 20, mnemonic: "PX_LAST".into(),
-                             value_kind: "numeric".into() },
+                FetchField::daily_history(100, 10, "PX_LAST", "numeric"),
+                FetchField::daily_history(101, 10, "PX_VOLUME", "numeric"),
+                FetchField::daily_history(102, 10, "NAME", "text"),
+                FetchField::daily_history(200, 20, "PX_LAST", "numeric"),
             ],
             start,
             end,
@@ -669,16 +755,150 @@ mod tests {
                              label: "B".into(), bdp_security: "B US Equity".into() },
             ],
             fields: vec![
-                FetchField { field_id: 100, asset_class_id: 10, mnemonic: "PX_LAST".into(),
-                             value_kind: "numeric".into() },
-                FetchField { field_id: 101, asset_class_id: 10, mnemonic: "NAME".into(),
-                             value_kind: "text".into() },
+                FetchField::daily_history(100, 10, "PX_LAST", "numeric"),
+                FetchField::daily_history(101, 10, "NAME", "text"),
             ],
             start: d(2026, 8, 17),
             end: d(2026, 8, 19),
         };
         let specs = plan_requests(&req).unwrap();
         assert_eq!(dispatched_hits(&specs, req.start, req.end), 6);
+    }
+
+    // ----------------------------------------------------------- P11 11.2/11.4
+
+    /// 11.2: a numeric field the licence only serves as a reference snapshot
+    /// (probe F6, bonds) joins the run's EXISTING reference leg -- same
+    /// request, more fields -- and must never ride a HistoricalDataRequest.
+    #[test]
+    fn reference_via_numeric_field_joins_the_reference_leg_not_history() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.fields.push(FetchField {
+            field_id: 103, asset_class_id: 10, mnemonic: "YLD_YTM_MID".into(),
+            value_kind: "numeric".into(), cadence: "daily".into(),
+            fetch_via: "reference".into() });
+        let plan = plan_requests(&req).unwrap();
+
+        assert!(plan.iter().filter(|r| r.kind == "history")
+                    .all(|r| !r.fields.iter().any(|f| f == "YLD_YTM_MID")),
+                "a reference-via field must never ride a history request: {plan:?}");
+        let refs: Vec<_> = plan.iter().filter(|r| r.kind == "reference").collect();
+        assert_eq!(refs.len(), 1, "it joins the existing reference leg, not a new one");
+        assert_eq!(refs[0].fields, vec!["NAME", "YLD_YTM_MID"]);
+        assert_eq!(refs[0].obs_date.as_deref(), Some("2026-08-17"));
+    }
+
+    /// 11.2: reference-via fields are excluded from a ranged backfill exactly
+    /// as text fields are -- a snapshot cannot recover the past.
+    #[test]
+    fn reference_via_field_is_absent_from_a_backfill() {
+        let mut req = sample(d(2026, 7, 1), d(2026, 7, 31));
+        req.fields.push(FetchField {
+            field_id: 103, asset_class_id: 10, mnemonic: "YLD_YTM_MID".into(),
+            value_kind: "numeric".into(), cadence: "daily".into(),
+            fetch_via: "reference".into() });
+        let plan = plan_requests(&req).unwrap();
+        assert!(plan.iter().all(|r| !r.fields.iter().any(|f| f == "YLD_YTM_MID")),
+                "backfill cannot recover a reference snapshot: {plan:?}");
+    }
+
+    /// 11.4: periodic x history pairs are planned by the due-logic (Task 4),
+    /// never by a run's plan -- and every history spec this planner emits
+    /// carries NO periodicity, which is the daily-history predicate downstream
+    /// (controller ruling R3).
+    #[test]
+    fn periodic_history_field_appears_in_no_planned_request() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.fields.push(FetchField {
+            field_id: 104, asset_class_id: 10, mnemonic: "FUND_NET_ASSET_VAL".into(),
+            value_kind: "numeric".into(), cadence: "monthly".into(),
+            fetch_via: "history".into() });
+        let plan = plan_requests(&req).unwrap();
+
+        assert!(plan.iter().all(|r| !r.fields.iter().any(|f| f == "FUND_NET_ASSET_VAL")),
+                "a monthly field is due-logic's business, not a daily run's: {plan:?}");
+        assert_eq!(plan.len(), 3, "the daily partition is untouched by its presence");
+        assert!(plan.iter().all(|r| r.periodicity.is_none()),
+                "R3: everything plan_requests emits is daily -- no periodicity key");
+    }
+
+    /// 11.4 enumerates daily x reference, periodic x history and irregular x
+    /// history but is silent on **periodic x reference**. It rides the
+    /// reference leg: a snapshot is the latest value, with no period to be due
+    /// for and no ranged request to make periodic, so there is nothing for the
+    /// due-logic to plan. The exclusion above is scoped to periodic x
+    /// *history* precisely because that is the expensive one.
+    #[test]
+    fn periodic_reference_field_still_rides_the_reference_leg() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.fields.push(FetchField {
+            field_id: 106, asset_class_id: 10, mnemonic: "FUND_NAV_SNAPSHOT".into(),
+            value_kind: "numeric".into(), cadence: "monthly".into(),
+            fetch_via: "reference".into() });
+        let plan = plan_requests(&req).unwrap();
+        let refs: Vec<_> = plan.iter().filter(|r| r.kind == "reference").collect();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].fields, vec!["NAME", "FUND_NAV_SNAPSHOT"]);
+        assert!(refs[0].periodicity.is_none(),
+                "a reference spec never carries a periodicity -- there is no range to select");
+    }
+
+    /// 11.1: `irregular` has no period structure, so it rides the daily
+    /// partition unchanged (collect opportunistically, keep what arrives).
+    #[test]
+    fn irregular_field_rides_the_daily_history_partition() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.fields.push(FetchField {
+            field_id: 105, asset_class_id: 20, mnemonic: "CAPITAL_ACCOUNT".into(),
+            value_kind: "numeric".into(), cadence: "irregular".into(),
+            fetch_via: "history".into() });
+        let plan = plan_requests(&req).unwrap();
+        let index_hist = plan.iter()
+            .find(|r| r.kind == "history" && r.securities == vec!["SX5E Index"])
+            .expect("the Index class still gets its history request");
+        assert_eq!(index_hist.fields, vec!["PX_LAST", "CAPITAL_ACCOUNT"]);
+        assert!(index_hist.periodicity.is_none());
+    }
+
+    /// P10 host/port discipline applied to `periodicity`: the wire bytes for
+    /// an existing daily request do not change by one character.
+    #[test]
+    fn periodicity_vanishes_from_the_wire_when_unset() {
+        let day = d(2026, 8, 17);
+        let mut spec = plan_requests(&sample(day, day)).unwrap().remove(0);
+        assert_eq!(
+            serde_json::to_string(&spec).unwrap(),
+            r#"{"kind":"history","securities":["AAPL US Equity","/isin/FR0000121014 Equity"],"fields":["PX_LAST","PX_VOLUME"],"start":"20260817","end":"20260817"}"#,
+            "a daily history spec must serialize byte-identically to the pre-P11 shape");
+
+        spec.periodicity = Some("MONTHLY".into());
+        let js = serde_json::to_value(&spec).unwrap();
+        assert_eq!(js["periodicity"], "MONTHLY");
+    }
+
+    /// 11.4: a periodic history request costs securities x fields x periods,
+    /// not x weekdays -- that is the ~90%-fewer-hits claim, in one assertion.
+    #[test]
+    fn dispatched_hits_charges_a_periodic_spec_per_period_not_per_weekday() {
+        let (start, end) = (d(2026, 6, 1), d(2026, 8, 31));
+        let spec = RequestSpec {
+            kind: "history",
+            securities: vec!["A US Equity".into(), "B US Equity".into()],
+            fields: vec!["FUND_NET_ASSET_VAL".into()],
+            start: Some(compact(start)), end: Some(compact(end)),
+            obs_date: None, overrides: Vec::new(),
+            periodicity: Some("MONTHLY".into()),
+        };
+        // Jun/Jul/Aug 2026 end inside the range: 2 securities x 1 field x 3.
+        assert_eq!(dispatched_hits(std::slice::from_ref(&spec), start, end), 6);
+        // The same range charged as a daily spec is every weekday's worth.
+        let daily = RequestSpec { periodicity: None, ..spec };
+        assert_eq!(dispatched_hits(&[daily], start, end),
+                   2 * crate::budget::weekdays_between(start, end));
     }
 
     #[test]
