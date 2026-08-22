@@ -155,6 +155,47 @@ pub fn is_daily_history_parts(value_kind: &str, fetch_via: &str, cadence: &str) 
     value_kind != "text" && fetch_via == "history" && cadence == "daily"
 }
 
+/// The reference leg's membership test: a text field (no history exists for
+/// it) or a field the licence only serves as a snapshot (probe F6). Hoisted
+/// out of `plan_requests` so the one other place that must know what the wire
+/// plan names -- `wire_planned_instruments` -- reads the same predicate rather
+/// than a copy of it.
+pub fn is_via_reference(f: &FetchField) -> bool {
+    f.value_kind == "text" || f.fetch_via == "reference"
+}
+
+/// The instruments this request's plan actually NAMES on the wire, outside the
+/// periodic legs -- i.e. the securities of every DAILY/REFERENCE spec
+/// `plan_requests` emits, and nothing else.
+///
+/// This is the population "requested" means to the quality gate. Pre-P11 it
+/// was simply `req.assets`, because every asset rode every run; 11.4 broke
+/// that equivalence, and reading it as the view again makes `quality_no_response`
+/// fire for a periodic class the plan legitimately skipped -- one bogus finding
+/// per member per run, every non-due day. Periodic silence is judged by
+/// `publication_overdue` after grace, and by nothing else.
+///
+/// The membership rule mirrors `plan_requests` clause for clause, including
+/// its `single_day` condition on the snapshot leg (a snapshot cannot recover
+/// the past, so a reference-only class is named by nothing in a ranged
+/// backfill). The unit test below cross-checks the two against the plan
+/// itself, so a change to one that is not made to the other is caught.
+pub fn wire_planned_instruments(req: &FetchRequest) -> Vec<i64> {
+    let single_day = req.is_single_day();
+    let named = |class_id: i64| {
+        req.fields.iter().filter(|f| f.asset_class_id == class_id).any(|f| {
+            if is_via_reference(f) { single_day } else { !is_periodic_history(f) }
+        })
+    };
+    let mut out: Vec<i64> = req.assets.iter()
+        .filter(|a| named(a.asset_class_id))
+        .map(|a| a.instrument_id)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// P11 11.4: one periodic history leg riding a run -- the fields of ONE
 /// effective cadence, fetched over a whole number of **ended** periods (F3:
 /// an unfinished period has no row, so it is never in a leg's range).
@@ -359,16 +400,14 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
         //     is what turns ~21 fetch-days per monthly print into 1-3.
         //   history leg -- everything else: daily, and `irregular` (no period
         //     structure, so it is collected opportunistically alongside daily).
-        let via_reference =
-            |f: &FetchField| f.value_kind == "text" || f.fetch_via == "reference";
         let hist: Vec<String> = class_fields
             .iter()
-            .filter(|f| !via_reference(f) && !is_periodic_history(f))
+            .filter(|f| !is_via_reference(f) && !is_periodic_history(f))
             .map(|f| f.mnemonic.clone())
             .collect();
         let snapshot: Vec<String> = class_fields
             .iter()
-            .filter(|f| via_reference(f))
+            .filter(|f| is_via_reference(f))
             .map(|f| f.mnemonic.clone())
             .collect();
         let securities: Vec<String> =
@@ -731,6 +770,66 @@ mod tests {
         no_fields.fields.retain(|f| f.asset_class_id != 20);
         let err = plan_requests(&no_fields).unwrap_err().to_string();
         assert!(err.contains("Index"), "got: {err}");
+    }
+
+    /// The quality gate's "requested" population and the plan must never
+    /// disagree. Derived here the other way round -- from the securities the
+    /// plan ACTUALLY emits outside its periodic legs -- so a change to
+    /// `plan_requests`' partition that is not mirrored in
+    /// `wire_planned_instruments` fails loudly, instead of quietly
+    /// resurrecting a `quality_no_response` for a name the run never sent.
+    #[test]
+    fn wire_planned_instruments_matches_the_plans_own_daily_and_reference_legs() {
+        fn from_the_plan(req: &FetchRequest) -> Vec<i64> {
+            let named: std::collections::HashSet<String> = plan_requests(req).unwrap()
+                .iter()
+                .filter(|s| s.periodicity.is_none())
+                .flat_map(|s| s.securities.iter().cloned())
+                .collect();
+            let mut ids: Vec<i64> = req.assets.iter()
+                .filter(|a| named.contains(&a.bdp_security))
+                .map(|a| a.instrument_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        }
+        let day = d(2026, 8, 17);
+        let (ps, pe) = (d(2026, 7, 1), d(2026, 7, 31));
+
+        // Everything daily: the plan names the whole view, single-day or ranged.
+        for req in [sample(day, day), sample(ps, pe)] {
+            assert_eq!(wire_planned_instruments(&req), vec![1, 2, 3]);
+            assert_eq!(wire_planned_instruments(&req), from_the_plan(&req));
+        }
+
+        // A reference-only class: named on a single-day run (the snapshot leg),
+        // named by nothing in a ranged backfill.
+        let mut refs_only = sample(day, day);
+        for f in refs_only.fields.iter_mut().filter(|f| f.asset_class_id == 20) {
+            f.fetch_via = "reference".into();
+        }
+        assert_eq!(wire_planned_instruments(&refs_only), vec![1, 2, 3]);
+        assert_eq!(wire_planned_instruments(&refs_only), from_the_plan(&refs_only));
+        let mut ranged = refs_only.clone();
+        (ranged.start, ranged.end) = (ps, pe);
+        assert_eq!(wire_planned_instruments(&ranged), vec![1, 2],
+                   "a snapshot cannot recover the past, so nothing names the Index");
+        assert_eq!(wire_planned_instruments(&ranged), from_the_plan(&ranged));
+
+        // A periodic class riding its own leg: the leg is NOT the daily
+        // partition, so its members are not judged by no_response.
+        let mut periodic = sample(day, day);
+        for f in periodic.fields.iter_mut().filter(|f| f.asset_class_id == 20) {
+            f.cadence = "monthly".into();
+        }
+        periodic.periodic = vec![PeriodicLeg {
+            cadence: "monthly".into(), start: ps, end: pe,
+            instrument_ids: vec![3], field_ids: vec![200] }];
+        assert!(plan_requests(&periodic).unwrap().iter()
+                    .any(|s| s.periodicity.as_deref() == Some("MONTHLY")),
+                "the leg must really be on the wire, or this pins nothing");
+        assert_eq!(wire_planned_instruments(&periodic), vec![1, 2]);
+        assert_eq!(wire_planned_instruments(&periodic), from_the_plan(&periodic));
     }
 
     #[test]

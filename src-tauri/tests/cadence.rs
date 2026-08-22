@@ -379,6 +379,20 @@ impl DataFetcher for NeverFetch {
     }
 }
 
+/// Bloomberg answering with nothing at all -- no cells, no problems. That is
+/// the shape of BOTH silences the quality gate has to tell apart: a daily name
+/// the reply silently dropped (`quality_no_response`, what the gate is FOR),
+/// and a periodic leg whose print has not published yet, which `blp_fetch.py`
+/// returns as an empty `fieldData` with no exception at all.
+struct SilentReply;
+
+impl DataFetcher for SilentReply {
+    async fn fetch(&self, _req: &FetchRequest, _audit: Option<&Path>)
+        -> AppResult<FetchOutcome> {
+        Ok(FetchOutcome::default())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fetch when due (11.4). The pure period arithmetic is unit-tested in
 // scheduler.rs; these pin the database-facing behaviour.
@@ -1148,6 +1162,112 @@ async fn a_periodic_cell_is_not_proof_that_the_daily_leg_answered() {
     assert_eq!(n, 0, "a monthly print is not proof the daily leg answered");
     assert!(marks_of(&pool, fx.instrument).await.is_empty(),
             "rule B must not infer a month of holidays from one NAV cell");
+}
+
+/// Final-review finding. `quality_no_response` is a statement about the run's
+/// WIRE PLAN -- "we named this security and Bloomberg answered neither way" --
+/// and pre-P11 that was the same thing as the view, because every asset rode
+/// every run. 11.4 broke the equivalence: a periodic class mid-period is
+/// planned by nothing.
+///
+/// Judged against the view, a mixed view (daily equities beside a monthly fund
+/// class) would file one bogus finding per fund member PER EOD RUN on every
+/// non-due day, land every one of those runs 'partial', and grow
+/// `ingest_issue` without bound -- precisely the daily noise 11.6 exists to
+/// remove. Periodic silence is judged by `publication_overdue`, after grace,
+/// and by nothing else.
+///
+/// The gate's original purpose is pinned in the SAME run: the daily equity
+/// Bloomberg silently dropped still gets its finding.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_class_the_plan_never_named_is_not_judged_by_quality_no_response() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "MixNoResp", "daily", 10).await;
+    add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+
+    // A monthly fund class sharing the view, with EVERY completed period
+    // already printed -- so nothing of it is due and the plan names none of
+    // its members, while the equity leg keeps the plan non-empty.
+    let funds: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, default_cadence, cadence_grace_days)
+         VALUES ($1,'monthly',10) RETURNING id")
+        .bind(uniq("MixFundCls")).fetch_one(&pool).await.unwrap();
+    let fund = store::create(&pool).await.unwrap();
+    let fund_security = format!("{} Equity", uniq("MIXFUND"));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, fund.instrument_id, &NewAlias {
+        id_type: "bdp_security".into(), value: fund_security.clone(),
+        exch_code: None, valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(fund.instrument_id).bind(funds).bind(&fund_security)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(fx.view).bind(fund.instrument_id).execute(&pool).await.unwrap();
+    let nav: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind)
+         VALUES ($1,'FUND_NET_ASSET_VAL','NAV','numeric') RETURNING id")
+        .bind(funds).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
+        .bind(fx.view).bind(nav).execute(&pool).await.unwrap();
+    for (_, e) in scheduler::completed_periods(chrono::Local::now().date_naive(), "monthly", 2) {
+        sqlx::query(
+            "INSERT INTO observation
+               (instrument_id, field_id, obs_date, layer, basis_id, value_num, run_id)
+             VALUES ($1,$2,$3,'raw',1,100,$4)")
+            .bind(fund.instrument_id).bind(nav).bind(e).bind(fx.run)
+            .execute(&pool).await.unwrap();
+    }
+
+    let out = orchestrator::run_eod_with(&pool, &cfg(1_000_000), &SilentReply, fx.view,
+                                         "manual", d("2026-08-18"), true).await.unwrap();
+    let RunOutcome::Completed { run_id, .. } = out else {
+        panic!("a mixed view's EOD run must complete: {out:?}");
+    };
+
+    let flagged: Vec<i64> = sqlx::query_scalar(
+        "SELECT instrument_id FROM ingest_issue
+          WHERE run_id = $1 AND code = 'quality_no_response'
+            AND instrument_id IS NOT NULL
+          ORDER BY instrument_id")
+        .bind(run_id).fetch_all(&pool).await.unwrap();
+    assert_eq!(flagged, vec![fx.instrument],
+               "the wire-planned daily name Bloomberg dropped is still flagged, and \
+                the fund the plan never named is not");
+}
+
+/// The same doctrine on the other side of the partition. A DUE periodic leg
+/// whose print has not published yet comes back SILENT -- the sidecar returns
+/// an empty `fieldData` for the whole multi-day range, with no per-cell
+/// exception to explain it -- so "requested, no answer" would be true of that
+/// instrument every single day until the print lands, bypassing the grace that
+/// `publication_overdue` exists to enforce.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_due_periodic_leg_that_has_not_printed_yet_is_not_a_no_response() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "DueSilent", "monthly", 10).await;
+    add_field(&pool, &fx, "FUND_NET_ASSET_VAL", None, "history", "numeric").await;
+
+    // Nothing has ever printed, so the completed periods ARE due: the plan is
+    // non-empty (one MONTHLY ranged request) and the gate runs.
+    let out = orchestrator::run_eod_with(&pool, &cfg(1_000_000), &SilentReply, fx.view,
+                                         "manual", d("2026-08-18"), true).await.unwrap();
+    let RunOutcome::Completed { run_id, .. } = out else {
+        panic!("an all-periodic run must complete: {out:?}");
+    };
+
+    let no_response: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM ingest_issue
+          WHERE run_id = $1 AND code = 'quality_no_response'")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(no_response, 0,
+               "an unpublished print is late, not silently dropped -- that verdict \
+                is publication_overdue's to make, once, after grace");
 }
 
 // ===========================================================================

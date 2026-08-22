@@ -19,6 +19,13 @@ export interface FieldDef {
   // the wire path ('history' ranged, 'reference' a same-day snapshot).
   cadence: string | null; fetch_via: string;
 }
+// P11 11.1: a field as the planner sees it -- views::ViewField, whose `def` is
+// #[serde(flatten)]ed, so every FieldDef key sits at the top level beside the
+// one attribute that is not on the row: the effective cadence,
+// COALESCE(field_def.cadence, asset_class.default_cadence).
+export interface ViewField extends FieldDef {
+  effective_cadence: string;
+}
 export interface View { id: number; name: string; description: string; active: boolean; }
 export interface EstimateOut {
   estimated: number; today_total: number; level: "Ok" | "SoftWarn" | "HardConfirm";
@@ -382,7 +389,7 @@ export const api = {
     invoke<void>("set_view_fields", { viewId, fieldIds }),
   getViewInstruments: (viewId: number) =>
     invoke<BookEntry[]>("get_view_instruments", { viewId }),
-  getViewFields: (viewId: number) => invoke<FieldDef[]>("get_view_fields", { viewId }),
+  getViewFields: (viewId: number) => invoke<ViewField[]>("get_view_fields", { viewId }),
   estimateView: (viewId: number) => invoke<EstimateOut>("estimate_view", { viewId }),
   budgetToday: () => invoke<BudgetToday>("budget_today"),
   runEodNow: (viewId: number, confirmed: boolean) =>

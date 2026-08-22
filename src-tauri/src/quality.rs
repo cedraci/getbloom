@@ -185,7 +185,14 @@ pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
                               outcome: &FetchOutcome) -> AppResult<u64> {
     let mut findings = 0u64;
 
-    let requested: Vec<i64> = req.assets.iter().map(|a| a.instrument_id).collect();
+    // "Requested" is what the WIRE PLAN named, never what the view holds.
+    // Pre-P11 the two were the same set; 11.4 made them differ, and reading
+    // the view would file one `quality_no_response` per periodic member on
+    // every non-due day (a mixed view turning partial daily, `ingest_issue`
+    // growing without bound) and would re-judge a due-but-unpublished print as
+    // silence every day inside its own grace. Periodic silence has exactly one
+    // judge: `record_publication_overdue`, once the grace has run out.
+    let requested = crate::fetch::wire_planned_instruments(req);
     for iid in unexplained_instruments(&requested, outcome) {
         sqlx::query(
             "INSERT INTO ingest_issue (run_id, instrument_id, severity, code, detail)
