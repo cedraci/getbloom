@@ -126,9 +126,12 @@ pub fn evaluate(sweep: &str, fields: &BTreeMap<String, String>, today: NaiveDate
             Verdict::Alive
         }
         // Unreachable through `run_sweep`, which never plans a 'none' class.
-        // Refusing rather than defaulting keeps a future third mode from
-        // silently inheriting the equity rules.
-        _ => Verdict::Alive,
+        // `NoAnswer` rather than `Alive`: a future third sweep mode that
+        // reaches here has no rules yet, and "no rules" must SURFACE -- as the
+        // anomaly issue -- rather than quietly certify a whole class alive
+        // forever. Fields came back and nothing could read them; that is
+        // exactly what the anomaly means.
+        _ => Verdict::NoAnswer,
     }
 }
 
@@ -267,11 +270,21 @@ async fn sweep_class<F: MasterFetcher>(pool: &PgPool, fetcher: &F, batch: &Sweep
 /// user has not yet retired would re-buy that investigation every single week
 /// -- the exact standing cost this whole feature exists to end.
 ///
-/// The verbatim MARKET_STATUS is recorded first, when the sweep learned one,
-/// because that attr IS the cooldown and it is the same fact from the same
-/// field P6 records. The maturity arm never sees MARKET_STATUS and so writes
-/// nothing: its dead names cost one cheap `retire_path` per week until the
-/// user retires the book entry, which is what the issue tells them to do.
+/// What arms it is a recorded NON-ACTV status, never merely a recorded one:
+/// `lifecycle::recently_investigated` carries the reasoning, and the short
+/// version is that P6 files an ACTV answer for every candidate it asks, so a
+/// routine "still alive" would otherwise suppress the delisting that follows
+/// it by up to a month. A cooldown must be armed by the expensive thing it
+/// exists to ration, not by its cheap neighbour.
+///
+/// The verbatim MARKET_STATUS is recorded before the hand-off, when the sweep
+/// learned one, because that attr IS the cooldown and it is the same fact from
+/// the same field P6 records. The maturity arm never sees MARKET_STATUS and so
+/// writes nothing: it can only ever read a cooldown some genuine investigation
+/// armed, and its own dead names cost one cheap `retire_path` (a single
+/// `hist_ids` hit) per week until the user retires the book entry -- which is
+/// exactly what the issue tells them to do, and `view_instruments` drops the
+/// entry from the sweep the moment they do.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch<F: MasterFetcher>(pool: &PgPool, fetcher: &F, instrument_id: i64,
                                     security: &str, reason: &str,
@@ -279,7 +292,7 @@ async fn dispatch<F: MasterFetcher>(pool: &PgPool, fetcher: &F, instrument_id: i
                                     today: NaiveDate, summary: &mut SweepSummary)
     -> AppResult<()>
 {
-    if crate::lifecycle::recently_checked(pool, instrument_id, today).await? {
+    if crate::lifecycle::recently_investigated(pool, instrument_id, today).await? {
         summary.cooldown_skipped += 1;
         return Ok(());
     }
@@ -352,8 +365,9 @@ mod tests {
         assert_eq!(evaluate("maturity", &f(&[("MATURITY", "2026-08-24")]), today()),
                    Verdict::Alive, "T+2 is in the future; the sweep is not what saves us");
         assert_eq!(evaluate("none", &f(&[("MATURITY", "2026-08-19")]), today()),
-                   Verdict::Alive,
-                   "an opted-out class has no rules, so it can reach no verdict");
+                   Verdict::NoAnswer,
+                   "an opted-out class has no rules, so it reaches no verdict -- and \
+                    an unreadable answer surfaces as an anomaly, never as 'alive'");
         assert!(master_fetch::sweep_fields("none").is_empty(),
                 "and it asks nothing, which is the guard that actually holds");
     }

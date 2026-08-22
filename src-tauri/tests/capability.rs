@@ -432,8 +432,13 @@ async fn ma_incapable_class_retires_instead_of_investigating_ma() {
         "SELECT detail FROM ingest_issue
           WHERE instrument_id = $1 AND code = 'lifecycle_retired'")
         .bind(iid).fetch_one(&pool).await.unwrap();
-    assert_eq!(detail, "instrument inactive; class opted out of M&A investigation \
-                         -- series capped at INACTIVE_DATE, retire the book entry");
+    // P11 11.8 widened this text: the issue now names the instrument and the
+    // reason it is dead. A called bond's holder could not tell from "instrument
+    // inactive" alone what ended the series -- and the identity sweep, the
+    // other caller of this path, arrives with a date to put here.
+    assert_eq!(detail, format!("{sec} is inactive (CALL); class opted out of M&A \
+                                investigation -- the series ends there, retire the \
+                                book entry"));
 
     let links: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM instrument_link WHERE predecessor_id = $1")

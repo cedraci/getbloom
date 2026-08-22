@@ -93,20 +93,33 @@ pub async fn stale_candidates(pool: &PgPool, today: NaiveDate)
         .fetch_all(pool).await?)
 }
 
-/// Is there a market_status answer on file inside the `RECHECK_DAYS`
-/// cooldown? The same NOT EXISTS `stale_candidates` applies, lifted out so a
-/// second finder of dead instruments -- P11's weekly identity sweep -- spends
-/// the investigation budget on the same schedule this one does instead of
-/// re-buying an `ma_deals` list every week for a name already investigated.
-pub async fn recently_checked(pool: &PgPool, instrument_id: i64, today: NaiveDate)
-    -> AppResult<bool>
+/// Has this instrument's death already been INVESTIGATED inside the
+/// `RECHECK_DAYS` cooldown? Cousin of the `NOT EXISTS` in `stale_candidates`,
+/// but deliberately not the same predicate, and the difference is the whole
+/// point of the function.
+///
+/// `stale_candidates` asks "was this instrument ASKED recently", because its
+/// cooldown governs the one cheap question. This asks "was it FOUND DEAD
+/// recently", because the caller's cooldown governs the expensive follow-up --
+/// and the two are not the same set. `run_check` records the status of every
+/// candidate it asks, ACTV included, BEFORE the `ACTV -> continue` (see
+/// `record_status`'s caller). Matching any recorded status would therefore let
+/// a routine "still alive" answer suppress a real investigation for a month:
+/// a name goes quiet for a week, P6 asks, hears ACTV, and the halt-then-delist
+/// that follows three days later would sit undispatched until the attr aged
+/// out. A non-ACTV value is the only value either finder writes on a path that
+/// actually investigates, which makes it the honest arming signal.
+pub async fn recently_investigated(pool: &PgPool, instrument_id: i64,
+                                   today: NaiveDate) -> AppResult<bool>
 {
     Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM instrument_attr
                          WHERE instrument_id = $1 AND attr = $4
                            AND system_to = 'infinity'
-                           AND valid_from > $2::date - $3)")
+                           AND valid_from > $2::date - $3
+                           AND value <> $5)")
         .bind(instrument_id).bind(today).bind(RECHECK_DAYS).bind(MARKET_STATUS_ATTR)
+        .bind(MARKET_STATUS_ACTIVE)
         .fetch_one(pool).await?)
 }
 
@@ -188,7 +201,8 @@ pub async fn investigate<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
         .bind(instrument_id).fetch_optional(pool).await?
         .unwrap_or(true);
     if !ma_capable {
-        return retire_path(pool, fetcher, instrument_id, security, today, summary).await;
+        return retire_path(pool, fetcher, instrument_id, security, status, today,
+                           summary).await;
     }
 
     let deals = fetcher.ma_deals(security).await?;
@@ -364,9 +378,14 @@ async fn fund_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
 /// not apply. The refresh is advisory here, same as everywhere else in this
 /// module: a failure is logged and the retirement issue is still recorded,
 /// never lost behind a propagated error.
+/// `status` is the caller's verdict in its own words -- P6's verbatim
+/// MARKET_STATUS (`MATU`), or P11's triggering field and date
+/// (`MATURITY 2026-08-19`). It goes into the issue text because "instrument
+/// inactive" alone told a bond holder nothing about WHICH date ended the
+/// series, and the sweep's whole value is knowing that date.
 async fn retire_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                                        instrument_id: i64, security: &str,
-                                       today: NaiveDate,
+                                       status: &str, today: NaiveDate,
                                        summary: &mut LifecycleSummary)
     -> AppResult<()>
 {
@@ -374,8 +393,9 @@ async fn retire_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
         eprintln!("lifecycle: retire_path identity refresh for {security} failed: {e}");
     }
     record_issue(pool, instrument_id, "lifecycle_retired",
-        "instrument inactive; class opted out of M&A investigation -- series \
-         capped at INACTIVE_DATE, retire the book entry", summary).await
+        &format!("{security} is inactive ({status}); class opted out of M&A \
+                  investigation -- the series ends there, retire the book entry"),
+        summary).await
 }
 
 /// Durable, queryable, idempotent on (instrument_id, code, detail) -- the

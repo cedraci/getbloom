@@ -173,8 +173,19 @@ pub fn parse_sweep(raw: &serde_json::Value, sweep: &str) -> Vec<SweepAnswer> {
                 .filter_map(|name| {
                     let v = f.get(*name)?;
                     // A number is never one of these fields, but a date
-                    // arriving unquoted must not silently vanish.
-                    let text = s(v).or_else(|| (!v.is_null())
+                    // arriving unquoted must not silently vanish -- so the
+                    // fallback covers NON-STRING JSON only.
+                    //
+                    // `is_string()` is load-bearing, not tidiness. `s()` maps a
+                    // blank or whitespace string to None, and `Display` on a
+                    // `Value::String` is JSON serialization: without the guard,
+                    // `MARKET_STATUS: ""` came back as the literal text `""`,
+                    // which is not `ACTV` and therefore retired a LIVE
+                    // instrument -- and a security whose every field was blank
+                    // produced a NON-empty map, so it was read as dead instead
+                    // of as F9's anomaly. Blank is silence. Silence is never
+                    // death.
+                    let text = s(v).or_else(|| (!v.is_null() && !v.is_string())
                         .then(|| v.to_string()))?;
                     Some(((*name).to_string(), text))
                 })
@@ -1100,6 +1111,39 @@ mod tests {
         assert!(out[1].fields.is_empty(), "all fields failed: the anomaly shape");
         assert!(out[2].fields.is_empty(),
                 "a rejected security answers nothing, whatever fieldData holds");
+    }
+
+    /// A blank value is SILENCE, not a value. Bloomberg answers an empty
+    /// string where it has nothing to say, and the first cut of the
+    /// non-string fallback turned that into the literal text `""` -- which is
+    /// not `ACTV`, so it retired live instruments, and which made a
+    /// wholly-blank security look answered instead of anomalous. Both halves
+    /// are pinned here because both were wrong in the same line.
+    #[test]
+    fn a_blank_value_is_silence_and_never_a_status() {
+        let raw = serde_json::json!([{"securityData": [
+            {"security": "LIVE LN Equity", "fieldExceptions": [],
+             "fieldData": {"MARKET_STATUS": "", "INACTIVE_DATE": "   "}},
+            {"security": "PARTLY LN Equity", "fieldExceptions": [],
+             "fieldData": {"MARKET_STATUS": "ACTV", "INACTIVE_DATE": ""}}]}]);
+        let out = parse_sweep(&raw, "market_status");
+        assert!(out[0].fields.is_empty(),
+                "an all-blank security must reach the F9 anomaly path, not a verdict");
+        assert_eq!(out[1].fields.len(), 1,
+                   "a blank field is ignored; the field that spoke still counts");
+        assert_eq!(out[1].fields.get("MARKET_STATUS").map(String::as_str), Some("ACTV"));
+    }
+
+    /// ...and the fallback still earns its place: a date that arrives as a
+    /// non-string JSON value must not vanish.
+    #[test]
+    fn a_non_string_value_still_survives_the_fallback() {
+        let raw = serde_json::json!([{"securityData": [{
+            "security": "ODD Corp", "fieldExceptions": [],
+            "fieldData": {"MATURITY": 20360815}}]}]);
+        let out = parse_sweep(&raw, "maturity");
+        assert_eq!(out[0].fields.get("MATURITY").map(String::as_str), Some("20360815"),
+                   "not a date we can parse, but it must not be swallowed either");
     }
 
     /// The sweep only ever reads the fields its own mode asked for: a stray

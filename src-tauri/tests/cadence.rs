@@ -1479,3 +1479,68 @@ async fn a_second_sweep_inside_the_cooldown_does_not_re_investigate() {
                "the sweep itself still asks -- the cooldown gates the dispatch, \
                 not the batched question");
 }
+
+/// Review finding 2. P6 records the status of EVERY candidate it asks, ACTV
+/// included, before it decides whether to investigate. If the sweep's cooldown
+/// matched any recorded status, a routine "still alive" answer would suppress
+/// the delisting that follows it -- a halted equity that answers ACTV on Monday
+/// and is delisted on Thursday would wait a month for its investigation.
+/// The cooldown is armed by a recorded DEATH, never by a recorded answer.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_recent_actv_answer_does_not_suppress_a_first_investigation() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpActv", "market_status", false, &["Halted"]).await;
+    let (iid, sec) = members[0].clone();
+
+    // Exactly what `lifecycle::run_check` writes for a candidate that answered
+    // ACTV yesterday: same attr, same source, same shape.
+    let mut tx = pool.begin().await.unwrap();
+    store::set_attr(&mut tx, iid, getbloomdata_lib::lifecycle::MARKET_STATUS_ATTR,
+                    "ACTV", today - chrono::Duration::days(1), "bloomberg", None)
+        .await.unwrap();
+    tx.commit().await.unwrap();
+
+    // Today the sweep learns it is going away after all.
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        (&sec, vec![("MARKET_STATUS", "ACTV"), ("INACTIVE_DATE", "2026-08-28")],
+         vec![])]));
+    let summary = identity::run_sweep(&pool, &fake, view, today).await.unwrap();
+
+    assert_eq!(summary.triggered, 1);
+    assert_eq!(summary.cooldown_skipped, 0,
+               "yesterday's ACTV is not an investigation and must not stand in for one");
+    assert_eq!(fake.calls_starting("hist_ids:"), 1, "the retire path actually ran");
+    assert!(issue_codes(&pool, iid).await.iter().any(|c| c == "lifecycle_retired"));
+}
+
+/// Review finding 1, end to end. Bloomberg answers a blank string where it has
+/// nothing to say. Blank is silence: a live name whose fields all come back
+/// empty must reach the F9 anomaly path, never a retirement.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn blank_field_values_are_silence_and_never_retire_a_live_instrument() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpBlank", "market_status", false, &["Blank", "Live"]).await;
+    let (blank_id, blank_sec) = members[0].clone();
+    let (live_id, live_sec) = members[1].clone();
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        (&blank_sec, vec![("MARKET_STATUS", ""), ("INACTIVE_DATE", "  ")], vec![]),
+        (&live_sec, vec![("MARKET_STATUS", "ACTV"), ("INACTIVE_DATE", "")], vec![])]));
+
+    let summary = identity::run_sweep(&pool, &fake, view, today).await.unwrap();
+
+    assert_eq!(summary.triggered, 0,
+               "an empty string is not a status, and a blank INACTIVE_DATE is not a date");
+    assert_eq!(summary.anomalies, 1, "the all-blank security is F9's anomaly");
+    assert!(issue_codes(&pool, blank_id).await.iter().any(|c| c == "identity_sweep_no_answer"));
+    assert!(!issue_codes(&pool, blank_id).await.iter().any(|c| c == "lifecycle_retired"),
+            "silence must never be read as death");
+    assert!(issue_codes(&pool, live_id).await.is_empty(),
+            "and a blank alongside a real ACTV changes nothing");
+    assert_eq!(fake.calls_starting("hist_ids:"), 0, "nothing was investigated");
+}
