@@ -122,7 +122,11 @@
   }
 
   async function backfillGap(g: GapRow) {
-    if (selectedViewId === null) return;
+    // P11 11.5: a period-shaped gap's start/end are the period's real bounds,
+    // not a day range -- a daily backfill can never close it (periodic
+    // fields are excluded from the daily leg by design). The scheduler
+    // re-buys due periods automatically; this button stays daily-only.
+    if (selectedViewId === null || g.period !== null) return;
     inFlight = true;
     try {
       const ids = [g.instrument_id];
@@ -193,15 +197,22 @@
   <h2>Gaps (last 30 days)</h2>
   <p class="thin">Per instrument, not per view: one member reporting on a date
      says nothing about the others. The Backfill button fetches only the
-     instrument shown, for the range shown.</p>
+     instrument shown, for the range shown. A period-shaped gap (a missing
+     monthly/quarterly print) has no Backfill button — the scheduler re-buys
+     due periods on its own.</p>
   {#if !gaps.length}<p class="thin">No gaps.</p>{/if}
   <table>
-    <thead><tr><th>Instrument</th><th>Start</th><th>End</th><th></th></tr></thead>
+    <thead><tr><th>Instrument</th><th>Range</th><th></th></tr></thead>
     <tbody>
       {#each gaps as g}
         <tr>
-          <td>{g.label}</td><td>{g.start}</td><td>{g.end}</td>
-          <td><button onclick={() => backfillGap(g)} disabled={inFlight}>Backfill</button></td>
+          <td>{g.label}</td>
+          <td>{g.period ? `${g.period} missing` : `${g.start} – ${g.end}`}</td>
+          <td>
+            {#if g.period === null}
+              <button onclick={() => backfillGap(g)} disabled={inFlight}>Backfill</button>
+            {/if}
+          </td>
         </tr>
       {/each}
     </tbody>

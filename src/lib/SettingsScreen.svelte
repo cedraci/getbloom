@@ -18,6 +18,7 @@
   let classEdits = $state<Record<number, {
     corp_actions_capable: boolean; ma_capable: boolean;
     adjustment_style: string; qc_stale_days_default: string;
+    default_cadence: string; cadence_grace_days: number; identity_sweep: string;
   }>>({});
   let error = $state("");
   let pending = $state<{ kind: EntityKind; id: number } | null>(null);
@@ -48,6 +49,9 @@
         ma_capable: c.ma_capable,
         adjustment_style: c.adjustment_style,
         qc_stale_days_default: c.qc_stale_days_default === null ? "" : String(c.qc_stale_days_default),
+        default_cadence: c.default_cadence,
+        cadence_grace_days: c.cadence_grace_days,
+        identity_sweep: c.identity_sweep,
       }]));
     } catch (e) { error = String(e); }
   }
@@ -70,7 +74,8 @@
     if (!e) return;
     try {
       await api.updateAssetClassCapabilities(id, e.corp_actions_capable, e.ma_capable,
-        e.adjustment_style, toOptionalNumber(e.qc_stale_days_default));
+        e.adjustment_style, toOptionalNumber(e.qc_stale_days_default),
+        e.default_cadence, e.cadence_grace_days, e.identity_sweep);
       await reload();
     } catch (err) { error = String(err); }
   }
@@ -208,7 +213,9 @@
   <h2>Asset classes</h2>
   <table>
     <thead>
-      <tr><th>Name</th><th>Corp actions</th><th>M&amp;A lifecycle</th><th>Adjustment style</th><th>Stale after (days)</th><th></th></tr>
+      <tr><th>Name</th><th>Corp actions</th><th>M&amp;A lifecycle</th><th>Adjustment style</th>
+          <th>Stale after (days)</th><th>Default cadence</th><th>Cadence grace (days)</th>
+          <th>Identity sweep</th><th></th></tr>
     </thead>
     <tbody>
       {#each assetClasses as c}
@@ -225,6 +232,26 @@
               </select>
             </td>
             <td><input type="number" bind:value={e.qc_stale_days_default} min="2" placeholder="off" /></td>
+            <td>
+              <select bind:value={e.default_cadence}
+                      title="How often this class's fields are expected to print. A field's own cadence override wins when set.">
+                <option value="daily">daily</option>
+                <option value="weekly">weekly</option>
+                <option value="monthly">monthly</option>
+                <option value="quarterly">quarterly</option>
+                <option value="irregular">irregular</option>
+              </select>
+            </td>
+            <td><input type="number" bind:value={e.cadence_grace_days} min="0" required
+                       title="Calendar days after a period ends before a missing print is flagged." /></td>
+            <td>
+              <select bind:value={e.identity_sweep}
+                      title="What the weekly identity sweep checks for this class's instruments, and what retires one. Off = never swept.">
+                <option value="none">none</option>
+                <option value="market_status">market_status</option>
+                <option value="maturity">maturity</option>
+              </select>
+            </td>
             <td><button onclick={() => saveCapabilities(c.id)}>Save</button></td>
           </tr>
         {/if}

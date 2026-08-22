@@ -4,6 +4,10 @@ export interface AssetClass {
   id: number; name: string; description: string;
   corp_actions_capable: boolean; ma_capable: boolean; adjustment_style: string;
   qc_stale_days_default: number | null;
+  // P11 11.1/11.8: class-level publication cadence, grace, and identity-sweep
+  // capability. Effective cadence everywhere = COALESCE(field_def.cadence,
+  // asset_class.default_cadence).
+  default_cadence: string; cadence_grace_days: number; identity_sweep: string;
 }
 export interface FieldDef {
   id: number; asset_class_id: number; mnemonic: string;
@@ -11,6 +15,9 @@ export interface FieldDef {
   bbg_ftype: string | null; bbg_datatype: string | null; entitlement_note: string;
   active: boolean;
   qc_nonpositive: boolean; qc_outlier_pct: number | null; qc_stale_days: number | null;
+  // P11 11.1/11.2: null cadence defers to the class default; fetch_via picks
+  // the wire path ('history' ranged, 'reference' a same-day snapshot).
+  cadence: string | null; fetch_via: string;
 }
 export interface View { id: number; name: string; description: string; active: boolean; }
 export interface EstimateOut {
@@ -155,6 +162,10 @@ export interface HistoryOutcome {
 /// not per view: one member reporting on a date says nothing about the others.
 export interface GapRow {
   instrument_id: number; label: string; start: string; end: string;
+  /// P11 11.5: set on a period-shaped gap (e.g. "2026-07") -- the hole is a
+  /// whole missing periodic print, not a run of weekdays. `start`/`end` are
+  /// the period's real bounds, not a fake day range.
+  period: string | null;
 }
 
 export interface PendingReview {
@@ -270,10 +281,21 @@ export const api = {
   listAssetClasses: () => invoke<AssetClass[]>("list_asset_classes"),
   createAssetClass: (name: string, description: string) =>
     invoke<AssetClass>("create_asset_class", { name, description }),
+  // P11 Task 1 widened the Rust command to 8 args -- order matters, it must
+  // mirror commands::update_asset_class_capabilities exactly:
+  // (id, corp_actions_capable, ma_capable, adjustment_style,
+  //  qc_stale_days_default, default_cadence, cadence_grace_days, identity_sweep).
   updateAssetClassCapabilities: (id: number, corpActionsCapable: boolean, maCapable: boolean,
-                                  adjustmentStyle: string, qcStaleDaysDefault: number | null) =>
+                                  adjustmentStyle: string, qcStaleDaysDefault: number | null,
+                                  defaultCadence: string, cadenceGraceDays: number,
+                                  identitySweep: string) =>
     invoke<void>("update_asset_class_capabilities",
-      { id, corpActionsCapable, maCapable, adjustmentStyle, qcStaleDaysDefault }),
+      { id, corpActionsCapable, maCapable, adjustmentStyle, qcStaleDaysDefault,
+        defaultCadence, cadenceGraceDays, identitySweep }),
+  /// P11 11.1/11.2 per-field override: `cadence` null defers to the class
+  /// default, `fetchVia` picks the wire path. Mirrors `fields::update_field_cadence`.
+  updateFieldCadence: (id: number, cadence: string | null, fetchVia: string) =>
+    invoke<void>("update_field_cadence", { id, cadence, fetchVia }),
   listBook: () => invoke<BookEntry[]>("list_book"),
   addToBook: (req: AddToBook) => invoke<AddOutcome>("add_to_book", { req }),
   setBookActive: (instrumentId: number, active: boolean) =>

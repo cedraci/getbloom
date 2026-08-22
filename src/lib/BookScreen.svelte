@@ -131,6 +131,8 @@
     </select>
     <input bind:value={label} placeholder="Your label (optional)" />
   </div>
+  <p class="thin">Bonds: enter /isin/&lt;ISIN&gt; or a CT/GT generic — coupon-style
+     tickers do not resolve, and instrument search does not cover government bonds.</p>
 
   {#if hits.length}
     <ul class="hits">

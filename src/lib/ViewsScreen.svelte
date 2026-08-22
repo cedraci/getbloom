@@ -47,6 +47,11 @@
     qc_nonpositive: false, qc_outlier_pct: "", qc_stale_days: "",
   });
 
+  // P11 11.1/11.2: per-field cadence/fetch_via editing, same draft-until-Save
+  // shape as SettingsScreen's classEdits. cadence "" means "class default"
+  // (null on the wire) -- fetch_via has no such blank state, it is always set.
+  let fieldEdits = $state<Record<number, { cadence: string; fetch_via: string }>>({});
+
   async function reload() {
     try {
       views = await api.listViews();
@@ -54,6 +59,10 @@
       fields = await api.listFields();
       classes = await api.listAssetClasses();
       if (classes.length && !newField.asset_class_id) newField.asset_class_id = classes[0].id;
+      fieldEdits = Object.fromEntries(fields.map((f) => [f.id, {
+        cadence: f.cadence ?? "",
+        fetch_via: f.fetch_via,
+      }]));
       const pairs = await Promise.all(views.map(async (v) => [v.id, await api.estimateView(v.id)] as const));
       estimates = Object.fromEntries(pairs);
     } catch (e) { error = String(e); }
@@ -161,6 +170,15 @@
       await reload();
     } catch (e) { error = String(e); }
   }
+
+  async function saveFieldCadence(id: number) {
+    const e = fieldEdits[id];
+    if (!e) return;
+    try {
+      await api.updateFieldCadence(id, e.cadence || null, e.fetch_via);
+      await reload();
+    } catch (err) { error = String(err); }
+  }
 </script>
 
 {#if error}<p class="error">{error}</p>{/if}
@@ -259,14 +277,42 @@
        view exists (e.g. a fresh database with just a typo'd field). -->
   {#if fields.length}
     <table>
-      <thead><tr><th>Mnemonic</th><th>Label</th><th>Class</th><th>Active</th><th></th></tr></thead>
+      <thead><tr><th>Mnemonic</th><th>Label</th><th>Class</th><th>Active</th>
+                 <th>Cadence override</th><th>Fetch via</th><th></th><th></th></tr></thead>
       <tbody>
         {#each fields as f}
+          {@const e = fieldEdits[f.id]}
           <tr>
             <td>{f.mnemonic}</td>
             <td>{f.label}</td>
             <td>{classes.find((c) => c.id === f.asset_class_id)?.name}</td>
             <td><input type="checkbox" checked={f.active} disabled title="Retire/purge to change" /></td>
+            {#if e}
+              <td>
+                <select bind:value={e.cadence}
+                        title="Overrides the class's default cadence for this field only. Blank = class default.">
+                  <option value="">(class default)</option>
+                  <option value="daily">daily</option>
+                  <option value="weekly">weekly</option>
+                  <option value="monthly">monthly</option>
+                  <option value="quarterly">quarterly</option>
+                  <option value="irregular">irregular</option>
+                </select>
+              </td>
+              <td>
+                <select bind:value={e.fetch_via}>
+                  <option value="history">history</option>
+                  <option value="reference">reference</option>
+                </select>
+                {#if e.fetch_via === "reference"}
+                  <p class="ref-note">Snapshot at run time, not an official close.
+                     Missed days cannot be backfilled.</p>
+                {/if}
+              </td>
+              <td><button onclick={() => saveFieldCadence(f.id)}>Save</button></td>
+            {:else}
+              <td></td><td></td><td></td>
+            {/if}
             <td><button class="x" title="Remove field"
                         onclick={() => (pending = { kind: "field", id: f.id })}>&times;</button></td>
           </tr>
@@ -306,6 +352,7 @@
 <style>
   .error { color: #c00; }
   .hint { color: #a60; margin: 0.5rem 0 0; }
+  .ref-note { color: #a60; font-size: 0.85em; margin: 0.2rem 0 0; max-width: 18rem; }
   .note { color: #555; margin: 0.2rem 0 0.6rem; max-width: 46rem; }
   .classes { list-style: none; padding: 0; margin: 0.5rem 0 0;
              display: flex; gap: 0.4rem; flex-wrap: wrap; }
