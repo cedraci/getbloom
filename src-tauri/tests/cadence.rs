@@ -558,6 +558,84 @@ async fn verify_reads_five_weekdays_daily_and_two_completed_periods_monthly() {
             "an irregular field has no period to re-read: {plan:?}");
 }
 
+/// Dropping the unverifiable fields must not drop a whole CLASS into
+/// `plan_requests`' "no fields configured" error: a bond class priced entirely
+/// through `fetch_via = 'reference'` (probe F6/F7) sharing a view with an
+/// equity class would otherwise fail the WHOLE week's verify for both, and
+/// burn one of the three daily scheduled attempts doing it.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_reference_only_class_does_not_fail_the_whole_views_verify() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "VerRefCls", "daily", 10).await;
+    add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+
+    // A second class in the same view whose every field is a snapshot.
+    let bonds: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name) VALUES ($1) RETURNING id")
+        .bind(uniq("VerRefBond")).fetch_one(&pool).await.unwrap();
+    let bond = store::create(&pool).await.unwrap();
+    let bond_security = format!("{} Govt", uniq("CT10"));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, bond.instrument_id, &NewAlias {
+        id_type: "bdp_security".into(), value: bond_security.clone(),
+        exch_code: None, valid_from: d("2000-01-03"), valid_to: None,
+        source: "user".into(), bbg_action_id: None, anchoring_identifier: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(bond.instrument_id).bind(bonds).bind(&bond_security)
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(fx.view).bind(bond.instrument_id).execute(&pool).await.unwrap();
+    let yld: i64 = sqlx::query_scalar(
+        "INSERT INTO field_def (asset_class_id, mnemonic, label, value_kind, fetch_via)
+         VALUES ($1,'YLD_YTM_MID','Yield','numeric','reference') RETURNING id")
+        .bind(bonds).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_field (view_id, field_id) VALUES ($1,$2)")
+        .bind(fx.view).bind(yld).execute(&pool).await.unwrap();
+
+    let end = d("2026-08-14");
+    let rec = Recording(std::sync::Mutex::new(Vec::new()));
+    let out = orchestrator::run_verify_with(&pool, &cfg(1_000_000), &rec, fx.view,
+                                            scheduler::verify_window_start(end), end)
+        .await.expect("a class with nothing to verify must not fail the verify");
+    assert!(matches!(out, RunOutcome::Completed { .. }), "{out:?}");
+
+    let plan = rec.0.into_inner().unwrap();
+    assert_eq!(plan.len(), 1, "only the equity class has anything to re-read: {plan:?}");
+    assert_eq!(plan[0].fields, vec!["PX_LAST"]);
+    assert!(!plan[0].securities.contains(&bond_security),
+            "the bond leaves the run with its fields: {plan:?}");
+}
+
+/// The same rule taken to its end: a view where NOTHING can be re-read is a
+/// clean no-op week, not a failure -- and it still writes a run row, or the
+/// slot would fire again on the next heartbeat.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_view_with_nothing_verifiable_completes_without_fetching() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "VerNothing", "daily", 10).await;
+    add_field(&pool, &fx, "YLD_YTM_MID", None, "reference", "numeric").await;
+    add_field(&pool, &fx, "CAPITAL_ACCOUNT", Some("irregular"), "history", "numeric").await;
+
+    let end = d("2026-08-14");
+    let out = orchestrator::run_verify_with(&pool, &cfg(1_000_000), &NeverFetch, fx.view,
+                                            scheduler::verify_window_start(end), end)
+        .await.unwrap();
+    let RunOutcome::Completed { run_id, summary, .. } = out else {
+        panic!("a week with nothing to verify must still complete");
+    };
+    assert_eq!(summary.inserted, 0);
+    let (status, hits): (String, i64) = sqlx::query_as(
+        "SELECT status, estimated_hits FROM run WHERE id = $1")
+        .bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!((status.as_str(), hits), ("ok", 0),
+               "the run row exists and is closed, so the slot is spent");
+}
+
 // ---------------------------------------------------------------------------
 // R6: an all-periodic view with nothing due plans zero requests. That is the
 // permanent mid-month state of such a view, not a transient one.

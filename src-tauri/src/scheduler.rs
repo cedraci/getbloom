@@ -535,9 +535,8 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
     // P10 final review's "permanently-partial days" defect, which one non-daily
     // field turns from bounded into perpetual). The deliberate consequence: a
     // date is never uncovered because of a field backfill could not supply.
-    for f in fields.iter().filter(|vf| vf.def.value_kind != "text"
-                                    && vf.def.fetch_via == "history"
-                                    && vf.effective_cadence == "daily") {
+    for f in fields.iter().filter(|vf| crate::fetch::is_daily_history_parts(
+        &vf.def.value_kind, &vf.def.fetch_via, &vf.effective_cadence)) {
         *expected.entry(f.def.asset_class_id).or_insert(0) += 1;
     }
 
@@ -594,6 +593,13 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
     // period-shaped. Grace is what makes it a gap rather than a fund simply
     // being a few days late -- the missing print is *fetched* the moment the
     // period ends (11.4), and only *reported* once it is anomalous.
+    //
+    // Note for callers: this arm is judged AS OF the `today` argument, which
+    // for the daily arm is only a window edge. `run_gap_backfill` passes
+    // `previous_weekday(today)` (its horizon against re-buying the day the EOD
+    // run is about to fetch), so period grace is measured a day or two early
+    // there -- harmless at monthly scale, and deliberately not special-cased,
+    // but a trap for a future caller that hands this an arbitrary date.
     for miss in missing_periods(pool, view_id, today, PERIOD_LOOKBACK).await? {
         if !miss.overdue {
             continue;

@@ -822,6 +822,32 @@ async fn gap_backfill<F: DataFetcher>(
     Ok((GapBackfillOutcome::Ran { runs: run_ids.len() as u64, days }, run_ids))
 }
 
+/// A run there was nothing to ask for: the row is written and closed `ok` so
+/// the day's slot is accounted for (`scheduler::already_ran_today` reads run
+/// rows), and nothing is dispatched.
+///
+/// The twin of `execute`'s R6 short-circuit, for the one case that cannot
+/// reach it: a caller that filtered the view down to no assets at all, where
+/// `plan_requests` would say "view has no active assets" -- a real error on
+/// every other path, and the reason this is a separate, deliberately narrow
+/// function rather than a widening of that check.
+async fn no_request_run(pool: &PgPool, view_id: i64, kind: &str, trigger: &str)
+    -> AppResult<RunOutcome> {
+    let run_id: i64 = sqlx::query_scalar(
+        "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits, finished_at)
+         VALUES ($1,$2,$3,'ok',0,now()) RETURNING id")
+        .bind(view_id).bind(kind).bind(trigger).fetch_one(pool).await?;
+    if let Err(e) = budget::record_hits(pool, run_id, 0).await {
+        eprintln!("warning: failed to record budget hit for run {run_id}: {e}");
+    }
+    Ok(RunOutcome::Completed {
+        run_id,
+        summary: IngestSummary { inserted: 0, superseded: 0, unchanged: 0, issues: 0 },
+        corp_actions: None,
+        quality_findings: 0,
+    })
+}
+
 /// P7: the weekly verification re-fetch -- a SCHEDULED multi-day backfill
 /// over the trailing week, so upstream restatements are re-read and ingest's
 /// value_superseded alert has something to bite on. Gated like an EOD run
@@ -864,6 +890,22 @@ pub async fn run_verify_with<F: DataFetcher>(
     // plain daily fields -- every view under 0014's defaults -- this removes
     // nothing and the run is bit-for-bit what it was.
     loaded.fields.retain(|f| f.fetch_via != "reference" && f.cadence != "irregular");
+    // Dropping fields can leave a whole CLASS with none -- a bond class whose
+    // prices are all `fetch_via = 'reference'` is exactly the shape 11.2 exists
+    // for (probe F6/F7, CT10 Govt). `plan_requests` treats a class with no
+    // fields as a misconfiguration and errors, which would fail the WHOLE
+    // week's verify for every other instrument in the view and burn one of the
+    // three daily scheduled attempts. Those instruments simply have nothing to
+    // verify, so they leave the run with their fields.
+    loaded.assets.retain(|a| loaded.fields.iter().any(|f| f.asset_class_id == a.asset_class_id));
+    if loaded.assets.is_empty() {
+        // Nothing in this view can be re-read at all (every field is a
+        // snapshot or irregular). Same doctrine as R6's empty plan: a quiet
+        // week is a completed run that fetched nothing, not a failure -- and
+        // it must still write a run row, or `already_ran_today` would let the
+        // slot fire again on the next heartbeat.
+        return no_request_run(pool, view_id, "verify", "scheduled").await;
+    }
     let periodic = verify_periodic_legs(
         pool, view_id, chrono::Local::now().date_naive()).await?;
     let estimated = budget::estimate_daily_backfill_hits(

@@ -472,6 +472,17 @@ pub async fn detect_view_gaps(state: State<'_, AppState>, view_id: i64)
     let today = chrono::Local::now().date_naive();
     Ok(scheduler::detect_gaps(&state.pool, view_id, 30, today).await?
         .into_iter()
+        // P11 11.5: period-shaped gaps are withheld from this report until
+        // Task 7 teaches the screen what one is. Every row here carries a live
+        // Backfill button wired to `run_backfill_now(start, end)`, and a
+        // period's bounds are not a day range: a 31-day month trips
+        // BACKFILL_CAP_DAYS, and a shorter one buys a month of DAILY history
+        // that can never close the gap (periodic fields are excluded from the
+        // daily leg by design). The scheduler's own path already filters them
+        // (`gap_backfill`); this is the manual half of the same rule.
+        // Task 7 lifts this line together with the label rendering and a
+        // button that dispatches the periodic leg instead.
+        .filter(|g| g.period.is_none())
         .map(|g| GapRow { instrument_id: g.instrument_id, label: g.label,
                           start: g.start.to_string(), end: g.end.to_string(),
                           period: g.period })

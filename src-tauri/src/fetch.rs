@@ -141,6 +141,20 @@ pub fn is_periodic_history_parts(value_kind: &str, fetch_via: &str, cadence: &st
     value_kind != "text" && fetch_via != "reference" && periodicity_for(cadence).is_some()
 }
 
+/// The other named partition: **daily x history** -- the population a day's
+/// coverage is judged against (`scheduler::detect_gaps`) and the only one a
+/// ranged backfill can supply.
+///
+/// NOT the complement of `is_periodic_history_parts`: `irregular` sits in
+/// neither set. It has no period to be due for, so it is not periodic; and it
+/// is not expected on any given day, so a missing one cannot make a date
+/// uncovered. Text and reference-via fields are out of both for the reason
+/// `detect_gaps` has always given about text -- backfill cannot recover them
+/// by design, and an unfixable gap is noise that buries the fixable ones.
+pub fn is_daily_history_parts(value_kind: &str, fetch_via: &str, cadence: &str) -> bool {
+    value_kind != "text" && fetch_via == "history" && cadence == "daily"
+}
+
 /// P11 11.4: one periodic history leg riding a run -- the fields of ONE
 /// effective cadence, fetched over a whole number of **ended** periods (F3:
 /// an unfinished period has no row, so it is never in a leg's range).
