@@ -196,7 +196,15 @@ pub async fn run_quality_gate(pool: &PgPool, run_id: i64, req: &FetchRequest,
         findings += 1;
     }
 
-    findings += nil_streak_findings(pool, run_id, req).await?;
+    // Independently fallible, and placed BEFORE the per-field QC block, so the
+    // two cannot silence each other: the loudest alarm in the module is already
+    // written when the QC queries run, and a failure of its own is logged and
+    // stepped over instead of aborting the rest of the gate -- the same
+    // log-and-continue the caller applies to the gate as a whole.
+    match nil_streak_findings(pool, run_id, req).await {
+        Ok(n) => findings += n,
+        Err(e) => eprintln!("warning: nil_streak check failed for run {run_id}: {e}"),
+    }
 
     // Which fields carry any check at all -- one query, not one per cell.
     let mut field_ids: Vec<i64> = outcome.cells.iter().map(|c| c.field_id).collect();

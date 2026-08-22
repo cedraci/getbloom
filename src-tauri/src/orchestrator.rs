@@ -366,15 +366,24 @@ async fn execute<F: DataFetcher>(
     // what a view with nothing to fetch has to say, and it is the alert that
     // replaces a month of day-shaped gap noise.
     //
+    // Only on the runs that stand for the day: 'eod' and 'verify'. A gap
+    // backfill calls `execute` once PER GAP, so a recovery after downtime
+    // would otherwise write the view's ENTIRE overdue set once per gap, land
+    // every one of those runs 'partial' because an unrelated fund's NAV is
+    // late, and pay N x `missing_periods` for the privilege. A backfill is
+    // about the days it was given; the day's own run is what reports the view.
+    //
     // Asked of the real calendar, not of `end`: lateness is about NOW, the
     // same reason `run_eod_with` reads the clock for due-ness rather than the
     // day the run targets. Run AFTER ingest, so a period this run just bought
     // is not reported late. Advisory like its siblings.
-    match crate::quality::record_publication_overdue(
-        pool, run_id, view_id, chrono::Local::now().date_naive()).await
-    {
-        Ok(n) => quality_findings += n,
-        Err(e) => eprintln!("warning: publication_overdue check failed for run {run_id}: {e}"),
+    if matches!(kind, "eod" | "verify") {
+        match crate::quality::record_publication_overdue(
+            pool, run_id, view_id, chrono::Local::now().date_naive()).await
+        {
+            Ok(n) => quality_findings += n,
+            Err(e) => eprintln!("warning: publication_overdue check failed for run {run_id}: {e}"),
+        }
     }
 
     let status = if summary.issues > 0 || quality_findings > 0 { "partial" } else { "ok" };

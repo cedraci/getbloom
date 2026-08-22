@@ -170,49 +170,108 @@ pub async fn ingest_outcome(pool: &PgPool, run_id: i64, outcome: &FetchOutcome)
 ///
 /// * the orchestrator does not call this at all when the run planned no daily
 ///   history spec (R3: a history spec with no `periodicity`);
-/// * here, per (instrument, date): anything a periodic leg of THIS request
+/// * here, per (instrument, FIELD, date): what a periodic leg of THIS request
 ///   covers is that leg's business, not the daily leg's. The exclusion is
 ///   derived from `req.periodic` -- the legs already carry their own
-///   securities and period range -- so no second flag exists to drift out of
-///   step with what was actually asked (controller ruling R3).
+///   securities, fields and period range -- so no second flag exists to drift
+///   out of step with what was actually asked (controller ruling R3).
 pub async fn record_non_trading_days(pool: &PgPool, req: &crate::fetch::FetchRequest,
                                      outcome: &FetchOutcome) -> AppResult<u64> {
     use chrono::NaiveDate;
     use std::collections::{HashMap, HashSet};
 
-    // Is this (instrument, date) inside a periodic leg's range for that very
-    // instrument? A neighbour's period says nothing about a name the leg does
-    // not carry, so the instrument list is part of the test, not just the
-    // dates.
-    let shadowed = |iid: i64, d: NaiveDate| -> bool {
+    // Does a periodic leg of this request cover (instrument, field, date)? All
+    // THREE parts matter, and the field is the one that is easy to drop and
+    // expensive to lose. The daily and periodic ranges overlap routinely: the
+    // first verify of any month re-reads five weekdays that mostly sit inside
+    // the periodic verify leg's two-period span (and that leg carries every
+    // instrument of the class); an EOD on the first business day of a month
+    // targets the last day of the period that just ended; a weekly leg overlaps
+    // every Monday run. A field-blind shadow would drop the DAILY leg's
+    // evidence on those days -- and that mark is a real holiday, so
+    // `detect_gaps` would see a permanently uncovered date and re-buy it every
+    // day until the lookback rolls past. That is precisely the defect 11.5
+    // exists to remove.
+    let shadowed = |iid: i64, fid: i64, d: NaiveDate| -> bool {
         req.periodic.iter().any(|l|
-            d >= l.start && d <= l.end && l.instrument_ids.contains(&iid))
+            d >= l.start && d <= l.end
+            && l.instrument_ids.contains(&iid)
+            && l.field_ids.contains(&fid))
+    };
+
+    // Does this request aim any DAILY x history field at this instrument? The
+    // instrument's class comes off `req.assets`; a request that does not name
+    // the instrument at all (test-shaped `FetchRequest`s pass `assets: vec![]`)
+    // falls back to the field list as a whole.
+    let has_daily_field = |iid: i64| -> bool {
+        let class = req.assets.iter()
+            .find(|a| a.instrument_id == iid).map(|a| a.asset_class_id);
+        req.fields.iter().any(|f| {
+            let same_class = match class { Some(c) => f.asset_class_id == c, None => true };
+            same_class
+                && crate::fetch::is_daily_history_parts(&f.value_kind, &f.fetch_via, &f.cadence)
+        })
+    };
+
+    // The same question when the field is unknown. Two callers need it: a dated
+    // problem carrying no field, and rule B's inference (which is about a day,
+    // not a field).
+    //
+    // A dated, field-less `no_data` is the sidecar's NIL-fill row --
+    // `problem(security, None, d, "no_data", "non-trading day (NIL fill)")` --
+    // and the sidecar sets `nonTradingDayFillOption` ONLY on a DAILY request
+    // (blp_fetch.py, "only set for DAILY to keep the wire contract explicit").
+    // Such a row therefore came back from a daily leg by construction, so it
+    // stays evidence unless this request aims no daily x history field at the
+    // instrument at all -- in which case no daily leg existed for it to have
+    // come from, and a period is the only thing that could have been silent.
+    // Shadowing is the conservative answer only in that degenerate case; the
+    // default is to KEEP the holiday.
+    let shadowed_unknown_field = |iid: i64, d: NaiveDate| -> bool {
+        !has_daily_field(iid)
+            && req.periodic.iter().any(|l|
+                d >= l.start && d <= l.end && l.instrument_ids.contains(&iid))
     };
 
     // Periodic cells are excluded here too, and for the same reason they are
     // excluded from the marks: a monthly print is not proof that the
     // instrument "answered" for the daily range, which is exactly what rule B
-    // would otherwise take it for.
+    // would otherwise take it for -- one NAV cell would fabricate a holiday on
+    // every silent weekday of a ranged run.
     let mut cells: HashMap<i64, HashSet<NaiveDate>> = HashMap::new();
     for c in &outcome.cells {
-        if shadowed(c.instrument_id, c.obs_date) {
+        if shadowed(c.instrument_id, c.field_id, c.obs_date) {
             continue;
         }
         cells.entry(c.instrument_id).or_default().insert(c.obs_date);
     }
     let mut no_data: HashSet<(i64, NaiveDate)> = HashSet::new();
     let mut other: HashSet<(i64, NaiveDate)> = HashSet::new();
+    // The same dated `no_data` rows, keeping the field so the shadow can be
+    // judged per field. The set above stays field-less on purpose: rule B asks
+    // "was this day already spoken for", which any field answers.
+    let mut dated_no_data: Vec<(i64, Option<i64>, NaiveDate)> = Vec::new();
     for p in &outcome.problems {
         if let (Some(iid), Some(d)) = (p.instrument_id, p.obs_date) {
-            if p.code == "no_data" { no_data.insert((iid, d)); }
-            else { other.insert((iid, d)); }
+            if p.code == "no_data" {
+                no_data.insert((iid, d));
+                dated_no_data.push((iid, p.field_id, d));
+            } else { other.insert((iid, d)); }
         }
     }
 
     let mut marks: Vec<(i64, NaiveDate, &'static str)> = Vec::new();
-    for &(iid, d) in &no_data {
+    let mut marked: HashSet<(i64, NaiveDate)> = HashSet::new();
+    for &(iid, fid, d) in &dated_no_data {
         let has_cell = cells.get(&iid).is_some_and(|s| s.contains(&d));
-        if !has_cell && !other.contains(&(iid, d)) && !shadowed(iid, d) {
+        let shadow = match fid {
+            Some(fid) => shadowed(iid, fid, d),
+            None => shadowed_unknown_field(iid, d),
+        };
+        // One mark per (instrument, day): several fields can report the same
+        // silent day, and ONE unshadowed report is enough to make it evidence.
+        if !has_cell && !other.contains(&(iid, d)) && !shadow
+            && marked.insert((iid, d)) {
             marks.push((iid, d, "no_data"));
         }
     }
@@ -224,7 +283,7 @@ pub async fn record_non_trading_days(pool: &PgPool, req: &crate::fetch::FetchReq
                     && !have.contains(&day)
                     && !no_data.contains(&(iid, day))
                     && !other.contains(&(iid, day))
-                    && !shadowed(iid, day) {
+                    && !shadowed_unknown_field(iid, day) {
                     marks.push((iid, day, "range_inference"));
                 }
                 day += chrono::Duration::days(1);

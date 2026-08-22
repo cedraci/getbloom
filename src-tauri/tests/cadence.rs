@@ -868,7 +868,9 @@ async fn a_mixed_request_gates_evidence_per_instrument_and_date() {
             cadence: "monthly".into(), start: ps, end: pe,
             instrument_ids: vec![fx.instrument], field_ids: vec![nav] }],
     };
-    let mut out = nil_outcome(fx.instrument, nav, &[pe]);               // inside the leg
+    // Both ENDS of the leg's range, so the boundary is pinned, not just the
+    // middle of it.
+    let mut out = nil_outcome(fx.instrument, nav, &[ps, pe]);           // inside the leg
     out.problems.extend(nil_outcome(daily_only, nav, &[pe]).problems);  // same date, no leg
     out.problems.extend(nil_outcome(fx.instrument, px, &[day]).problems);
     out.problems.extend(nil_outcome(daily_only, px, &[day]).problems);
@@ -1034,4 +1036,109 @@ async fn a_run_flags_the_period_it_could_not_buy_and_not_the_one_it_just_did() {
     assert_eq!(status, "partial",
                "a quality finding makes the run partial -- the standing P7 rule, \
                 and publication_overdue does nothing beyond it");
+}
+
+/// Review finding: the shadow must be per FIELD, not just per instrument and
+/// date. Daily and periodic ranges overlap routinely -- the first verify of any
+/// month, an EOD on the first business day of a month, every Monday under a
+/// weekly cadence -- and on those days the daily leg's holiday evidence is
+/// exactly what must survive. Losing it would leave `detect_gaps` staring at a
+/// permanently uncovered date and re-buying it daily.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_daily_holiday_inside_a_periodic_legs_range_is_still_evidence() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "OverlapEvid", "daily", 10).await;
+    let px = add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+    let nav = add_field(&pool, &fx, "FUND_NET_ASSET_VAL", Some("monthly"),
+                        "history", "numeric").await;
+    // The verify shape: a trailing daily window sitting INSIDE the periodic
+    // leg's two-period span.
+    let (ps, pe) = (d("2026-07-01"), d("2026-07-31"));
+    let (holiday, nil_fill) = (d("2026-07-03"), d("2026-07-06")); // Fri, Mon
+
+    let req = FetchRequest {
+        run_id: fx.run,
+        assets: vec![asset_of(&fx, fx.instrument)],
+        fields: vec![
+            FetchField::daily_history(px, fx.class, "PX_LAST", "numeric"),
+            FetchField {
+                field_id: nav, asset_class_id: fx.class,
+                mnemonic: "FUND_NET_ASSET_VAL".into(), value_kind: "numeric".into(),
+                cadence: "monthly".into(), fetch_via: "history".into() },
+        ],
+        start: d("2026-07-01"), end: d("2026-07-07"),
+        periodic: vec![PeriodicLeg {
+            cadence: "monthly".into(), start: ps, end: pe,
+            instrument_ids: vec![fx.instrument], field_ids: vec![nav] }],
+    };
+    let mut out = nil_outcome(fx.instrument, px, &[holiday]);
+    // The sidecar's NIL-fill row carries NO field (blp_fetch.py) -- and it is
+    // only ever produced for a DAILY request, so it is daily evidence too.
+    out.problems.push(CellProblem {
+        instrument_id: Some(fx.instrument), field_id: None,
+        obs_date: Some(nil_fill), code: "no_data".into(),
+        detail: "non-trading day (NIL fill)".into() });
+    // ... and the monthly leg's own silence on a third day inside the range.
+    out.problems.extend(nil_outcome(fx.instrument, nav, &[d("2026-07-02")]).problems);
+    // One real daily print, so rule B has something to infer from.
+    out.cells.push(ObsCell { instrument_id: fx.instrument, field_id: px,
+                             obs_date: d("2026-07-07"), value: CellValue::Num(12.0) });
+
+    ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+
+    let marks = marks_of(&pool, fx.instrument).await;
+    assert!(marks.contains(&holiday),
+            "the DAILY field's holiday survives a periodic leg spanning the same \
+             dates -- otherwise detect_gaps re-buys it every day: {marks:?}");
+    assert!(marks.contains(&nil_fill),
+            "a field-less NIL-fill row is daily evidence too: {marks:?}");
+    assert!(!marks.contains(&d("2026-07-02")),
+            "the monthly field's own silence inside its period is still shadowed: {marks:?}");
+    assert!(marks.contains(&d("2026-07-01")),
+            "and rule B's inference survives the overlap too: the daily field \
+             answered on 07-07 and was silent on 07-01: {marks:?}");
+}
+
+/// Review finding: the cells-map exclusion had no test -- deleting it left the
+/// suite green. Without it, ONE monthly NAV cell satisfies rule B's "this
+/// instrument answered elsewhere in the range" and fabricates a holiday on
+/// every silent weekday of a ranged run.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_periodic_cell_is_not_proof_that_the_daily_leg_answered() {
+    let pool = common::pool().await;
+    let fx = fixture(&pool, "PerCellB", "daily", 10).await;
+    let px = add_field(&pool, &fx, "PX_LAST", None, "history", "numeric").await;
+    let nav = add_field(&pool, &fx, "FUND_NET_ASSET_VAL", Some("monthly"),
+                        "history", "numeric").await;
+    let (ps, pe) = (d("2026-07-01"), d("2026-07-31"));
+
+    let req = FetchRequest {
+        run_id: fx.run,
+        assets: vec![asset_of(&fx, fx.instrument)],
+        fields: vec![
+            FetchField::daily_history(px, fx.class, "PX_LAST", "numeric"),
+            FetchField {
+                field_id: nav, asset_class_id: fx.class,
+                mnemonic: "FUND_NET_ASSET_VAL".into(), value_kind: "numeric".into(),
+                cadence: "monthly".into(), fetch_via: "history".into() },
+        ],
+        start: ps, end: pe,
+        periodic: vec![PeriodicLeg {
+            cadence: "monthly".into(), start: ps, end: pe,
+            instrument_ids: vec![fx.instrument], field_ids: vec![nav] }],
+    };
+    // The month's ONLY answer is the NAV print. The daily field said nothing at
+    // all, which is a `quality_no_response` question, not twenty-two holidays.
+    let out = FetchOutcome {
+        cells: vec![ObsCell { instrument_id: fx.instrument, field_id: nav,
+                              obs_date: pe, value: CellValue::Num(100.0) }],
+        problems: vec![],
+    };
+    let n = ingest::record_non_trading_days(&pool, &req, &out).await.unwrap();
+
+    assert_eq!(n, 0, "a monthly print is not proof the daily leg answered");
+    assert!(marks_of(&pool, fx.instrument).await.is_empty(),
+            "rule B must not infer a month of holidays from one NAV cell");
 }
