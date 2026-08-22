@@ -109,6 +109,81 @@ pub fn action_terms_hit_cost() -> i64 {
     ACTION_TERMS_FIELDS.len() as i64
 }
 
+// -------------------------------------------------- P11 11.8 identity sweep
+
+/// `hit_ledger.purpose` for the weekly identity sweep. Its own purpose, not
+/// `'lifecycle'`: the sweep is a standing weekly cost the budget screen has to
+/// be able to price separately from P6's event-driven questions.
+pub const IDENTITY_PURPOSE: &str = "identity";
+
+/// Sweep fields for `asset_class.identity_sweep = 'market_status'` (equities,
+/// funds). MARKET_STATUS is N/A outside equity-shaped classes (probe F5), which
+/// is exactly why the field sets are per class rather than one global list.
+pub const MARKET_STATUS_SWEEP_FIELDS: [&str; 2] = ["MARKET_STATUS", "INACTIVE_DATE"];
+
+/// Sweep fields for `'maturity'` (bonds). Deliberately NOT configurable onto a
+/// spot class: probe F5 measured EUR/XAU spot answering MATURITY with the
+/// rolling T+2 SETTLEMENT date, which would retire every FX pair two days after
+/// onboarding. The guard is the per-class field set plus the `'none'` default,
+/// not a date heuristic -- a heuristic would have to guess, and guessing here
+/// deletes series.
+pub const MATURITY_SWEEP_FIELDS: [&str; 3] = ["MATURITY", "CALLED_DT", "INACTIVE_DATE"];
+
+/// What one `identity_sweep` value asks Bloomberg for. An unknown value --
+/// including `'none'` -- asks nothing, so a class that has not opted in cannot
+/// reach the wire even if a caller forgets to filter it out.
+pub fn sweep_fields(sweep: &str) -> &'static [&'static str] {
+    match sweep {
+        "market_status" => &MARKET_STATUS_SWEEP_FIELDS,
+        "maturity" => &MATURITY_SWEEP_FIELDS,
+        _ => &[],
+    }
+}
+
+/// Securities x that sweep's fields, the standing per-security-field unit.
+pub fn identity_sweep_hit_cost(securities: usize, sweep: &str) -> i64 {
+    (securities * sweep_fields(sweep).len()) as i64
+}
+
+/// One security's sweep answer: only the fields that ACTUALLY came back.
+///
+/// Probe F9: `field_not_applicable` on any single sweep field is normal (an
+/// open-end fund has no INACTIVE_DATE), so an absent key is silence about that
+/// field and nothing more. An answer whose `fields` map is EMPTY is the
+/// anomaly -- the security said nothing at all -- and callers treat it as such.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SweepAnswer {
+    pub security: String,
+    /// Verbatim values, keyed by Bloomberg field mnemonic.
+    pub fields: std::collections::BTreeMap<String, String>,
+}
+
+/// Sweep answers off a reference response. A `securityError`, a
+/// `fieldException` and an absent key are all the same thing here: that field
+/// did not answer. The distinction the caller needs is per SECURITY (did
+/// anything answer at all), and that survives as an empty map.
+pub fn parse_sweep(raw: &serde_json::Value, sweep: &str) -> Vec<SweepAnswer> {
+    let wanted = sweep_fields(sweep);
+    each_security(raw)
+        .filter_map(|sd| {
+            let security = s(&sd["security"])?;
+            let f = sd.get("fieldData").cloned().unwrap_or(serde_json::json!({}));
+            let fields = wanted.iter()
+                .filter(|_| sd.get("securityError").is_none())
+                .filter_map(|name| {
+                    let v = f.get(*name)?;
+                    // A number is never one of these fields, but a date
+                    // arriving unquoted must not silently vanish.
+                    let text = s(v).or_else(|| (!v.is_null())
+                        .then(|| v.to_string()))?;
+                    Some(((*name).to_string(), text))
+                })
+                .collect();
+            Some(SweepAnswer { security, fields })
+        })
+        .collect()
+}
+
 pub const HIST_IDS_FIELD: &str = "HISTORICAL_IDS_TIME_RANGE";
 /// Overrides on HIST_IDS_FIELD, resolved from its own FieldInfoRequest (P0 §6.3).
 pub const HIST_IDS_ANCHOR: &str = "HISTORICAL_STARTING_IDENTIFIER";
@@ -233,6 +308,14 @@ pub trait MasterFetcher {
     fn action_terms(&self, action_id: &str)
         -> impl std::future::Future<
             Output = AppResult<Answered<Option<ActionTerms>>>> + Send;
+
+    /// P11 11.8: ONE batched ReferenceDataRequest over a class's active
+    /// instruments, asking `sweep_fields(sweep)`. The sweep MODE is passed
+    /// rather than a field list so the class -> fields mapping lives in exactly
+    /// one place, at the seam, where a caller cannot widen it.
+    fn identity_sweep(&self, securities: &[String], sweep: &str)
+        -> impl std::future::Future<
+            Output = AppResult<Answered<Vec<SweepAnswer>>>> + Send;
 }
 
 /// A corp-actions answer is tables AND problems: "Field not applicable to
@@ -595,6 +678,30 @@ impl MasterFetcher for BlpapiMasterFetcher<'_> {
         let parsed = parse_action_terms(&raw, action_id);
         Ok(Answered { parsed, raw })
     }
+
+    async fn identity_sweep(&self, securities: &[String], sweep: &str)
+        -> AppResult<Answered<Vec<SweepAnswer>>>
+    {
+        let fields = sweep_fields(sweep);
+        // A class that asks for nothing must not spend a request finding that
+        // out. `run_sweep` already filters 'none' out; this is the seam's own
+        // guarantee, which no future call site can forget.
+        if fields.is_empty() || securities.is_empty() {
+            return Ok(Answered { parsed: Vec::new(), raw: serde_json::json!([]) });
+        }
+        let resp = self.call(serde_json::json!({
+            "kind": "reference",
+            "securities": securities,
+            "fields": fields,
+            "obs_date": chrono::Local::now().date_naive().to_string(),
+            "raw": true,
+        })).await?;
+        self.charge(IDENTITY_PURPOSE,
+                    identity_sweep_hit_cost(securities.len(), sweep)).await;
+        let raw = resp["raw_messages"].clone();
+        let parsed = parse_sweep(&raw, sweep);
+        Ok(Answered { parsed, raw })
+    }
 }
 
 // ------------------------------------------------------------------ mock
@@ -616,6 +723,8 @@ pub struct MockMasterFetcher {
     pub ma_deals_problems: serde_json::Value,
     /// raw_messages keyed by action id; an absent key replays an empty reply.
     pub action_terms_raw: std::collections::HashMap<String, serde_json::Value>,
+    /// A raw_messages-shaped array for identity-sweep reference replies.
+    pub sweep_raw: serde_json::Value,
     /// Every call recorded, so a test can assert Bloomberg was NOT called.
     pub calls: std::sync::Mutex<Vec<String>>,
 }
@@ -632,6 +741,7 @@ impl Default for MockMasterFetcher {
             ma_deals_raw: serde_json::json!([]),
             ma_deals_problems: serde_json::json!([]),
             action_terms_raw: std::collections::HashMap::new(),
+            sweep_raw: serde_json::json!([]),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -718,6 +828,19 @@ impl MasterFetcher for MockMasterFetcher {
         let raw = self.action_terms_raw.get(action_id).cloned()
             .unwrap_or(serde_json::json!([]));
         Ok(Answered { parsed: parse_action_terms(&raw, action_id), raw })
+    }
+
+    async fn identity_sweep(&self, securities: &[String], sweep: &str)
+        -> AppResult<Answered<Vec<SweepAnswer>>>
+    {
+        // Same refusal as the live seam, so `call_count()` means the same
+        // thing in a test as a Bloomberg request does in production.
+        if sweep_fields(sweep).is_empty() || securities.is_empty() {
+            return Ok(Answered { parsed: Vec::new(), raw: serde_json::json!([]) });
+        }
+        self.record(&format!("identity_sweep:{sweep}:{}", securities.join(",")));
+        Ok(Answered { parsed: parse_sweep(&self.sweep_raw, sweep),
+                      raw: self.sweep_raw.clone() })
     }
 }
 
@@ -930,6 +1053,76 @@ mod tests {
         assert_eq!(ACTION_TERMS_FIELDS.len(), 6);
         assert!(!ACTION_TERMS_FIELDS.contains(&"CA_MA_PAYMENT_TYP"),
                 "localized field, never requested, never parsed");
+    }
+
+    /// The per-class field sets ARE the F5 guard, so they are pinned rather
+    /// than left to whatever a caller passes -- and `'none'` asks nothing,
+    /// which is what makes a spot class unreachable by construction.
+    #[test]
+    fn sweep_field_sets_are_per_class_and_none_asks_nothing() {
+        assert_eq!(sweep_fields("market_status"), ["MARKET_STATUS", "INACTIVE_DATE"]);
+        assert_eq!(sweep_fields("maturity"),
+                   ["MATURITY", "CALLED_DT", "INACTIVE_DATE"]);
+        assert!(sweep_fields("none").is_empty(),
+                "the default class setting must reach no wire at all");
+        assert!(sweep_fields("whatever").is_empty());
+        assert_eq!(identity_sweep_hit_cost(1, "maturity"), 3);
+        assert_eq!(identity_sweep_hit_cost(40, "market_status"), 80);
+        assert_eq!(identity_sweep_hit_cost(400, "none"), 0);
+        assert_eq!(identity_sweep_hit_cost(0, "maturity"), 0);
+        assert!(!MATURITY_SWEEP_FIELDS.contains(&"LAST_TRADEABLE_DT"),
+                "F5: generics roll; a rolling date must never drive retirement");
+    }
+
+    /// Probe F9's shape, verbatim: an open-end fund answers MARKET_STATUS and
+    /// reports INACTIVE_DATE as `field_not_applicable`. Only the fields that
+    /// answered come back; the security is still present, which is how the
+    /// caller tells "partly N/A" (normal) from "said nothing" (anomaly).
+    #[test]
+    fn a_sweep_answer_keeps_only_the_fields_that_returned() {
+        let raw = serde_json::json!([{"securityData": [
+            {"security": "HFHSELA LX Equity",
+             "fieldExceptions": [{"fieldId": "INACTIVE_DATE", "errorInfo": {
+                 "category": "BAD_FLD", "message": "Field not applicable to security"}}],
+             "fieldData": {"MARKET_STATUS": "ACTV"}},
+            {"security": "MUTE LN Equity",
+             "fieldExceptions": [{"fieldId": "MARKET_STATUS", "errorInfo": {}},
+                                 {"fieldId": "INACTIVE_DATE", "errorInfo": {}}],
+             "fieldData": {}},
+            {"security": "NOPE LN Equity",
+             "securityError": {"category": "BAD_SEC"},
+             "fieldData": {"MARKET_STATUS": "ACTV"}}]}]);
+        let out = parse_sweep(&raw, "market_status");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].fields.get("MARKET_STATUS").map(String::as_str), Some("ACTV"));
+        assert!(!out[0].fields.contains_key("INACTIVE_DATE"),
+                "a per-field N/A is an absent key, not a default");
+        assert!(out[1].fields.is_empty(), "all fields failed: the anomaly shape");
+        assert!(out[2].fields.is_empty(),
+                "a rejected security answers nothing, whatever fieldData holds");
+    }
+
+    /// The sweep only ever reads the fields its own mode asked for: a stray
+    /// field in the reply must not become evidence.
+    #[test]
+    fn a_sweep_reads_only_its_own_fields() {
+        let raw = serde_json::json!([{"securityData": [{
+            "security": "T 4 5/8 08/15/36 Govt", "fieldExceptions": [],
+            "fieldData": {"MATURITY": "2036-08-15", "MARKET_STATUS": "ACTV"}}]}]);
+        let out = parse_sweep(&raw, "maturity");
+        assert_eq!(out[0].fields.len(), 1);
+        assert_eq!(out[0].fields.get("MATURITY").map(String::as_str), Some("2036-08-15"));
+    }
+
+    /// A refused sweep must not reach the wire -- the same promise
+    /// `a_blank_anchor_is_refused_before_any_call_is_recorded` makes.
+    #[tokio::test]
+    async fn a_none_sweep_is_refused_before_any_call_is_recorded() {
+        let mock = MockMasterFetcher::default();
+        let secs = vec!["EURUSD Curncy".to_string()];
+        assert!(mock.identity_sweep(&secs, "none").await.unwrap().parsed.is_empty());
+        assert!(mock.identity_sweep(&[], "maturity").await.unwrap().parsed.is_empty());
+        assert_eq!(mock.call_count(), 0);
     }
 
     #[tokio::test]

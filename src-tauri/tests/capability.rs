@@ -347,6 +347,9 @@ impl MasterFetcher for NoMaDealsFetcher {
     async fn action_terms(&self, action_id: &str)
         -> AppResult<Answered<Option<ActionTerms>>>
     { self.0.action_terms(action_id).await }
+    async fn identity_sweep(&self, securities: &[String], sweep: &str)
+        -> AppResult<Answered<Vec<getbloomdata_lib::master_fetch::SweepAnswer>>>
+    { self.0.identity_sweep(securities, sweep).await }
 }
 
 /// One instrument in an `ma_capable = FALSE` class, stale since January --

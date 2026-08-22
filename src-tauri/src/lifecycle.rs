@@ -93,6 +93,23 @@ pub async fn stale_candidates(pool: &PgPool, today: NaiveDate)
         .fetch_all(pool).await?)
 }
 
+/// Is there a market_status answer on file inside the `RECHECK_DAYS`
+/// cooldown? The same NOT EXISTS `stale_candidates` applies, lifted out so a
+/// second finder of dead instruments -- P11's weekly identity sweep -- spends
+/// the investigation budget on the same schedule this one does instead of
+/// re-buying an `ma_deals` list every week for a name already investigated.
+pub async fn recently_checked(pool: &PgPool, instrument_id: i64, today: NaiveDate)
+    -> AppResult<bool>
+{
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM instrument_attr
+                         WHERE instrument_id = $1 AND attr = $4
+                           AND system_to = 'infinity'
+                           AND valid_from > $2::date - $3)")
+        .bind(instrument_id).bind(today).bind(RECHECK_DAYS).bind(MARKET_STATUS_ATTR)
+        .fetch_one(pool).await?)
+}
+
 /// The whole check: candidates -> batched MARKET_STATUS -> per-dead-name
 /// investigation. Per-instrument failures are isolated (stderr) so one
 /// name's bad day cannot hide another's merger, matching refresh_view.
@@ -132,7 +149,7 @@ pub async fn run_check<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
 /// The verbatim status becomes a bitemporal attr, like any other identity
 /// fact: what Bloomberg said, when it said it, corrected by close-and-insert
 /// if it ever changes.
-async fn record_status(pool: &PgPool, instrument_id: i64, status: &str,
+pub(crate) async fn record_status(pool: &PgPool, instrument_id: i64, status: &str,
                        today: NaiveDate) -> AppResult<()> {
     let mut tx = pool.begin().await?;
     // source 'bloomberg': the value is MARKET_STATUS verbatim, not a local
@@ -145,7 +162,15 @@ async fn record_status(pool: &PgPool, instrument_id: i64, status: &str,
     Ok(())
 }
 
-async fn investigate<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
+/// What happens to an instrument Bloomberg has declared dead: retire it, or
+/// look for the merger that absorbed it, per `asset_class.ma_capable`.
+///
+/// Public since P11 11.8: the weekly identity sweep finds dead paper on a
+/// different trigger (a matured MATURITY, a set INACTIVE_DATE) and must land
+/// in THIS routing, not a second copy of it. `status` is whatever the caller
+/// can say about why the instrument is dead -- it reaches the user in the
+/// issue text and nothing branches on it.
+pub async fn investigate<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
                                        instrument_id: i64, security: &str,
                                        status: &str, today: NaiveDate,
                                        summary: &mut LifecycleSummary)
@@ -356,7 +381,7 @@ async fn retire_path<F: MasterFetcher>(pool: &PgPool, fetcher: &F,
 /// Durable, queryable, idempotent on (instrument_id, code, detail) -- the
 /// same natural key the history module uses. stderr reaches nobody in a
 /// Tauri binary.
-async fn record_issue(pool: &PgPool, instrument_id: i64, code: &str,
+pub(crate) async fn record_issue(pool: &PgPool, instrument_id: i64, code: &str,
                       detail: &str, summary: &mut LifecycleSummary)
     -> AppResult<()>
 {

@@ -303,6 +303,13 @@ impl MasterFetcher for KeyedFetcher {
         Ok(Answered { parsed: None, raw: serde_json::json!([]) })
     }
 
+    async fn identity_sweep(&self, _securities: &[String], _sweep: &str)
+        -> AppResult<Answered<Vec<getbloomdata_lib::master_fetch::SweepAnswer>>>
+    {
+        self.record();
+        Ok(Answered { parsed: Vec::new(), raw: serde_json::json!([]) })
+    }
+
     async fn instrument_list(&self, _query: &str, _yellow_key_filter: Option<&str>,
                              _max_results: u32) -> AppResult<Answered<Vec<Candidate>>>
     {

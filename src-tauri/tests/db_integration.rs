@@ -848,7 +848,7 @@ async fn scheduler_skips_schedules_whose_view_is_retired() {
         .bind(view.id).execute(&pool).await.unwrap();
 
     let due = getbloomdata_lib::scheduler::due_schedules(&pool).await.unwrap();
-    assert!(!due.iter().any(|(_, vid, _, _, _)| *vid == view.id),
+    assert!(!due.iter().any(|(_, vid, ..)| *vid == view.id),
             "a retired view must not appear in the due list");
 }
 

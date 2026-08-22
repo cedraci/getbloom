@@ -89,6 +89,12 @@ impl MasterFetcher for TwoRowFetcher {
         Ok(Answered { parsed: None, raw: serde_json::json!([]) })
     }
 
+    async fn identity_sweep(&self, _securities: &[String], _sweep: &str)
+        -> AppResult<Answered<Vec<getbloomdata_lib::master_fetch::SweepAnswer>>>
+    {
+        Ok(Answered { parsed: Vec::new(), raw: serde_json::json!([]) })
+    }
+
     async fn instrument_list(&self, _q: &str, _yk: Option<&str>, _max: u32)
         -> AppResult<Answered<Vec<Candidate>>>
     {

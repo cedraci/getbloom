@@ -11,6 +11,7 @@ pub mod deletion;
 pub mod error;
 pub mod fetch;
 pub mod fields;
+pub mod identity;
 pub mod ingest;
 pub mod instrument;
 pub mod lifecycle;

@@ -93,6 +93,17 @@ pub fn iso_dow(d: NaiveDate) -> i16 {
     d.weekday().number_from_monday() as i16
 }
 
+/// Is a weekly slot due today? Both weekly slots -- `verify_dow`/
+/// `last_verified_on` and P11's `identity_dow`/`last_identity_on` -- ask
+/// exactly this question, so they ask it through one function and cannot
+/// drift: the configured ISO weekday, and not already done today.
+///
+/// `None` for the weekday is off, which is how `identity_dow` ships.
+pub fn weekly_slot_due(dow: Option<i16>, last_on: Option<NaiveDate>,
+                       today: NaiveDate) -> bool {
+    dow == Some(iso_dow(today)) && last_on.is_none_or(|d| d < today)
+}
+
 /// The verify run covers the trailing five weekdays: `end` plus four more
 /// weekdays back. One week of history is enough to catch the common
 /// restatement (yesterday's close corrected today) without pricing a
@@ -304,10 +315,13 @@ pub async fn missing_periods(pool: &PgPool, view_id: i64, today: NaiveDate,
 /// Schedules eligible to fire. A schedule is due only when BOTH it and its view
 /// are active -- retiring a view has to stop its scheduled runs, or "retire"
 /// would mean nothing for the one entity that drives collection.
-pub async fn due_schedules(pool: &PgPool)
-    -> AppResult<Vec<(i64, i64, Option<String>, Option<i16>, Option<NaiveDate>)>> {
+pub type DueSchedule = (i64, i64, Option<String>, Option<i16>, Option<NaiveDate>,
+                        Option<i16>, Option<NaiveDate>);
+
+pub async fn due_schedules(pool: &PgPool) -> AppResult<Vec<DueSchedule>> {
     Ok(sqlx::query_as(
-        "SELECT s.id, s.view_id, s.last_result, s.verify_dow, s.last_verified_on
+        "SELECT s.id, s.view_id, s.last_result, s.verify_dow, s.last_verified_on,
+                s.identity_dow, s.last_identity_on
          FROM schedule s JOIN view v ON v.id = s.view_id
          WHERE s.active AND v.active")
         .fetch_all(pool).await?)
@@ -321,7 +335,8 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
     }
     let schedules = due_schedules(pool).await?;
     let mut launched = Vec::new();
-    for (sid, view_id, last_result, verify_dow, last_verified_on) in schedules {
+    for (sid, view_id, last_result, verify_dow, last_verified_on,
+         identity_dow, last_identity_on) in schedules {
         // Isolate per-schedule errors: one schedule's failure never blocks the others
         let drawn = match ensure_draw(pool, sid, today).await {
             Ok(t) => t,
@@ -383,14 +398,23 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
             Err(e) => note = format!("gap backfill failed: {e}; "),
         }
 
+        // P11 11.8: the weekly identity sweep, riding this same drawn slot --
+        // one attempt, once a week, on `identity_dow`. It is not a run: it
+        // writes no observations and stands in for nothing, so it happens
+        // alongside the day's EOD/verify rather than instead of it. Isolated
+        // like the gap backfill above: a failed sweep is reported and the day
+        // proceeds.
+        if weekly_slot_due(identity_dow, last_identity_on, today) {
+            note += &run_identity_sweep(pool, cfg, sid, view_id, today).await;
+        }
+
         // Amendment A1 stands: the run targets the previous trading day.
         // On the schedule's verify day, the same slot instead re-reads the
         // trailing five weekdays (kind backfill, trigger scheduled) so an
         // upstream restatement is actually seen. Budget-blocked verifies
         // degrade to the normal one-day run rather than blocking the day.
         let obs_date = previous_weekday(today);
-        let want_verify = verify_dow == Some(iso_dow(today))
-            && last_verified_on.is_none_or(|d| d < today);
+        let want_verify = weekly_slot_due(verify_dow, last_verified_on, today);
         let result = if want_verify {
             match orchestrator::run_verify(pool, cfg, view_id,
                                            verify_window_start(obs_date), obs_date).await {
@@ -439,6 +463,57 @@ pub async fn tick(pool: &PgPool, cfg: &PipelineConfig,
         }
     }
     Ok(launched)
+}
+
+/// One view's weekly identity sweep, reported as the note fragment the
+/// schedule row carries (empty when there was nothing to say).
+///
+/// Never auto-confirms: anything above `BudgetLevel::Ok` skips the sweep and
+/// says so, exactly as `run_gap_backfill` does. A sweep is a week's worth of
+/// housekeeping -- next week is soon enough, and spending a user's confirmation
+/// budget unattended is the one thing the scheduler must not do.
+async fn run_identity_sweep(pool: &PgPool, cfg: &PipelineConfig, schedule_id: i64,
+                            view_id: i64, today: NaiveDate) -> String
+{
+    async fn stamp(pool: &PgPool, schedule_id: i64, today: NaiveDate) {
+        let _ = sqlx::query("UPDATE schedule SET last_identity_on = $2 WHERE id = $1")
+            .bind(schedule_id).bind(today).execute(pool).await;
+    }
+
+    let batches = match crate::identity::plan_sweep(pool, view_id).await {
+        Ok(b) => b,
+        Err(e) => return format!("identity sweep failed: {e}; "),
+    };
+    if batches.is_empty() {
+        // No class in this view opted in -- the default everywhere under
+        // migration 0014. The week's slot is spent, quietly and for free.
+        stamp(pool, schedule_id, today).await;
+        return String::new();
+    }
+    let estimated = crate::identity::sweep_estimate(&batches);
+    let today_total = match crate::budget::today_hits(pool).await {
+        Ok(n) => n,
+        Err(e) => return format!("identity sweep failed: {e}; "),
+    };
+    if crate::budget::check_level(estimated, today_total, cfg.soft_limit)
+        != crate::budget::BudgetLevel::Ok
+    {
+        // Deliberately NOT stamped: the sweep did not happen, so tomorrow's
+        // slot is not what should retry it -- next week's is, and leaving
+        // `last_identity_on` alone is what makes that true.
+        return format!("identity sweep skipped ({estimated} est. hits needs \
+                        confirmation); ");
+    }
+
+    let fetcher = crate::master_fetch::BlpapiMasterFetcher { cfg, pool };
+    match crate::identity::run_batches(pool, &fetcher, &batches, today).await {
+        Ok(s) => {
+            stamp(pool, schedule_id, today).await;
+            format!("identity sweep: {} swept, {} triggered, {} anomalies; ",
+                    s.swept, s.triggered, s.anomalies)
+        }
+        Err(e) => format!("identity sweep failed: {e}; "),
+    }
 }
 
 pub fn missing_weekdays(present: &HashSet<NaiveDate>,
@@ -656,6 +731,23 @@ mod tests {
         assert!(is_weekend(NaiveDate::from_ymd_opt(2026, 8, 16).unwrap())); // Sun
         assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 14).unwrap())); // Fri
         assert!(!is_weekend(NaiveDate::from_ymd_opt(2026, 8, 17).unwrap())); // Mon
+    }
+
+    /// The slot both weekly jobs ride. `identity_dow` ships NULL, so the
+    /// off case is the one that must be unmistakable.
+    #[test]
+    fn a_weekly_slot_fires_on_its_weekday_and_only_once_that_day() {
+        let thu = NaiveDate::from_ymd_opt(2026, 8, 20).unwrap(); // iso_dow 4
+        assert!(!weekly_slot_due(None, None, thu), "NULL is off, however long ago");
+        assert!(weekly_slot_due(Some(4), None, thu), "never run, and today is the day");
+        assert!(!weekly_slot_due(Some(5), None, thu), "wrong weekday");
+        assert!(!weekly_slot_due(Some(4), Some(thu), thu),
+                "already done today -- a second heartbeat must not re-sweep");
+        assert!(weekly_slot_due(Some(4), Some(thu - Duration::days(7)), thu),
+                "last week's stamp does not cover this week");
+        // A stamp in the future (clock moved back) is not "due", by the same
+        // `< today` comparison verify has always used.
+        assert!(!weekly_slot_due(Some(4), Some(thu + Duration::days(1)), thu));
     }
 
     #[test]

@@ -11,8 +11,15 @@ use getbloomdata_lib::fetch::{
     PeriodicLeg, RequestSpec,
 };
 use getbloomdata_lib::instrument::store::{self, NewAlias};
+use getbloomdata_lib::master_fetch::{
+    ActionTerms, Answered, CorpActionsTables, HistIdRow, IdentityBlock, MaDealsOutcome,
+    MasterFetcher, MockMasterFetcher, SweepAnswer,
+};
 use getbloomdata_lib::orchestrator::{self, DataFetcher, PipelineConfig, RunOutcome};
-use getbloomdata_lib::{fetch, fields, ingest, quality, registry, scheduler, views};
+use getbloomdata_lib::resolution::score::Candidate;
+use getbloomdata_lib::{
+    fetch, fields, identity, ingest, master_fetch, quality, registry, scheduler, views,
+};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -1141,4 +1148,334 @@ async fn a_periodic_cell_is_not_proof_that_the_daily_leg_answered() {
     assert_eq!(n, 0, "a monthly print is not proof the daily leg answered");
     assert!(marks_of(&pool, fx.instrument).await.is_empty(),
             "rule B must not infer a month of holidays from one NAV cell");
+}
+
+// ===========================================================================
+// Task 6 -- 11.8 the weekly identity sweep. Fetch + dispatch only: the
+// retirement machinery itself is P9's (`lifecycle::retire_path` / the M&A
+// investigation, routed by `asset_class.ma_capable`), and these tests assert
+// that the sweep *reaches* it, not that it reimplements it.
+// ===========================================================================
+
+/// A `MasterFetcher` that replays canned sweep answers AND charges the ledger
+/// the way the live wire seam does.
+///
+/// `MockMasterFetcher` deliberately has no pool and records nothing (see
+/// `master_fetch`'s doc comment), which is what keeps every other test's
+/// ledger assertions honest -- so the sweep's `purpose = 'identity'` row is
+/// exercised here by a fake that repeats the seam's ONE line, using the same
+/// production constant and cost function `BlpapiMasterFetcher::identity_sweep`
+/// uses. What the fake stands in for is the transport, never the accounting.
+struct SweepFake {
+    inner: MockMasterFetcher,
+    pool: sqlx::PgPool,
+}
+
+impl SweepFake {
+    fn new(pool: &sqlx::PgPool, sweep_raw: serde_json::Value) -> Self {
+        Self {
+            inner: MockMasterFetcher { sweep_raw, ..Default::default() },
+            pool: pool.clone(),
+        }
+    }
+    fn call_count(&self) -> usize { self.inner.call_count() }
+    /// Calls whose recorded name starts with `prefix` -- the sweep's own
+    /// requests are `identity_sweep:*`, while the P9 lifecycle the sweep hands
+    /// off to makes its own (`hist_ids:*`, `ma_deals:*`) through the same fake.
+    fn calls_starting(&self, prefix: &str) -> usize {
+        self.inner.calls.lock().unwrap().iter()
+            .filter(|c| c.starts_with(prefix)).count()
+    }
+}
+
+impl MasterFetcher for SweepFake {
+    async fn identity(&self, s: &[String]) -> AppResult<Answered<Vec<IdentityBlock>>> {
+        self.inner.identity(s).await
+    }
+    async fn hist_ids(&self, security: &str, anchor: &str, start: NaiveDate)
+        -> AppResult<Vec<HistIdRow>> {
+        self.inner.hist_ids(security, anchor, start).await
+    }
+    async fn instrument_list(&self, q: &str, yk: Option<&str>, max: u32)
+        -> AppResult<Answered<Vec<Candidate>>> {
+        self.inner.instrument_list(q, yk, max).await
+    }
+    async fn corp_actions(&self, s: &[String]) -> AppResult<Answered<CorpActionsTables>> {
+        self.inner.corp_actions(s).await
+    }
+    async fn market_status(&self, s: &[String])
+        -> AppResult<Answered<Vec<(String, String)>>> {
+        self.inner.market_status(s).await
+    }
+    async fn ma_deals(&self, s: &str) -> AppResult<Answered<MaDealsOutcome>> {
+        self.inner.ma_deals(s).await
+    }
+    async fn action_terms(&self, id: &str) -> AppResult<Answered<Option<ActionTerms>>> {
+        self.inner.action_terms(id).await
+    }
+    async fn identity_sweep(&self, securities: &[String], sweep: &str)
+        -> AppResult<Answered<Vec<SweepAnswer>>> {
+        let answered = self.inner.identity_sweep(securities, sweep).await?;
+        // Verbatim the seam's charge -- same purpose, same cost function.
+        getbloomdata_lib::budget::record_purpose_hits(
+            &self.pool, master_fetch::IDENTITY_PURPOSE,
+            master_fetch::identity_sweep_hit_cost(securities.len(), sweep)).await?;
+        Ok(answered)
+    }
+}
+
+fn dt(s: &str) -> NaiveDate { s.parse().unwrap() }
+
+/// One asset class, one view, N active book instruments with today-valid
+/// `bdp_security` aliases. Returns (view_id, class_id, [(instrument_id, security)]).
+async fn sweep_scaffold(pool: &sqlx::PgPool, stem: &str, sweep: &str,
+                        ma_capable: bool, labels: &[&str])
+    -> (i64, i64, Vec<(i64, String)>)
+{
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name, identity_sweep, ma_capable)
+         VALUES ($1,$2,$3) RETURNING id")
+        .bind(uniq(stem)).bind(sweep).bind(ma_capable)
+        .fetch_one(pool).await.unwrap();
+    let view: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq(&format!("{stem}View"))).fetch_one(pool).await.unwrap();
+    let mut out = Vec::new();
+    for label in labels {
+        let inst = store::create(pool).await.unwrap();
+        let iid = inst.instrument_id;
+        let sec = format!("{} Corp", uniq(&format!("{stem}{label}")));
+        let mut tx = pool.begin().await.unwrap();
+        store::insert_alias(&mut tx, iid, &NewAlias {
+            id_type: "bdp_security".into(), value: sec.clone(), exch_code: None,
+            valid_from: dt("2000-01-03"), valid_to: None, source: "user".into(),
+            bbg_action_id: None, anchoring_identifier: None,
+        }).await.unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                     VALUES ($1,$2,$3)")
+            .bind(iid).bind(class).bind(uniq(label)).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+            .bind(view).bind(iid).execute(pool).await.unwrap();
+        out.push((iid, sec));
+    }
+    (view, class, out)
+}
+
+/// A `kind: "reference"` reply, the shape `parse_reference_message` reads:
+/// `fields` come back in `fieldData`, `absent` arrive as `fieldExceptions`
+/// (probe F9's `field_not_applicable`).
+/// `(security, fields that answered, fields that came back N/A)`.
+type SweepRow<'a> = (&'a str, Vec<(&'a str, &'a str)>, Vec<&'a str>);
+
+fn sweep_reply(rows: &[SweepRow]) -> serde_json::Value {
+    let secs: Vec<serde_json::Value> = rows.iter().map(|(security, fields, absent)| {
+        let data: serde_json::Map<String, serde_json::Value> = fields.iter()
+            .map(|(k, v)| ((*k).to_string(), serde_json::json!(v))).collect();
+        let exceptions: Vec<serde_json::Value> = absent.iter().map(|f| serde_json::json!({
+            "fieldId": f,
+            "errorInfo": {"category": "BAD_FLD", "subcategory": "NOT_APPLICABLE_TO_REF_DATA",
+                          "message": "Field not applicable to security"}})).collect();
+        serde_json::json!({"security": security, "fieldExceptions": exceptions,
+                           "fieldData": data})
+    }).collect();
+    serde_json::json!([{"securityData": secs}])
+}
+
+async fn issue_codes(pool: &sqlx::PgPool, instrument_id: i64) -> Vec<String> {
+    sqlx::query_scalar("SELECT code FROM ingest_issue WHERE instrument_id = $1 ORDER BY code")
+        .bind(instrument_id).fetch_all(pool).await.unwrap()
+}
+
+/// (a) A matured bond retires. MATURITY came back dated yesterday, the class
+/// is `maturity`-swept and not `ma_capable`, so the sweep hands it to P9's
+/// `retire_path` -- and the wire seam charged `purpose = 'identity'`.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_matured_bond_reaches_the_retire_path_and_the_identity_ledger() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpMat", "maturity", false, &["Bond"]).await;
+    let (iid, sec) = members[0].clone();
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        (&sec, vec![("MATURITY", "2026-08-19")], vec!["CALLED_DT", "INACTIVE_DATE"])]));
+    let before_id: i64 = sqlx::query_scalar("SELECT coalesce(max(id),0) FROM hit_ledger")
+        .fetch_one(&pool).await.unwrap();
+
+    let summary = identity::run_sweep(&pool, &fake, view, today).await.unwrap();
+
+    assert_eq!(summary.swept, 1);
+    assert_eq!(summary.triggered, 1, "MATURITY yesterday is a retirement trigger");
+    assert_eq!(summary.anomalies, 0);
+    assert_eq!(fake.calls_starting("identity_sweep:"), 1,
+               "one batched ReferenceDataRequest for the class");
+    assert!(issue_codes(&pool, iid).await.iter().any(|c| c == "lifecycle_retired"),
+            "the sweep must route into P9's existing retire_path, not a new one");
+    assert_eq!(fake.calls_starting("hist_ids:"), 1,
+               "and it is genuinely P9's retire_path: the identifier-history \
+                refresh that path performs is what made this call");
+    assert_eq!(fake.calls_starting("ma_deals:"), 0,
+               "the class is not ma_capable, so no deal list is bought");
+
+    let (rows, hits): (i64, i64) = sqlx::query_as(
+        "SELECT count(*)::bigint, coalesce(sum(estimated_hits),0)::bigint
+           FROM hit_ledger WHERE id > $1 AND purpose = 'identity' AND run_id IS NULL")
+        .bind(before_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(rows, 1, "one request, one ledger row, charged at the seam");
+    assert_eq!(hits, 3, "1 security x the 3 maturity sweep fields");
+}
+
+/// (b) A class that opted out plans nothing -- and therefore reaches no wire.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_class_with_sweep_none_plans_no_request() {
+    let pool = common::pool().await;
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpNone", "none", true, &["Equity"]).await;
+    let (iid, sec) = members[0].clone();
+    // A reply that WOULD retire it, if anything ever asked.
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        (&sec, vec![("MARKET_STATUS", "ACQU")], vec![])]));
+
+    assert!(identity::plan_sweep(&pool, view).await.unwrap().is_empty());
+    let summary = identity::run_sweep(&pool, &fake, view, dt("2026-08-20")).await.unwrap();
+    assert_eq!(summary.batches, 0);
+    assert_eq!(fake.call_count(), 0, "'none' must never reach Bloomberg");
+    assert!(issue_codes(&pool, iid).await.is_empty());
+}
+
+/// (c) Probe F5's trap, guarded by construction: spot FX/metals report
+/// MATURITY as the rolling T+2 SETTLEMENT date. A class created without an
+/// explicit `identity_sweep` is `'none'`, so that date is never fetched and
+/// never read -- no date heuristic stands between the two.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_spot_shaped_class_defaults_to_no_sweep_so_t_plus_2_never_retires_it() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let class: i64 = sqlx::query_scalar(
+        "INSERT INTO asset_class (name) VALUES ($1) RETURNING id")
+        .bind(uniq("SwpSpot")).fetch_one(&pool).await.unwrap();
+    let sweep: String = sqlx::query_scalar(
+        "SELECT identity_sweep FROM asset_class WHERE id = $1")
+        .bind(class).fetch_one(&pool).await.unwrap();
+    assert_eq!(sweep, "none",
+        "F5: a spot class must never be maturity-swept; the default is the guard");
+
+    let view: i64 = sqlx::query_scalar("INSERT INTO view (name) VALUES ($1) RETURNING id")
+        .bind(uniq("SwpSpotView")).fetch_one(&pool).await.unwrap();
+    let inst = store::create(&pool).await.unwrap();
+    let sec = format!("{} Curncy", uniq("SwpSpotSec"));
+    let mut tx = pool.begin().await.unwrap();
+    store::insert_alias(&mut tx, inst.instrument_id, &NewAlias {
+        id_type: "bdp_security".into(), value: sec.clone(), exch_code: None,
+        valid_from: dt("2000-01-03"), valid_to: None, source: "user".into(),
+        bbg_action_id: None, anchoring_identifier: None }).await.unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("INSERT INTO book_entry (instrument_id, asset_class_id, label)
+                 VALUES ($1,$2,$3)")
+        .bind(inst.instrument_id).bind(class).bind(uniq("EURUSD"))
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO view_instrument (view_id, instrument_id) VALUES ($1,$2)")
+        .bind(view).bind(inst.instrument_id).execute(&pool).await.unwrap();
+
+    // T+2 settlement, exactly what a spot pair answers -- and it is in the
+    // FUTURE, so even a date heuristic would need this class never asked.
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        (&sec, vec![("MATURITY", "2026-08-24")], vec![])]));
+    let summary = identity::run_sweep(&pool, &fake, view, today).await.unwrap();
+
+    assert_eq!(summary.batches, 0);
+    assert_eq!(fake.call_count(), 0);
+    assert!(issue_codes(&pool, inst.instrument_id).await.is_empty(),
+            "an FX pair two days after onboarding must still be alive");
+}
+
+/// F9: `field_not_applicable` on SOME sweep fields is normal (open-end funds
+/// have no INACTIVE_DATE). The verdict is taken on whichever fields DID
+/// return -- for a fund, MARKET_STATUS alone.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn triggers_are_evaluated_on_the_fields_that_returned() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpF9", "market_status", false, &["Dead", "Live"]).await;
+    let (dead_id, dead_sec) = members[0].clone();
+    let (live_id, live_sec) = members[1].clone();
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        // Both funds: INACTIVE_DATE is not applicable. Normal, not an anomaly.
+        (&dead_sec, vec![("MARKET_STATUS", "ACQU")], vec!["INACTIVE_DATE"]),
+        (&live_sec, vec![("MARKET_STATUS", "ACTV")], vec!["INACTIVE_DATE"])]));
+
+    let summary = identity::run_sweep(&pool, &fake, view, today).await.unwrap();
+
+    assert_eq!(summary.swept, 2);
+    assert_eq!(summary.triggered, 1);
+    assert_eq!(summary.anomalies, 0,
+        "a per-field N/A is normal (F9), never an anomaly");
+    assert!(issue_codes(&pool, dead_id).await.iter().any(|c| c == "lifecycle_retired"));
+    assert!(issue_codes(&pool, live_id).await.is_empty(), "ACTV stays untouched");
+}
+
+/// F9's other half: a security where EVERY sweep field failed is an anomaly --
+/// logged, advisory, and the rest of the batch is still judged.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_security_with_no_answering_field_is_an_anomaly_and_the_sweep_continues() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpF9b", "market_status", false, &["Mute", "Dead"]).await;
+    let (mute_id, mute_sec) = members[0].clone();
+    let (dead_id, dead_sec) = members[1].clone();
+    let fake = SweepFake::new(&pool, sweep_reply(&[
+        (&mute_sec, vec![], vec!["MARKET_STATUS", "INACTIVE_DATE"]),
+        (&dead_sec, vec![("MARKET_STATUS", "ACQU"), ("INACTIVE_DATE", "2026-05-04")],
+         vec![])]));
+
+    let summary = identity::run_sweep(&pool, &fake, view, today).await.unwrap();
+
+    assert_eq!(summary.anomalies, 1);
+    assert_eq!(summary.triggered, 1, "one mute security must not silence the batch");
+    assert!(issue_codes(&pool, mute_id).await.iter().any(|c| c == "identity_sweep_no_answer"),
+            "all-fields-failed is advisory and durable, never a retirement");
+    assert!(!issue_codes(&pool, mute_id).await.iter().any(|c| c == "lifecycle_retired"),
+            "silence must never be read as death");
+    assert!(issue_codes(&pool, dead_id).await.iter().any(|c| c == "lifecycle_retired"));
+}
+
+/// The sweep runs every week; a dead name the user has not retired yet must
+/// not re-buy its investigation every week. P6's 30-day cooldown is the shared
+/// brake, and the sweep arms it by recording the verbatim MARKET_STATUS the
+/// same way P6's own check does.
+#[tokio::test]
+#[ignore = "requires postgres"]
+async fn a_second_sweep_inside_the_cooldown_does_not_re_investigate() {
+    let pool = common::pool().await;
+    let today = dt("2026-08-20");
+    let (view, _class, members) =
+        sweep_scaffold(&pool, "SwpCool", "market_status", false, &["Dead"]).await;
+    let (_iid, sec) = members[0].clone();
+    let reply = sweep_reply(&[(&sec, vec![("MARKET_STATUS", "ACQU")], vec![])]);
+
+    let first = SweepFake::new(&pool, reply.clone());
+    let s1 = identity::run_sweep(&pool, &first, view, today).await.unwrap();
+    assert_eq!(s1.triggered, 1);
+    assert_eq!(s1.cooldown_skipped, 0);
+    assert_eq!(first.calls_starting("hist_ids:"), 1, "the retire path ran");
+
+    // Same week, or any day inside RECHECK_DAYS: still triggered, still asked
+    // (the sweep is a batch, it costs nothing extra per name), but the
+    // investigation behind it is not bought a second time.
+    let second = SweepFake::new(&pool, reply);
+    let s2 = identity::run_sweep(&pool, &second,
+                                 view, today + chrono::Duration::days(7)).await.unwrap();
+    assert_eq!(s2.triggered, 1);
+    assert_eq!(s2.cooldown_skipped, 1);
+    assert_eq!(second.calls_starting("hist_ids:"), 0,
+               "a name already investigated this month is left alone");
+    assert_eq!(second.calls_starting("identity_sweep:"), 1,
+               "the sweep itself still asks -- the cooldown gates the dispatch, \
+                not the batched question");
 }
