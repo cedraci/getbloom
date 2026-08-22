@@ -64,6 +64,7 @@ sidecar test fixtures:
 | F6 | Individual govt bonds: coupon-style tickers do not resolve on this setup (even the real current 10Y "T 4 5/8 08/15/36 Govt" → invalid); CT10/GT10 generics and `/isin/US91282CRF04` resolve; `@BGN` is accepted — but **historical PX_LAST is NIL for every weekday, every addressing form** (8/8 days, including genuine trading days). This licence has no historical pricing entitlement for individual govvies. Today's Rules A/B would record all eight days as `non_trading_day` evidence, suppressing the gap forever: **an entitlement hole is indistinguishable from a holiday and produces zero alerts.** | Two design elements: `fetch_via = 'reference'` capability (11.2) so history is never requested where it cannot succeed, and the NIL-streak quality finding (11.6) so an all-NIL series screams instead of self-silencing. |
 | F7 | The **reference path returns live bond prices**: CT10 Govt PX_LAST=99.140625, PX_BID, YLD_YTM_MID=4.7349 all populated. | Individual bonds ARE collectable daily on this licence — via `kind: reference` snapshots, not history. They can never be backfilled (missed day = permanent hole, by entitlement, not by design). |
 | F8 | `//blp/instruments` SECURITY search returns nothing for treasury queries (govt securities need the unimplemented `govtListRequest`). | Bond onboarding guidance: enter `/isin/<ISIN>` or CT/GT generic tickers directly. `govtListRequest` is out of scope. |
+| F9 (fund probe, same day) | User-supplied fund tickers: `HFHSELA LX Equity` = Open-End Fund, EUR, ISIN LU1112771255, MARKET_STATUS=ACTV, **daily** NAV prints with NIL rows exactly on Luxembourg holidays; `DLVEEMEU Index` = daily-printing index (prints even on US holidays); bare `DLVEEMEU` invalid. **INACTIVE_DATE is field_not_applicable on open-end funds.** | Both onboard as plain daily instruments (live smoke targets, not cadence tests). The identity sweep must tolerate per-security `field_not_applicable` on any of its fields and trigger on whichever fields DID return (for funds: MARKET_STATUS alone). A true monthly-NAV series remains unverified. |
 
 ## 11.1 Cadence model (migration 0014)
 
@@ -259,12 +260,12 @@ of burning budget indefinitely.
 
 ## Open questions (resolve before or during implementation)
 
-1. **A real monthly-NAV fund ticker is still needed.** The user's probe set contained
-   no fund; monthly behaviour is verified on SPX MONTHLY (F3) but a real NAV
-   series' print-date pattern (mid-month publication lag? dated month-end or
-   publication day?) is unverified. The first fund onboarded must be watched for its
-   first two cycles, and `cadence_grace_days` tuned to its observed lag. Ask the
-   user for one fund + one SCPI ticker they actually hold.
+1. **A real monthly-NAV fund ticker is still needed.** The user supplied two fund/index
+   tickers on 2026-08-22 and both turned out DAILY (F9) — good smoke targets, but the
+   monthly print-date pattern (publication lag? dated month-end or publication day?)
+   remains unverified. Monthly cadence ships probe-verified on SPX MONTHLY (F3) only;
+   the first genuinely-monthly instrument onboarded must be watched for two cycles and
+   `cadence_grace_days` tuned to its observed lag.
 2. **Reference-snapshot timing for bonds** (11.2 caveat): if run-time snapshots
    prove too noisy vs closes, the fallback is scheduling the run later in the
    evening — a schedule-window question, not a code question.

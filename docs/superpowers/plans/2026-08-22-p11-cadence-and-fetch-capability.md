@@ -120,6 +120,7 @@
 **Interfaces:**
 - Per class with `identity_sweep != 'none'`: ONE batched ReferenceDataRequest over active instruments — `'market_status'` → MARKET_STATUS + INACTIVE_DATE; `'maturity'` → MATURITY + CALLED_DT + INACTIVE_DATE (field sets are probe-verified F5/F6; MARKET_STATUS is N/A outside equity-shaped classes, hence the per-class sets).
 - Triggers: `'market_status'`: status ≠ ACTV or INACTIVE_DATE set; `'maturity'`: any date ≤ today. Route into the EXISTING P9 lifecycle (`retire_path` / M&A investigation per `ma_capable`) — this task builds the fetch + dispatch, not new lifecycle.
+- **Per-field tolerance (spec F9):** `field_not_applicable` on any sweep field for a given security is normal (open-end funds lack INACTIVE_DATE); evaluate triggers on whichever fields returned, and only a security where ALL sweep fields fail is an anomaly (log-and-continue, advisory style).
 - Hits at the wire seam via `budget::record_purpose_hits(purpose='identity', run_id NULL)` — corp-actions precedent, no estimate leg, no double count.
 - Scheduler: never auto-confirms; sweep skipped (with note) when gate `!= Ok`; per-schedule isolation like every other tick branch.
 
@@ -146,7 +147,8 @@
 
 ## Post-wave live checks (need the Terminal, cannot be CI'd)
 
-- [ ] Onboard ONE real monthly-NAV fund (user supplies the ticker — spec Open Question 1) with `default_cadence='monthly'`; watch two publication cycles; tune `cadence_grace_days` to the observed lag.
+- [ ] Onboard `HFHSELA LX Equity` (daily-NAV fund, Lux holiday calendar — spec F9) and `DLVEEMEU Index` as daily instruments; confirm NIL evidence lands on Luxembourg holidays and the identity sweep tolerates the fund's missing INACTIVE_DATE.
+- [ ] Onboard ONE genuinely monthly-NAV instrument when the user finds one (spec Open Question 1) with `default_cadence='monthly'`; watch two publication cycles; tune `cadence_grace_days` to the observed lag.
 - [ ] Onboard CT10 Govt (or `/isin/US91282CRF04`) with `fetch_via='reference'` on the price fields and `identity_sweep='maturity'`; confirm daily snapshots land and no `non_trading_day` rows appear for it.
 - [ ] Confirm `nil_streak` fires by pointing one throwaway history-via field at the bond (the F6 condition reproduced deliberately), then remove it.
 - [ ] Watch the first scheduled identity sweep's ledger rows (purpose `'identity'`) and hit count.
