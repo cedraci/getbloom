@@ -75,6 +75,48 @@ pub fn estimate_backfill_hits(
     estimate_eod_hits(assets, fields) * weekdays_between(start, end)
 }
 
+/// P11 11.4: what ONE day of the **daily partition** costs -- every field a
+/// normal run actually requests, and nothing else. Periodic history fields are
+/// excluded because no run's own plan contains them (they ride the due-logic's
+/// legs, priced by `estimate_periodic_hits`); pricing them per weekday would
+/// have charged a monthly NAV ~21 phantom hits a day forever.
+///
+/// For a view with no periodic fields -- which is every view under migration
+/// 0014's defaults -- this is `estimate_eod_hits` to the digit.
+pub fn estimate_daily_hits(assets: &[FetchAsset], fields: &[FetchField]) -> i64 {
+    let daily: Vec<&FetchField> = fields.iter()
+        .filter(|f| !crate::fetch::is_periodic_history(f)).collect();
+    assets.iter().map(|a|
+        daily.iter().filter(|f| f.asset_class_id == a.asset_class_id).count() as i64
+    ).sum()
+}
+
+/// The ranged twin of `estimate_daily_hits`.
+pub fn estimate_daily_backfill_hits(
+    assets: &[FetchAsset], fields: &[FetchField], start: NaiveDate, end: NaiveDate,
+) -> i64 {
+    estimate_daily_hits(assets, fields) * weekdays_between(start, end)
+}
+
+/// What the run's periodic legs cost: securities x that class's leg fields x
+/// the number of period ends inside the leg's OWN range (F3: one row per ended
+/// period). This is the ~90%-fewer-hits claim in arithmetic.
+pub fn estimate_periodic_hits(
+    assets: &[FetchAsset], fields: &[FetchField], legs: &[crate::fetch::PeriodicLeg],
+) -> i64 {
+    legs.iter().map(|leg| {
+        let periods = periods_between(leg.start, leg.end, &leg.cadence);
+        let pairs: i64 = assets.iter()
+            .filter(|a| leg.instrument_ids.contains(&a.instrument_id))
+            .map(|a| fields.iter()
+                .filter(|f| f.asset_class_id == a.asset_class_id
+                         && leg.field_ids.contains(&f.field_id))
+                .count() as i64)
+            .sum();
+        pairs * periods
+    }).sum()
+}
+
 pub fn check_level(estimated: i64, today_total: i64, soft: i64) -> BudgetLevel {
     let projected = estimated + today_total;
     if projected > soft * 2 {

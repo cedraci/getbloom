@@ -460,6 +460,10 @@ pub struct GapRow {
     pub label: String,
     pub start: String,
     pub end: String,
+    /// P11 11.5: `Some("2026-07")` when the hole is a whole missing period
+    /// rather than a run of weekdays. The report renders the label instead of
+    /// a day range, which for a monthly series is the only honest shape.
+    pub period: Option<String>,
 }
 
 #[tauri::command]
@@ -469,7 +473,8 @@ pub async fn detect_view_gaps(state: State<'_, AppState>, view_id: i64)
     Ok(scheduler::detect_gaps(&state.pool, view_id, 30, today).await?
         .into_iter()
         .map(|g| GapRow { instrument_id: g.instrument_id, label: g.label,
-                          start: g.start.to_string(), end: g.end.to_string() })
+                          start: g.start.to_string(), end: g.end.to_string(),
+                          period: g.period })
         .collect())
 }
 

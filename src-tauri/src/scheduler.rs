@@ -105,6 +105,202 @@ pub fn verify_window_start(end: NaiveDate) -> NaiveDate {
     d
 }
 
+// ------------------------------------------------------- P11 11.4/11.5/11.7:
+// period arithmetic. Pure, so the whole cadence model is testable without a
+// database, and shared by the due-logic, the gap detector and the verify
+// window -- three callers that MUST agree on where a period starts and ends.
+
+/// How many completed periods the cadence machinery looks back: two.
+/// `GAP_LOOKBACK_DAYS` is meaningless at monthly scale (ten days does not
+/// reach one period), and an unbounded lookback would re-buy a fund's entire
+/// history the first time a print was late.
+pub const PERIOD_LOOKBACK: usize = 2;
+
+fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
+    let (y, m) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    NaiveDate::from_ymd_opt(y, m, 1)
+        .and_then(|d| d.pred_opt())
+        .expect("a month always has a last day")
+}
+
+/// The `[start, end]` of the period of `cadence` that CONTAINS `d`, or `None`
+/// for the cadences with no period structure (`daily`, `irregular`).
+///
+/// The ends match `budget::periods_between` exactly -- Friday for weekly, the
+/// last calendar day of the month for monthly, of Mar/Jun/Sep/Dec for
+/// quarterly -- because the same range is both planned here and priced there.
+/// Bloomberg dates the print on the period's last *trading* day, which is on
+/// or before the calendar end and therefore inside these bounds (probe F3).
+pub fn period_bounds(d: NaiveDate, cadence: &str) -> Option<(NaiveDate, NaiveDate)> {
+    match cadence.to_ascii_lowercase().as_str() {
+        "weekly" => {
+            let monday = d - Duration::days(d.weekday().num_days_from_monday() as i64);
+            Some((monday, monday + Duration::days(4)))
+        }
+        "monthly" => Some((
+            NaiveDate::from_ymd_opt(d.year(), d.month(), 1)?,
+            last_day_of_month(d.year(), d.month()),
+        )),
+        "quarterly" => {
+            let first_month = ((d.month() - 1) / 3) * 3 + 1;
+            Some((
+                NaiveDate::from_ymd_opt(d.year(), first_month, 1)?,
+                last_day_of_month(d.year(), first_month + 2),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The period immediately before the one starting at `start`.
+pub fn previous_period(start: NaiveDate, cadence: &str) -> Option<(NaiveDate, NaiveDate)> {
+    period_bounds(start - Duration::days(1), cadence)
+}
+
+/// The last `n` periods of `cadence` that have ENDED as of `today`, newest
+/// first. A period whose end is today is NOT yet ended: probe F3 says the
+/// print appears only after the period closes, so asking for it buys a row
+/// that does not exist.
+pub fn completed_periods(today: NaiveDate, cadence: &str, n: usize)
+    -> Vec<(NaiveDate, NaiveDate)> {
+    let Some((mut start, mut end)) = period_bounds(today, cadence) else {
+        return Vec::new();
+    };
+    if end >= today {
+        match previous_period(start, cadence) {
+            Some(p) => (start, end) = p,
+            None => return Vec::new(),
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        out.push((start, end));
+        match previous_period(start, cadence) {
+            Some(p) => (start, end) = p,
+            None => break,
+        }
+    }
+    out
+}
+
+/// How a period is named to a human: `2026-07`, `2026-Q3`, `2026-W31`.
+pub fn period_label(start: NaiveDate, cadence: &str) -> String {
+    match cadence.to_ascii_lowercase().as_str() {
+        "weekly" => format!("{}-W{:02}", start.iso_week().year(), start.iso_week().week()),
+        "quarterly" => format!("{}-Q{}", start.year(), (start.month() - 1) / 3 + 1),
+        _ => format!("{}-{:02}", start.year(), start.month()),
+    }
+}
+
+/// Is a period's missing print *anomalous* yet? Grace is calendar days after
+/// the period ends (`asset_class.cadence_grace_days`), and it gates FINDINGS
+/// only: for fetching, a period is askable the moment it ends.
+pub fn period_overdue(period_end: NaiveDate, grace_days: i64, today: NaiveDate) -> bool {
+    today > period_end + Duration::days(grace_days)
+}
+
+/// One (instrument, field, period) that should have a print and does not.
+///
+/// The single detection primitive behind three consumers: the due-logic
+/// (which fetches every miss, overdue or not), period-shaped gaps (the overdue
+/// ones), and P11 11.6's `publication_overdue` quality finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeriodMiss {
+    pub instrument_id: i64,
+    /// The instrument's book label, so a report can name it.
+    pub label: String,
+    pub asset_class_id: i64,
+    pub field_id: i64,
+    pub mnemonic: String,
+    /// Effective cadence, database spelling.
+    pub cadence: String,
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+    /// `2026-07` and friends -- what the UI shows instead of a fake day range.
+    pub period: String,
+    /// `today > end + asset_class.cadence_grace_days`.
+    pub overdue: bool,
+}
+
+/// Every completed period, inside the lookback, for which a view's periodic x
+/// history pairs have no current observation.
+///
+/// Members and fields come from `views::view_instruments` / `views::view_fields`,
+/// so a retired book entry, a pending resolution and an inactive field are all
+/// excluded here for the same reasons `detect_gaps` excludes them.
+pub async fn missing_periods(pool: &PgPool, view_id: i64, today: NaiveDate,
+                             lookback: usize) -> AppResult<Vec<PeriodMiss>> {
+    let members = crate::views::view_instruments(pool, view_id).await?;
+    if members.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fields = crate::views::view_fields(pool, view_id).await?;
+    // The periodic x history partition, spelled with the SAME predicate the
+    // planner uses -- `fetch::is_periodic_history` -- so "planned by the
+    // due-logic" and "gap-detected as a period" can never disagree.
+    let periodic: Vec<(&crate::fields::FieldDef, &str)> = fields.iter()
+        .filter(|vf| crate::fetch::is_periodic_history_parts(
+            &vf.def.value_kind, &vf.def.fetch_via, &vf.effective_cadence))
+        .map(|vf| (&vf.def, vf.effective_cadence.as_str()))
+        .collect();
+    if periodic.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let grace: Vec<(i64, i32)> =
+        sqlx::query_as("SELECT id, cadence_grace_days FROM asset_class")
+            .fetch_all(pool).await?;
+    let grace_of = |class_id: i64| grace.iter()
+        .find(|(id, _)| *id == class_id).map(|&(_, g)| g as i64).unwrap_or(0);
+
+    // Everything the lookback could possibly need, in one query.
+    let earliest = periodic.iter()
+        .filter_map(|(_, cad)| completed_periods(today, cad, lookback).last().map(|p| p.0))
+        .min();
+    let Some(earliest) = earliest else {
+        return Ok(Vec::new());
+    };
+    let instrument_ids: Vec<i64> = members.iter().map(|m| m.instrument_id).collect();
+    let field_ids: Vec<i64> = periodic.iter().map(|(f, _)| f.id).collect();
+    let prints: Vec<(i64, i64, NaiveDate)> = sqlx::query_as(
+        "SELECT instrument_id, field_id, obs_date FROM observation
+          WHERE instrument_id = ANY($1) AND field_id = ANY($2)
+            AND obs_date BETWEEN $3 AND $4
+            AND system_to = 'infinity'
+            AND layer = 'raw' AND granularity = 'eod'")
+        .bind(&instrument_ids).bind(&field_ids).bind(earliest).bind(today)
+        .fetch_all(pool).await?;
+
+    let mut out = Vec::new();
+    for m in &members {
+        for (def, cadence) in &periodic {
+            if def.asset_class_id != m.asset_class_id {
+                continue;
+            }
+            for (start, end) in completed_periods(today, cadence, lookback) {
+                let printed = prints.iter().any(|&(iid, fid, on)|
+                    iid == m.instrument_id && fid == def.id && on >= start && on <= end);
+                if printed {
+                    continue;
+                }
+                out.push(PeriodMiss {
+                    instrument_id: m.instrument_id,
+                    label: m.label.clone(),
+                    asset_class_id: m.asset_class_id,
+                    field_id: def.id,
+                    mnemonic: def.mnemonic.clone(),
+                    cadence: (*cadence).to_string(),
+                    start,
+                    end,
+                    period: period_label(start, cadence),
+                    overdue: period_overdue(end, grace_of(m.asset_class_id), today),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Schedules eligible to fire. A schedule is due only when BOTH it and its view
 /// are active -- retiring a view has to stop its scheduled runs, or "retire"
 /// would mean nothing for the one entity that drives collection.
@@ -294,6 +490,14 @@ pub struct Gap {
     pub label: String,
     pub start: NaiveDate,
     pub end: NaiveDate,
+    /// P11 11.5: `Some("2026-07")` on a **period-shaped** gap -- a periodic
+    /// series whose period ended, produced no print, and is past grace. Its
+    /// `start`/`end` are the period's real bounds, but the range is not a run
+    /// of missing weekdays and must never be backfilled as one: the due-logic
+    /// leg refetches it as a single ranged periodic request.
+    ///
+    /// `None` is the daily day-range gap, unchanged.
+    pub period: Option<String>,
 }
 
 /// Which weekdays each member of a view is missing, over the lookback window.
@@ -323,12 +527,23 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
     // an unfixable gap is noise that buries the fixable ones.
     let fields = crate::views::view_fields(pool, view_id).await?;
     let mut expected: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    // (Task 4 makes this cadence-dispatching; today it reads `def` where it
-    // used to read the row directly -- same fields, same behaviour.)
-    for f in fields.iter().map(|vf| &vf.def).filter(|f| f.value_kind != "text") {
-        *expected.entry(f.asset_class_id).or_insert(0) += 1;
+    // P11 11.5, THE fix: only **daily x history** non-text fields count toward
+    // a day's coverage. A monthly NAV is absent from every weekday by design,
+    // and a reference snapshot cannot be recovered for a past day at all; with
+    // either counted, every date in a mixed view stayed permanently uncovered
+    // and the scheduler re-bought the same window every single morning (the
+    // P10 final review's "permanently-partial days" defect, which one non-daily
+    // field turns from bounded into perpetual). The deliberate consequence: a
+    // date is never uncovered because of a field backfill could not supply.
+    for f in fields.iter().filter(|vf| vf.def.value_kind != "text"
+                                    && vf.def.fetch_via == "history"
+                                    && vf.effective_cadence == "daily") {
+        *expected.entry(f.def.asset_class_id).or_insert(0) += 1;
     }
 
+    // The count below must be drawn from exactly the same population as
+    // `expected`, or `have >= need` could be satisfied by a monthly print
+    // standing in for a missing daily close.
     let rows: Vec<(i64, NaiveDate, i64)> = sqlx::query_as(
         "SELECT o.instrument_id, o.obs_date, count(DISTINCT o.field_id)::bigint
            FROM observation o
@@ -336,6 +551,9 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
                                   AND vi.view_id = $1
            JOIN view_field vf ON vf.view_id = vi.view_id AND vf.field_id = o.field_id
            JOIN field_def fd ON fd.id = o.field_id AND fd.value_kind <> 'text'
+                            AND fd.fetch_via = 'history'
+           JOIN asset_class ac ON ac.id = fd.asset_class_id
+                              AND COALESCE(fd.cadence, ac.default_cadence) = 'daily'
           WHERE o.obs_date BETWEEN $2 AND $3
             AND o.system_to = 'infinity'
             AND o.layer = 'raw' AND o.granularity = 'eod'
@@ -368,8 +586,20 @@ pub async fn detect_gaps(pool: &PgPool, view_id: i64, lookback_days: i64,
         for (s, e) in group_ranges(&missing_weekdays(&present, start, end),
                                    orchestrator::BACKFILL_CAP_DAYS) {
             out.push(Gap { instrument_id: m.instrument_id, label: m.label.clone(),
-                           start: s, end: e });
+                           start: s, end: e, period: None });
         }
+    }
+
+    // P11 11.5, the second detection arm: a periodic series' gap is
+    // period-shaped. Grace is what makes it a gap rather than a fund simply
+    // being a few days late -- the missing print is *fetched* the moment the
+    // period ends (11.4), and only *reported* once it is anomalous.
+    for miss in missing_periods(pool, view_id, today, PERIOD_LOOKBACK).await? {
+        if !miss.overdue {
+            continue;
+        }
+        out.push(Gap { instrument_id: miss.instrument_id, label: miss.label,
+                       start: miss.start, end: miss.end, period: Some(miss.period) });
     }
     Ok(out)
 }
@@ -476,6 +706,88 @@ mod tests {
         let end = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();   // Wed
         let missing = missing_weekdays(&present, start, end);
         assert_eq!(missing, vec![NaiveDate::from_ymd_opt(2026, 8, 11).unwrap()]); // Tue only
+    }
+
+    // ------------------------------------------------- P11 period arithmetic
+
+    #[test]
+    fn period_bounds_match_the_ends_the_budget_charges() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // Monthly, including a leap February.
+        assert_eq!(period_bounds(d(2026, 8, 12), "monthly"),
+                   Some((d(2026, 8, 1), d(2026, 8, 31))));
+        assert_eq!(period_bounds(d(2024, 2, 5), "monthly"),
+                   Some((d(2024, 2, 1), d(2024, 2, 29))));
+        // Quarterly: the calendar quarter containing the day.
+        assert_eq!(period_bounds(d(2026, 8, 12), "quarterly"),
+                   Some((d(2026, 7, 1), d(2026, 9, 30))));
+        assert_eq!(period_bounds(d(2026, 12, 31), "quarterly"),
+                   Some((d(2026, 10, 1), d(2026, 12, 31))));
+        // Weekly ends on Friday, matching budget::periods_between's arm, and
+        // a weekend day belongs to the week that has just closed.
+        assert_eq!(period_bounds(d(2026, 8, 12), "weekly"),   // Wednesday
+                   Some((d(2026, 8, 10), d(2026, 8, 14))));
+        assert_eq!(period_bounds(d(2026, 8, 15), "weekly"),   // Saturday
+                   Some((d(2026, 8, 10), d(2026, 8, 14))));
+        // Structureless cadences have no periods at all.
+        assert_eq!(period_bounds(d(2026, 8, 12), "daily"), None);
+        assert_eq!(period_bounds(d(2026, 8, 12), "irregular"), None);
+        // Exactly one period end lives inside each of these ranges, or the
+        // due-logic and the budget would disagree about what a leg costs.
+        for cadence in ["weekly", "monthly", "quarterly"] {
+            let (s, e) = period_bounds(d(2026, 8, 12), cadence).unwrap();
+            assert_eq!(crate::budget::periods_between(s, e, cadence), 1, "{cadence}");
+        }
+    }
+
+    /// Probe F3: the print exists only AFTER the period ends. A period that
+    /// ends today has not ended yet -- asking for it buys a row that does not
+    /// exist, which is the one thing the cadence model must never do.
+    #[test]
+    fn completed_periods_exclude_the_period_still_running() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        assert_eq!(completed_periods(d(2026, 8, 12), "monthly", 2),
+                   vec![(d(2026, 7, 1), d(2026, 7, 31)),
+                        (d(2026, 6, 1), d(2026, 6, 30))]);
+        // The last day of August is still August.
+        assert_eq!(completed_periods(d(2026, 8, 31), "monthly", 1),
+                   vec![(d(2026, 7, 1), d(2026, 7, 31))]);
+        // ... and the first of September is not.
+        assert_eq!(completed_periods(d(2026, 9, 1), "monthly", 1),
+                   vec![(d(2026, 8, 1), d(2026, 8, 31))]);
+        // Year and quarter boundaries.
+        assert_eq!(completed_periods(d(2026, 1, 15), "monthly", 1),
+                   vec![(d(2025, 12, 1), d(2025, 12, 31))]);
+        assert_eq!(completed_periods(d(2026, 8, 12), "quarterly", 2),
+                   vec![(d(2026, 4, 1), d(2026, 6, 30)),
+                        (d(2026, 1, 1), d(2026, 3, 31))]);
+        // Saturday: the week that ended on Friday is complete.
+        assert_eq!(completed_periods(d(2026, 8, 15), "weekly", 1),
+                   vec![(d(2026, 8, 10), d(2026, 8, 14))]);
+        assert!(completed_periods(d(2026, 8, 12), "daily", 2).is_empty());
+    }
+
+    #[test]
+    fn period_labels_name_the_period_not_a_day_range() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        assert_eq!(period_label(d(2026, 7, 1), "monthly"), "2026-07");
+        assert_eq!(period_label(d(2026, 7, 1), "quarterly"), "2026-Q3");
+        assert_eq!(period_label(d(2026, 1, 1), "quarterly"), "2026-Q1");
+        assert_eq!(period_label(d(2026, 8, 10), "weekly"), "2026-W33");
+    }
+
+    /// Grace is calendar days after the period ends, and it is INCLUSIVE of
+    /// the boundary day: `today > end + grace`.
+    #[test]
+    fn grace_is_calendar_days_past_the_period_end() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let july_end = d(2026, 7, 31);
+        assert!(!period_overdue(july_end, 10, d(2026, 8, 5)));
+        assert!(!period_overdue(july_end, 10, d(2026, 8, 10)), "the boundary day itself");
+        assert!(period_overdue(july_end, 10, d(2026, 8, 11)));
+        // Zero grace: late the day after the period closes.
+        assert!(!period_overdue(july_end, 0, july_end));
+        assert!(period_overdue(july_end, 0, d(2026, 8, 1)));
     }
 
     #[test]

@@ -111,6 +111,7 @@ fn req_for(rid: i64, iid: i64, fid: i64, class: i64,
                                   bdp_security: "X US Equity".into() }],
         fields: vec![FetchField::daily_history(fid, class, "PX_LAST", "numeric")],
         start, end,
+        periodic: vec![],
     }
 }
 

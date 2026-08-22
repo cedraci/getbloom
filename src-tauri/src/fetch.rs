@@ -120,6 +120,45 @@ pub fn periodicity_for(cadence: &str) -> Option<&'static str> {
     }
 }
 
+/// The one predicate that says "this field is planned by the due-logic
+/// (P11 11.4), not by a run's own plan": a periodic field on the history wire
+/// path. Everything else -- daily, `irregular`, text, and anything
+/// `fetch_via = 'reference'` -- rides a normal run.
+///
+/// Exported because three places must agree on it exactly: `plan_requests`
+/// (which drops these from the daily history leg), `budget::estimate_daily_hits`
+/// (which must not price a leg the run will not send), and the due-logic
+/// planner (whose whole population this is). A private copy in any one of them
+/// is a silent budget or coverage drift waiting to happen.
+pub fn is_periodic_history(f: &FetchField) -> bool {
+    is_periodic_history_parts(&f.value_kind, &f.fetch_via, &f.cadence)
+}
+
+/// The same predicate spelled for callers holding a `field_def` row and a
+/// separately-resolved effective cadence (`views::ViewField`), rather than a
+/// planner-shaped `FetchField`.
+pub fn is_periodic_history_parts(value_kind: &str, fetch_via: &str, cadence: &str) -> bool {
+    value_kind != "text" && fetch_via != "reference" && periodicity_for(cadence).is_some()
+}
+
+/// P11 11.4: one periodic history leg riding a run -- the fields of ONE
+/// effective cadence, fetched over a whole number of **ended** periods (F3:
+/// an unfinished period has no row, so it is never in a leg's range).
+///
+/// A leg is deliberately light: it names ids, and the mnemonics and security
+/// strings are looked up in the request's own `fields`/`assets`. That keeps
+/// one source of truth for what a field is called on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeriodicLeg {
+    /// Effective cadence in **database** spelling (`monthly`); `periodicity_for`
+    /// maps it to the wire value.
+    pub cadence: String,
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+    pub instrument_ids: Vec<i64>,
+    pub field_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FetchRequest {
     pub run_id: i64,
@@ -128,6 +167,10 @@ pub struct FetchRequest {
     /// `start == end` for a daily EOD run (Amendment A1).
     pub start: NaiveDate,
     pub end: NaiveDate,
+    /// P11 11.4: periodic history legs riding this run, each with its OWN
+    /// date range (a period, not the run's `start..end`). Empty for every
+    /// pre-P11 caller, which is what keeps the daily path byte-identical.
+    pub periodic: Vec<PeriodicLeg>,
 }
 
 impl FetchRequest {
@@ -306,7 +349,7 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
             |f: &FetchField| f.value_kind == "text" || f.fetch_via == "reference";
         let hist: Vec<String> = class_fields
             .iter()
-            .filter(|f| !via_reference(f) && periodicity_for(&f.cadence).is_none())
+            .filter(|f| !via_reference(f) && !is_periodic_history(f))
             .map(|f| f.mnemonic.clone())
             .collect();
         let snapshot: Vec<String> = class_fields
@@ -348,7 +391,60 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
             }
         }
     }
+
+    // P11 11.4, the other half of the partition: the due-logic's periodic legs.
+    // Each carries its own range -- a whole number of ENDED periods -- which is
+    // why it cannot ride the loop above, whose range is the run's.
+    for leg in &req.periodic {
+        // A leg whose cadence has no wire periodicity would silently become a
+        // DAILY request over a whole month. R3 makes the periodicity the only
+        // marker of a periodic request, so a leg without one is not one.
+        let Some(wire) = periodicity_for(&leg.cadence) else {
+            return Err(AppError::Validation(format!(
+                "periodic leg has no wire periodicity for cadence '{}'", leg.cadence)));
+        };
+        if leg.start > leg.end {
+            return Err(AppError::Validation("periodic leg start after end".into()));
+        }
+        let mut by_class: BTreeMap<i64, Vec<&FetchAsset>> = BTreeMap::new();
+        for a in req.assets.iter().filter(|a| leg.instrument_ids.contains(&a.instrument_id)) {
+            by_class.entry(a.asset_class_id).or_default().push(a);
+        }
+        for (class_id, assets) in &by_class {
+            let mnemonics: Vec<String> = req
+                .fields
+                .iter()
+                .filter(|f| f.asset_class_id == *class_id && leg.field_ids.contains(&f.field_id))
+                .map(|f| f.mnemonic.clone())
+                .collect();
+            if mnemonics.is_empty() {
+                continue;
+            }
+            let securities: Vec<String> =
+                assets.iter().map(|a| a.bdp_security.clone()).collect();
+            for chunk in securities.chunks(MAX_SECURITIES_PER_REQUEST) {
+                out.push(RequestSpec {
+                    kind: "history",
+                    securities: chunk.to_vec(),
+                    fields: mnemonics.clone(),
+                    start: Some(compact(leg.start)),
+                    end: Some(compact(leg.end)),
+                    obs_date: None,
+                    overrides: Vec::new(),
+                    periodicity: Some(wire.to_string()),
+                });
+            }
+        }
+    }
     Ok(out)
+}
+
+/// A spec's own range, which for a periodic leg is NOT the run's. Returns
+/// `None` for a reference spec (no range) or an unparseable one.
+fn spec_range(s: &RequestSpec) -> Option<(NaiveDate, NaiveDate)> {
+    let start = NaiveDate::parse_from_str(s.start.as_deref()?, "%Y%m%d").ok()?;
+    let end = NaiveDate::parse_from_str(s.end.as_deref()?, "%Y%m%d").ok()?;
+    Some((start, end))
 }
 
 /// Hits actually dispatched to Bloomberg, computed from the planned wire
@@ -359,13 +455,18 @@ pub fn plan_requests(req: &FetchRequest) -> AppResult<Vec<RequestSpec>> {
 /// P11 11.4: a history request carrying a `periodicity` returns one row per
 /// *period*, not per weekday, so it is charged per period. A reference leg is
 /// one snapshot and stays x1.
+///
+/// The range is read off each spec, falling back to the run's `start`/`end`:
+/// a periodic leg's range is its period, not the run's day. For every spec the
+/// daily planner emits the two are the same, so the number does not move.
 pub fn dispatched_hits(specs: &[RequestSpec], start: NaiveDate, end: NaiveDate) -> i64 {
     specs.iter().map(|s| {
         let per_period = (s.securities.len() * s.fields.len()) as i64;
+        let (s0, e0) = spec_range(s).unwrap_or((start, end));
         let periods = if s.kind == "history" {
             match s.periodicity.as_deref() {
-                Some(p) => crate::budget::periods_between(start, end, p),
-                None => crate::budget::weekdays_between(start, end),
+                Some(p) => crate::budget::periods_between(s0, e0, p),
+                None => crate::budget::weekdays_between(s0, e0),
             }
         } else {
             1
@@ -548,6 +649,7 @@ mod tests {
             ],
             start,
             end,
+            periodic: Vec::new(),
         }
     }
 
@@ -760,6 +862,7 @@ mod tests {
             ],
             start: d(2026, 8, 17),
             end: d(2026, 8, 19),
+            periodic: Vec::new(),
         };
         let specs = plan_requests(&req).unwrap();
         assert_eq!(dispatched_hits(&specs, req.start, req.end), 6);
@@ -899,6 +1002,82 @@ mod tests {
         let daily = RequestSpec { periodicity: None, ..spec };
         assert_eq!(dispatched_hits(&[daily], start, end),
                    2 * crate::budget::weekdays_between(start, end));
+    }
+
+    /// 11.4: the due-logic's leg is the ONLY thing that plans a periodic
+    /// history field, and it plans it as one ranged request over the period,
+    /// carrying the wire periodicity (R3). The daily legs beside it are
+    /// untouched.
+    #[test]
+    fn a_periodic_leg_plans_one_ranged_request_beside_an_untouched_daily_plan() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.fields.push(FetchField {
+            field_id: 104, asset_class_id: 10, mnemonic: "FUND_NET_ASSET_VAL".into(),
+            value_kind: "numeric".into(), cadence: "monthly".into(),
+            fetch_via: "history".into() });
+        let baseline = plan_requests(&req).unwrap();
+
+        req.periodic.push(PeriodicLeg {
+            cadence: "monthly".into(),
+            start: d(2026, 7, 1), end: d(2026, 7, 31),
+            instrument_ids: vec![1, 2],
+            field_ids: vec![104],
+        });
+        let plan = plan_requests(&req).unwrap();
+        assert_eq!(plan.len(), baseline.len() + 1, "one leg, one extra request");
+        assert_eq!(&plan[..baseline.len()], &baseline[..],
+                   "the daily partition is byte-identical with a leg present");
+
+        let leg = plan.last().unwrap();
+        assert_eq!(leg.kind, "history");
+        assert_eq!(leg.periodicity.as_deref(), Some("MONTHLY"));
+        assert_eq!(leg.fields, vec!["FUND_NET_ASSET_VAL"]);
+        assert_eq!(leg.securities,
+                   vec!["AAPL US Equity", "/isin/FR0000121014 Equity"]);
+        assert_eq!((leg.start.as_deref(), leg.end.as_deref()),
+                   (Some("20260701"), Some("20260731")));
+        // One period in the leg's own range x 2 securities x 1 field -- the
+        // run's single-day range must not be what prices it.
+        assert_eq!(dispatched_hits(std::slice::from_ref(leg), req.start, req.end), 2);
+    }
+
+    /// A leg naming an instrument of another class plans nothing for it: the
+    /// mnemonics are class-scoped, exactly as the daily legs are.
+    #[test]
+    fn a_periodic_leg_never_asks_one_class_for_anothers_field() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.fields.push(FetchField {
+            field_id: 104, asset_class_id: 10, mnemonic: "FUND_NET_ASSET_VAL".into(),
+            value_kind: "numeric".into(), cadence: "monthly".into(),
+            fetch_via: "history".into() });
+        req.periodic.push(PeriodicLeg {
+            cadence: "monthly".into(),
+            start: d(2026, 7, 1), end: d(2026, 7, 31),
+            // instrument 3 is the Index class, which has no monthly field.
+            instrument_ids: vec![1, 3],
+            field_ids: vec![104],
+        });
+        let plan = plan_requests(&req).unwrap();
+        let legs: Vec<_> = plan.iter().filter(|r| r.periodicity.is_some()).collect();
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].securities, vec!["AAPL US Equity"]);
+    }
+
+    /// R3 again, from the other side: a leg whose cadence carries no wire
+    /// periodicity would become a DAILY request over a whole month -- a
+    /// 20-fold over-buy AND a lie to the evidence gate. It is refused.
+    #[test]
+    fn a_leg_without_a_wire_periodicity_is_refused_not_downgraded_to_daily() {
+        let day = d(2026, 8, 17);
+        let mut req = sample(day, day);
+        req.periodic.push(PeriodicLeg {
+            cadence: "irregular".into(),
+            start: d(2026, 7, 1), end: d(2026, 7, 31),
+            instrument_ids: vec![1], field_ids: vec![100],
+        });
+        assert!(plan_requests(&req).is_err());
     }
 
     #[test]

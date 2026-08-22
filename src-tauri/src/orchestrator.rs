@@ -8,7 +8,8 @@
 use crate::blp_driver;
 use crate::budget::{self, BudgetLevel};
 use crate::error::{AppError, AppResult};
-use crate::fetch::{self, FetchAsset, FetchField, FetchOutcome, FetchRequest, SidecarPayload};
+use crate::fetch::{self, FetchAsset, FetchField, FetchOutcome, FetchRequest, PeriodicLeg,
+                   SidecarPayload};
 use crate::ingest::{self, IngestSummary};
 use crate::views;
 use chrono::NaiveDate;
@@ -242,6 +243,7 @@ async fn execute<F: DataFetcher>(
     start: NaiveDate,
     end: NaiveDate,
     estimated: i64,
+    periodic: Vec<PeriodicLeg>,
 ) -> AppResult<RunOutcome> {
     let run_id: i64 = sqlx::query_scalar(
         "INSERT INTO run (view_id, kind, trigger_kind, status, estimated_hits)
@@ -265,8 +267,32 @@ async fn execute<F: DataFetcher>(
         fields: loaded.fields.clone(),
         start,
         end,
+        periodic,
     };
-    let result = fetcher.fetch(&req, Some(&audit)).await;
+
+    // P11 (controller ruling R6): a plan with no requests must never reach the
+    // sidecar -- `validate_payload` rejects an empty `requests` list with a
+    // misleading "payload has no 'requests'" error, and for an all-periodic
+    // view with nothing due that is the NORMAL mid-period state, not a
+    // transient one. A quiet day is a completed run that fetched nothing.
+    // Only an EMPTY plan short-circuits; a planning ERROR (no assets, no
+    // fields for a class) still travels to the fetcher exactly as before, so
+    // the failure is reported by the same code that always reported it.
+    let planned = fetch::plan_requests(&req);
+    let nothing_to_fetch = matches!(&planned, Ok(specs) if specs.is_empty());
+    // Whether this run asked Bloomberg anything about trading sessions. A
+    // planning error counts as "yes" so the pre-P11 path is bit-for-bit
+    // unchanged on every route that used to reach `record_non_trading_days`.
+    let daily_history_planned = match &planned {
+        Ok(specs) => specs.iter()
+            .any(|s| s.kind == "history" && s.periodicity.is_none()),
+        Err(_) => true,
+    };
+    let result = if nothing_to_fetch {
+        Ok(FetchOutcome::default())
+    } else {
+        fetcher.fetch(&req, Some(&audit)).await
+    };
 
     // Hits are recorded for every fetch attempt, even on failure -- Bloomberg
     // was asked. The ledger gets what was actually dispatched over the wire,
@@ -276,7 +302,7 @@ async fn execute<F: DataFetcher>(
     // itself separately at the wire seam in master_fetch.rs) -- charging the
     // gate estimate here double-counted corp actions. Losing this advisory
     // ledger row must not abort or mask the pipeline result.
-    let dispatched = fetch::plan_requests(&req)
+    let dispatched = planned
         .map(|specs| fetch::dispatched_hits(&specs, start, end))
         .unwrap_or(estimated);
     if let Err(e) = budget::record_hits(pool, run_id, dispatched).await {
@@ -293,8 +319,18 @@ async fn execute<F: DataFetcher>(
 
     // Advisory, like the hit ledger: losing a holiday mark must not fail a
     // run that already fetched its data.
-    if let Err(e) = ingest::record_non_trading_days(pool, &req, &outcome).await {
-        eprintln!("warning: non-trading-day recording failed for run {run_id}: {e}");
+    //
+    // Not called at all when this run asked for no DAILY history (R3: the
+    // daily spec is the history spec carrying no periodicity). A run that
+    // never asked about sessions learned nothing about them, and Rule B would
+    // otherwise read a MONTHLY row as proof that every weekday of the run's
+    // window was closed -- ~240 fake holidays a year for exactly the funds
+    // P11 exists to support. Task 5 gates this per field inside `ingest`;
+    // this is the narrow case the planner can settle on its own.
+    if daily_history_planned {
+        if let Err(e) = ingest::record_non_trading_days(pool, &req, &outcome).await {
+            eprintln!("warning: non-trading-day recording failed for run {run_id}: {e}");
+        }
     }
 
     set_status(pool, run_id, "ingesting").await?;
@@ -308,12 +344,20 @@ async fn execute<F: DataFetcher>(
 
     // P7 quality gate: judged against what the database now holds. Advisory
     // like its siblings -- a gate failure must not fail a run that ingested.
-    let quality_findings = match crate::quality::run_quality_gate(
-        pool, run_id, &req, &outcome).await {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("warning: quality gate failed for run {run_id}: {e}");
-            0
+    //
+    // Skipped when nothing was dispatched: `quality_no_response` means
+    // "requested in this run and Bloomberg answered neither way", and nothing
+    // was requested. Raising it would turn every quiet mid-period day into a
+    // 'partial' run with one finding per member (R6).
+    let quality_findings = if nothing_to_fetch {
+        0
+    } else {
+        match crate::quality::run_quality_gate(pool, run_id, &req, &outcome).await {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("warning: quality gate failed for run {run_id}: {e}");
+                0
+            }
         }
     };
 
@@ -433,6 +477,127 @@ pub async fn corp_actions_estimate(pool: &PgPool, view_id: i64) -> AppResult<i64
     Ok(crate::master_fetch::corp_actions_hit_cost(n as usize))
 }
 
+// ------------------------------------------------------ P11 11.4: fetch when due
+
+/// Has a periodic due-fetch already had its chance today?
+///
+/// Read off `run` rows, never memory, so a restart cannot buy the same period
+/// twice -- the gap-backfill idiom (kind / started_at::date), with two
+/// deliberate widenings:
+/// * **any status.** A run that failed still spent the attempt, exactly as
+///   `run_gap_backfill` rules for its own once-a-day cap. Otherwise an
+///   unfetchable period retries on every heartbeat for the rest of the day.
+/// * **any trigger.** A manual run spends it too: the leg it carried was a
+///   real request to Bloomberg whoever pressed the button.
+///
+/// `kind IN ('eod','verify')` mirrors `scheduler::already_ran_today` for the
+/// same reason it does: on a verify day the verify run IS the day's run, and
+/// its 2-completed-period re-read (11.7) already covers the due period.
+pub async fn periodic_attempted_today(pool: &PgPool, view_id: i64, today: NaiveDate)
+    -> AppResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM run
+          WHERE view_id = $1 AND kind IN ('eod','verify') AND started_at::date = $2")
+        .bind(view_id).bind(today).fetch_one(pool).await?;
+    Ok(n > 0)
+}
+
+/// The periodic history legs a run should carry today (spec 11.4).
+///
+/// One leg per (cadence, period) that some member is missing, so a request
+/// asks for exactly the periods that are absent -- never a widened range
+/// because a neighbour is missing more. Grace does NOT gate this: a
+/// period is *fetchable* the moment it ends (probe F3) and only becomes
+/// *anomalous* after grace, which is 11.5's and 11.6's business.
+///
+/// The 2-period lookback is what makes this the period gap's backfill as well:
+/// an overdue period reported by `detect_gaps` is refetched here, by the same
+/// code, with no second path to keep in step.
+pub async fn due_periodic_legs(pool: &PgPool, view_id: i64, today: NaiveDate)
+    -> AppResult<Vec<PeriodicLeg>> {
+    let misses = crate::scheduler::missing_periods(
+        pool, view_id, today, crate::scheduler::PERIOD_LOOKBACK).await?;
+    Ok(legs_from_misses(&misses))
+}
+
+/// Group misses into legs, keyed on (cadence, period).
+///
+/// One leg per period rather than one leg spanning every missing period: the
+/// hits are identical either way (a ranged periodic request is charged per
+/// period end inside it), but this way an instrument missing only July is
+/// never made to re-buy June because a neighbour is missing both. The asset
+/// class is not part of the key because `plan_requests` splits every leg by
+/// class regardless, and one field is never shared between two classes.
+///
+/// Newest period first, so a plan reads the way a human would write it.
+fn legs_from_misses(misses: &[crate::scheduler::PeriodMiss]) -> Vec<PeriodicLeg> {
+    let mut legs: Vec<PeriodicLeg> = Vec::new();
+    for m in misses {
+        match legs.iter_mut().find(|l|
+            l.cadence == m.cadence && l.start == m.start && l.end == m.end)
+        {
+            Some(l) => {
+                if !l.instrument_ids.contains(&m.instrument_id) {
+                    l.instrument_ids.push(m.instrument_id);
+                }
+                if !l.field_ids.contains(&m.field_id) {
+                    l.field_ids.push(m.field_id);
+                }
+            }
+            None => legs.push(PeriodicLeg {
+                cadence: m.cadence.clone(),
+                start: m.start,
+                end: m.end,
+                instrument_ids: vec![m.instrument_id],
+                field_ids: vec![m.field_id],
+            }),
+        }
+    }
+    legs.sort_by(|a, b| b.start.cmp(&a.start).then(a.cadence.cmp(&b.cadence)));
+    legs
+}
+
+/// 11.7: what the verify slot re-reads for periodic series -- the last TWO
+/// COMPLETED periods, one ranged request per (cadence, class), regardless of
+/// whether a print is already stored. That is the point: a NAV restatement
+/// lands as a `value_superseded` warn exactly like a price restatement, which
+/// is the single highest-value change here for PE/RE data quality.
+pub async fn verify_periodic_legs(pool: &PgPool, view_id: i64, today: NaiveDate)
+    -> AppResult<Vec<PeriodicLeg>> {
+    let members = views::view_instruments(pool, view_id).await?;
+    let fields = views::view_fields(pool, view_id).await?;
+    let mut legs: Vec<PeriodicLeg> = Vec::new();
+    for vf in fields.iter().filter(|vf| fetch::is_periodic_history_parts(
+        &vf.def.value_kind, &vf.def.fetch_via, &vf.effective_cadence))
+    {
+        let periods = crate::scheduler::completed_periods(
+            today, &vf.effective_cadence, crate::scheduler::PERIOD_LOOKBACK);
+        let (Some(newest), Some(oldest)) = (periods.first(), periods.last()) else {
+            continue;
+        };
+        let instruments: Vec<i64> = members.iter()
+            .filter(|m| m.asset_class_id == vf.def.asset_class_id)
+            .map(|m| m.instrument_id)
+            .collect();
+        if instruments.is_empty() {
+            continue;
+        }
+        match legs.iter_mut().find(|l| l.cadence == vf.effective_cadence
+                                    && l.start == oldest.0 && l.end == newest.1
+                                    && l.instrument_ids == instruments) {
+            Some(l) => l.field_ids.push(vf.def.id),
+            None => legs.push(PeriodicLeg {
+                cadence: vf.effective_cadence.clone(),
+                start: oldest.0,
+                end: newest.1,
+                instrument_ids: instruments,
+                field_ids: vec![vf.def.id],
+            }),
+        }
+    }
+    Ok(legs)
+}
+
 pub async fn run_eod_with<F: DataFetcher>(
     pool: &PgPool,
     cfg: &PipelineConfig,
@@ -443,8 +608,19 @@ pub async fn run_eod_with<F: DataFetcher>(
     confirmed: bool,
 ) -> AppResult<RunOutcome> {
     let loaded = load_view(pool, view_id, None).await?;
+    // P11 11.4: the day's own daily leg, plus any periodic series whose period
+    // has ended without a print. Due-ness is about NOW, not about the day the
+    // run targets, so it is asked of the real calendar -- the same clock
+    // `load_view` reads to pick today's security string.
+    let today = chrono::Local::now().date_naive();
+    let periodic = if periodic_attempted_today(pool, view_id, today).await? {
+        Vec::new()
+    } else {
+        due_periodic_legs(pool, view_id, today).await?
+    };
     // Prices + the corp-action leg that follows a completed run.
-    let estimated = budget::estimate_eod_hits(&loaded.assets, &loaded.fields)
+    let estimated = budget::estimate_daily_hits(&loaded.assets, &loaded.fields)
+        + budget::estimate_periodic_hits(&loaded.assets, &loaded.fields, &periodic)
         + corp_actions_estimate(pool, view_id).await?;
     let today_total = budget::today_hits(pool).await?;
     if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm
@@ -453,7 +629,7 @@ pub async fn run_eod_with<F: DataFetcher>(
         return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
     }
     execute(pool, cfg, fetcher, &loaded, view_id, "eod", trigger,
-            obs_date, obs_date, estimated).await
+            obs_date, obs_date, estimated, periodic).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -502,7 +678,7 @@ pub async fn run_backfill_with<F: DataFetcher>(
         return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
     }
     execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "manual",
-            start, end, estimated).await
+            start, end, estimated, Vec::new()).await
 }
 
 /// Load a view -- optionally narrowed to one instrument -- and price its PRICE
@@ -514,7 +690,12 @@ pub async fn run_backfill_with<F: DataFetcher>(
 async fn plan_backfill(pool: &PgPool, view_id: i64, only: Option<&[i64]>,
                        start: NaiveDate, end: NaiveDate) -> AppResult<(Loaded, i64)> {
     let loaded = load_view(pool, view_id, only).await?;
-    let price = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end);
+    // P11 11.4: priced over the DAILY partition only -- a ranged backfill
+    // requests nothing else (`plan_requests`), so charging a monthly NAV per
+    // weekday would price ~21 hits nobody ever spends. Identical arithmetic
+    // for a view with no periodic fields, which is every view by default.
+    let price = budget::estimate_daily_backfill_hits(
+        &loaded.assets, &loaded.fields, start, end);
     Ok((loaded, price))
 }
 
@@ -586,8 +767,14 @@ async fn gap_backfill<F: DataFetcher>(
     // run is about to fetch. Without that horizon, yesterday looks like a gap
     // every single morning and every morning pays to fill it twice.
     let eod_target = crate::scheduler::previous_weekday(today);
-    let gaps = crate::scheduler::detect_gaps(
-        pool, view_id, crate::scheduler::GAP_LOOKBACK_DAYS, eod_target).await?;
+    // P11 11.5: period-shaped gaps are dropped here on purpose. Their range is
+    // a period, not a run of missing weekdays; handing one to `plan_backfill`
+    // would buy a whole month of DAILY history for a series that prints once.
+    // They are refetched by the due-logic leg riding the day's EOD run --
+    // `due_periodic_legs` uses the same 2-period lookback that reported them.
+    let gaps: Vec<crate::scheduler::Gap> = crate::scheduler::detect_gaps(
+        pool, view_id, crate::scheduler::GAP_LOOKBACK_DAYS, eod_target).await?
+        .into_iter().filter(|g| g.period.is_none()).collect();
     if gaps.is_empty() {
         return Ok((GapBackfillOutcome::Nothing, Vec::new()));
     }
@@ -627,7 +814,7 @@ async fn gap_backfill<F: DataFetcher>(
     for (g, loaded, price) in planned {
         if let RunOutcome::Completed { run_id, .. } =
             execute(pool, cfg, fetcher, &loaded, view_id, "backfill", "scheduled",
-                    g.start, g.end, price).await? {
+                    g.start, g.end, price, Vec::new()).await? {
             run_ids.push(run_id);
         }
         days += budget::weekdays_between(g.start, g.end) as u64;
@@ -668,15 +855,27 @@ pub async fn run_verify_with<F: DataFetcher>(
         return Err(AppError::Validation(format!(
             "verify range exceeds {BACKFILL_CAP_DAYS}-day cap")));
     }
-    let loaded = load_view(pool, view_id, None).await?;
-    let estimated = budget::estimate_backfill_hits(&loaded.assets, &loaded.fields, start, end)
+    let mut loaded = load_view(pool, view_id, None).await?;
+    // 11.7: reference-via and irregular fields leave the verify run entirely.
+    // A reference snapshot is the freshest obtainable truth and cannot re-read
+    // a past day; an irregular series has no period whose restatement could be
+    // checked. Both are dropped here rather than at the wire so the estimate
+    // stops pricing legs the verify was never going to send. For a view of
+    // plain daily fields -- every view under 0014's defaults -- this removes
+    // nothing and the run is bit-for-bit what it was.
+    loaded.fields.retain(|f| f.fetch_via != "reference" && f.cadence != "irregular");
+    let periodic = verify_periodic_legs(
+        pool, view_id, chrono::Local::now().date_naive()).await?;
+    let estimated = budget::estimate_daily_backfill_hits(
+            &loaded.assets, &loaded.fields, start, end)
+        + budget::estimate_periodic_hits(&loaded.assets, &loaded.fields, &periodic)
         + corp_actions_estimate(pool, view_id).await?;
     let today_total = budget::today_hits(pool).await?;
     if budget::check_level(estimated, today_total, cfg.soft_limit) == BudgetLevel::HardConfirm {
         return Ok(RunOutcome::NeedsConfirmation { estimated, today_total });
     }
     execute(pool, cfg, fetcher, &loaded, view_id, "verify", "scheduled",
-            start, end, estimated).await
+            start, end, estimated, periodic).await
 }
 
 #[cfg(test)]
@@ -726,7 +925,8 @@ mod tests {
             problems: vec![],
             fail: None,
         };
-        let req = FetchRequest { run_id: 1, assets: vec![], fields: vec![], start: d, end: d };
+        let req = FetchRequest { run_id: 1, assets: vec![], fields: vec![], start: d, end: d,
+                                 periodic: vec![] };
         let out = m.fetch(&req, None).await.unwrap();
         assert_eq!(out.cells.len(), 1);
 

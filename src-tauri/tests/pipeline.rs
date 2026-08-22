@@ -490,7 +490,7 @@ async fn a_dated_no_data_marks_a_non_trading_day_and_clears_the_gap() {
     let (iid, fid, vid, rid) = scaffold(&pool, "NTD1").await;
     let holiday = d("2026-08-18");
     let req = FetchRequest { run_id: rid, assets: vec![], fields: vec![],
-                             start: holiday, end: holiday };
+                             start: holiday, end: holiday, periodic: vec![] };
     let out = FetchOutcome {
         cells: vec![],
         problems: vec![getbloomdata_lib::fetch::CellProblem {
@@ -516,7 +516,7 @@ async fn an_invalid_security_day_is_not_recorded_as_non_trading() {
     let (iid, fid, _vid, rid) = scaffold(&pool, "NTD2").await;
     let day = d("2026-08-18");
     let req = FetchRequest { run_id: rid, assets: vec![], fields: vec![],
-                             start: day, end: day };
+                             start: day, end: day, periodic: vec![] };
     let out = FetchOutcome {
         cells: vec![],
         problems: vec![
@@ -542,7 +542,7 @@ async fn a_silent_weekday_inside_a_range_with_neighbours_is_non_trading() {
     let (iid, fid, _vid, rid) = scaffold(&pool, "NTD3").await;
     let (mon, tue, wed) = (d("2026-08-17"), d("2026-08-18"), d("2026-08-19"));
     let req = FetchRequest { run_id: rid, assets: vec![], fields: vec![],
-                             start: mon, end: wed };
+                             start: mon, end: wed, periodic: vec![] };
     let cell = |dt| ObsCell { instrument_id: iid, field_id: fid, obs_date: dt,
                               value: CellValue::Num(1.0) };
     let out = FetchOutcome { cells: vec![cell(mon), cell(wed)], problems: vec![] };
