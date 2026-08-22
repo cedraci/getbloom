@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import unittest
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import blp_fetch  # noqa: E402
@@ -24,9 +25,21 @@ import blp_fetch  # noqa: E402
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "tests", "fixtures", "blpapi")
 
+# Live wire captures from the 2026-08-22 probe (spec F1/F6), committed
+# alongside the sidecar itself rather than under tests/fixtures/blpapi --
+# these are `--raw-out` captures used both as audit trail and as --replay
+# input, not synthetic canned structures.
+LIVE_FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "fixtures")
+
 
 def load(name):
     with open(os.path.join(FIXTURES, name), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def load_live(name):
+    with open(os.path.join(LIVE_FIXTURES, name), encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -152,6 +165,90 @@ class BuildRequestTests(unittest.TestCase):
         req = blp_fetch.build_request(None, _StubService(), spec)
         for flag in ADJUSTMENT_FLAGS:
             self.assertNotIn(flag, req.sets)
+
+
+class PeriodicityRequestTests(unittest.TestCase):
+    """Spec 11.3 / probe F3: periodicity passes through to the wire, and the
+    NIL-fill pair is set only when the effective periodicity is DAILY (F3:
+    the fill options are accepted but inert under MONTHLY, so setting them
+    only for DAILY keeps the contract explicit). Rust does not send
+    "periodicity" yet (Task 3) -- absent key must reproduce today's exact
+    request, byte-comparable.
+    """
+
+    def test_no_periodicity_key_defaults_to_daily_with_nil_pair_set(self):
+        spec = {"kind": "history", "securities": ["AAPL US Equity"], "fields": ["PX_LAST"],
+                "start": "20260801", "end": "20260801"}
+        req = blp_fetch.build_request(None, _StubService(), spec)
+        self.assertEqual(req.sets["periodicitySelection"], "DAILY")
+        self.assertEqual(req.sets["nonTradingDayFillOption"], "NON_TRADING_WEEKDAYS")
+        self.assertEqual(req.sets["nonTradingDayFillMethod"], "NIL_VALUE")
+
+    def test_explicit_daily_periodicity_also_sets_nil_pair(self):
+        spec = {"kind": "history", "securities": ["AAPL US Equity"], "fields": ["PX_LAST"],
+                "start": "20260801", "end": "20260801", "periodicity": "DAILY"}
+        req = blp_fetch.build_request(None, _StubService(), spec)
+        self.assertEqual(req.sets["periodicitySelection"], "DAILY")
+        self.assertEqual(req.sets["nonTradingDayFillOption"], "NON_TRADING_WEEKDAYS")
+        self.assertEqual(req.sets["nonTradingDayFillMethod"], "NIL_VALUE")
+
+    def test_monthly_periodicity_sets_selection_and_omits_nil_pair(self):
+        spec = {"kind": "history", "securities": ["SPX Index"], "fields": ["PX_LAST"],
+                "start": "20260101", "end": "20260831", "periodicity": "MONTHLY"}
+        req = blp_fetch.build_request(None, _StubService(), spec)
+        self.assertEqual(req.sets["periodicitySelection"], "MONTHLY")
+        self.assertNotIn("nonTradingDayFillOption", req.sets)
+        self.assertNotIn("nonTradingDayFillMethod", req.sets)
+
+    def test_monthly_periodicity_still_sets_adjustment_flags(self):
+        # Adjustment-flag block is unchanged for all periodicities (spec 11.3).
+        spec = {"kind": "history", "securities": ["SPX Index"], "fields": ["PX_LAST"],
+                "start": "20260101", "end": "20260831", "periodicity": "MONTHLY"}
+        req = blp_fetch.build_request(None, _StubService(), spec)
+        for flag in ADJUSTMENT_FLAGS:
+            self.assertIn(flag, req.sets)
+            self.assertIs(req.sets[flag], False)
+
+    def test_weekly_and_quarterly_also_omit_nil_pair(self):
+        for periodicity in ("WEEKLY", "QUARTERLY"):
+            spec = {"kind": "history", "securities": ["SPX Index"], "fields": ["PX_LAST"],
+                    "start": "20260101", "end": "20260831", "periodicity": periodicity}
+            req = blp_fetch.build_request(None, _StubService(), spec)
+            self.assertEqual(req.sets["periodicitySelection"], periodicity)
+            self.assertNotIn("nonTradingDayFillOption", req.sets)
+            self.assertNotIn("nonTradingDayFillMethod", req.sets)
+
+
+class PeriodicityValidationTests(unittest.TestCase):
+    """Bloomberg launders bad enum values into empty results, so an unknown
+    periodicity string must be a loud validation error naming the spec
+    index -- never silently accepted or defaulted.
+    """
+
+    def test_lowercase_periodicity_is_rejected(self):
+        errs = blp_fetch.validate_payload({"requests": [
+            {"kind": "history", "securities": ["A"], "fields": ["F"],
+             "start": "20260801", "end": "20260801", "periodicity": "weekly"}]})
+        self.assertTrue(any("requests[0]" in e and "periodicity" in e for e in errs), errs)
+
+    def test_garbage_periodicity_is_rejected(self):
+        errs = blp_fetch.validate_payload({"requests": [
+            {"kind": "history", "securities": ["A"], "fields": ["F"],
+             "start": "20260801", "end": "20260801", "periodicity": "FORTNIGHTLY"}]})
+        self.assertTrue(any("requests[0]" in e and "periodicity" in e for e in errs), errs)
+
+    def test_valid_periodicities_pass_validation(self):
+        for periodicity in ("DAILY", "WEEKLY", "MONTHLY", "QUARTERLY"):
+            errs = blp_fetch.validate_payload({"requests": [
+                {"kind": "history", "securities": ["A"], "fields": ["F"],
+                 "start": "20260801", "end": "20260801", "periodicity": periodicity}]})
+            self.assertEqual(errs, [], (periodicity, errs))
+
+    def test_absent_periodicity_key_passes_validation(self):
+        errs = blp_fetch.validate_payload({"requests": [
+            {"kind": "history", "securities": ["A"], "fields": ["F"],
+             "start": "20260801", "end": "20260801"}]})
+        self.assertEqual(errs, [])
 
 
 class RealEodTests(unittest.TestCase):
@@ -355,6 +452,51 @@ class NilFillTests(unittest.TestCase):
         self.assertEqual(probs, [{"security": "AAPL US Equity", "field": None,
                                   "date": "2026-08-17", "code": "no_data",
                                   "detail": "non-trading day (NIL fill)"}])
+
+
+class LiveWireFixtureTests(unittest.TestCase):
+    """Pinned live wire captures from the 2026-08-22 probe (spec F1/F6),
+    committed as `--raw-out` captures at src-tauri/scripts/fixtures/. These
+    are raw captures against today's DAILY + NIL-fill request (no
+    "periodicity" key), so they pin today's parsing behaviour unchanged by
+    this task and guard against any future regression to it.
+    """
+
+    def test_multiasset_nilfill_capture_reproduces_45_obs_4_problems(self):
+        # F1: SPX/AAPL/CL1 each NIL-fill on 2026-07-03 (US Independence Day
+        # observed); EUR/XAU print real values that day; the bad bond ticker
+        # is invalid_security. 45 observations total, 4 problems.
+        obs, probs, _bulk, _lst, fatal = blp_fetch.parse_capture(
+            load_live("live-2026-08-22-nilfill-multiasset-history.json"))
+        self.assertIsNone(fatal)
+        self.assertEqual(len(obs), 45)
+        self.assertEqual(len(probs), 4)
+
+        no_data = sorted((p["security"], p["date"]) for p in probs
+                         if p["code"] == "no_data")
+        self.assertEqual(no_data, [
+            ("AAPL UW Equity", "2026-07-03"),
+            ("CL1 Comdty", "2026-07-03"),
+            ("SPX Index", "2026-07-03"),
+        ])
+
+        invalid = [p for p in probs if p["code"] == "invalid_security"]
+        self.assertEqual(len(invalid), 1)
+        self.assertEqual(invalid[0]["security"], "T 2 3/8 05/15/31 Govt")
+
+    def test_bond_allnil_capture_reproduces_0_obs_25_problems(self):
+        # F6: individual govt bond tickers have no historical PX_LAST
+        # entitlement on this licence -- NIL for every weekday, every
+        # addressing form. 0 observations, 25 problems (24 no_data + 1
+        # invalid_security for the coupon-style ticker).
+        obs, probs, _bulk, _lst, fatal = blp_fetch.parse_capture(
+            load_live("live-2026-08-22-bond-allnil-history.json"))
+        self.assertIsNone(fatal)
+        self.assertEqual(obs, [])
+        self.assertEqual(len(probs), 25)
+        codes = Counter(p["code"] for p in probs)
+        self.assertEqual(codes["no_data"], 24)
+        self.assertEqual(codes["invalid_security"], 1)
 
 
 class FatalTests(unittest.TestCase):

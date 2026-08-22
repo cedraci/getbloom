@@ -171,6 +171,13 @@ def validate_request_spec(spec, where="request"):
             errors.append(f"{where}: invalid end date {spec.get('end')!r}")
         if start and end and start > end:
             errors.append(f"{where}: start {start} after end {end}")
+        periodicity = spec.get("periodicity")
+        if periodicity is not None and periodicity not in (
+                "DAILY", "WEEKLY", "MONTHLY", "QUARTERLY"):
+            # Bloomberg launders bad enum values into empty results rather
+            # than an error, so a bad periodicity must be caught here loudly
+            # -- silent acceptance would look identical to a holiday.
+            errors.append(f"{where}: invalid periodicity {periodicity!r}")
     elif kind == "reference" and iso_date(spec.get("obs_date")) is None:
         errors.append(f"{where}: invalid obs_date {spec.get('obs_date')!r}")
     return errors
@@ -454,15 +461,20 @@ def build_request(blpapi, service, spec):
         r = service.createRequest("HistoricalDataRequest")
         r.set("startDate", spec["start"])
         r.set("endDate", spec["end"])
-        r.set("periodicitySelection", "DAILY")
-        # Holidays must come back as *explicit* rows carrying none of the
-        # requested field values, not as filled-forward values and not as
-        # silently omitted days -- that is what turns a holiday into direct
-        # evidence (a NIL-fill row parse_history_message can report) rather
-        # than silence indistinguishable from a gap the pipeline never asked
-        # about (Task 5, spec Open Question 1).
-        r.set("nonTradingDayFillOption", "NON_TRADING_WEEKDAYS")
-        r.set("nonTradingDayFillMethod", "NIL_VALUE")
+        periodicity = spec.get("periodicity") or "DAILY"
+        r.set("periodicitySelection", periodicity)
+        if periodicity == "DAILY":
+            # Holidays must come back as *explicit* rows carrying none of the
+            # requested field values, not as filled-forward values and not as
+            # silently omitted days -- that is what turns a holiday into direct
+            # evidence (a NIL-fill row parse_history_message can report) rather
+            # than silence indistinguishable from a gap the pipeline never asked
+            # about (Task 5, spec Open Question 1). Probe F3: this pair is
+            # accepted but inert under WEEKLY/MONTHLY/QUARTERLY (no partial
+            # in-period rows exist to NIL-fill), so it is only set for DAILY
+            # to keep the wire contract explicit (spec 11.3).
+            r.set("nonTradingDayFillOption", "NON_TRADING_WEEKDAYS")
+            r.set("nonTradingDayFillMethod", "NIL_VALUE")
         # P0 3.1: with none of these set, the values follow the Terminal's
         # DPDF<GO> setting -- a per-user preference that is not captured with the
         # data and can change between runs. AAPL closed 2020-08-28 at 499.23 with
